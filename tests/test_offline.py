@@ -16,7 +16,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from agent.knowledge import Card, CardLibrary, SymptomVocab
 from agent.llm import Ledger, SchemaViolation
-from agent.loop import CostAwareScheduler
+from agent.loop import CostAwareScheduler, TimeLedger
 from agent import roles, schemas
 
 
@@ -299,6 +299,59 @@ def test_已经试过的卡不会被再选(cards):
 
 
 # ────────────────── 记账 ──────────────────
+
+
+def test_耗时账本_没跑过就退回猜测值():
+    ledger = TimeLedger()
+    assert ledger.multiplier("类目兜底", 1.2) == 1.2          # 空账本
+    ledger.record("类目兜底", 300)
+    assert ledger.multiplier("类目兜底", 1.2) == 1.2          # 只有自己，没得比
+    assert ledger.multiplier("没跑过的卡", 2.0) == 2.0
+
+
+def test_耗时账本_实测倍数是相对全部运行的中位数():
+    ledger = TimeLedger()
+    ledger.record("类目兜底", 100)
+    ledger.record("ESMM", 300)
+    # 全部运行的中位耗时 = 200 → 类目兜底 0.5 倍，ESMM 1.5 倍
+    assert ledger.multiplier("类目兜底", 1.0) == pytest.approx(0.5)
+    assert ledger.multiplier("ESMM", 1.2) == pytest.approx(1.5)
+
+
+def test_耗时账本_坏输入不入账():
+    ledger = TimeLedger()
+    ledger.record("", 100)        # 自创方案没有 card_id
+    ledger.record("ESMM", 0.0)    # 假执行器的 0 耗时
+    ledger.record("ESMM", -5)
+    assert ledger.records == {}
+
+
+def test_调度器用实测耗时而不是军师的报价(cards):
+    """军师说两个方案一样快（倍数都报 1.0），但账本知道 ESMM 实测慢 6 倍。
+
+    实测倍数：ESMM = 600/350 ≈ 1.71，类目兜底 = 100/350 ≈ 0.29。
+    尽管 ESMM 的靠谱度更高（0.85 vs 0.60），实测成本一除就翻盘了。
+    """
+    ledger = TimeLedger()
+    ledger.record("ESMM", 600)
+    ledger.record("类目兜底", 100)
+
+    p_esmm = _proposal("ESMM", 0.003, "简单", 1.0)
+    p_fallback = _proposal("类目兜底", 0.003, "简单", 1.0)
+
+    有账本 = CostAwareScheduler(time_ledger=ledger)
+    没账本 = CostAwareScheduler()
+    assert 没账本.score(p_esmm, cards) > 没账本.score(p_fallback, cards)   # 只看报价：ESMM 靠谱度高，胜
+    assert 有账本.score(p_esmm, cards) < 有账本.score(p_fallback, cards)   # 看实测：ESMM 太慢，败
+
+
+def test_耗时账本_落盘再读回(tmp_path):
+    ledger = TimeLedger()
+    ledger.record("ESMM", 600)
+    path = tmp_path / "time_ledger.json"
+    ledger.dump(path)
+    assert TimeLedger.load(path).records == {"ESMM": [600.0]}
+    assert TimeLedger.load(tmp_path / "不存在.json").records == {}
 
 
 def test_按角色记账并估算花费():

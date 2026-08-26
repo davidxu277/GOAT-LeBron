@@ -17,7 +17,7 @@ import yaml
 
 from .knowledge import CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
-from .loop import CostAwareScheduler, FakeExecutor, run_round
+from .loop import CostAwareScheduler, FakeExecutor, TimeLedger, run_round
 from . import roles
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -133,6 +133,9 @@ def cmd_round(args) -> int:
 
     report = fixtures[args.name]["report"]
     llm = LLM()
+    # 耗时账本：实测倍数覆盖卡上拍的「训练时间倍数」（假执行器耗时为 0，不会记账）
+    ledger_path = ROOT / "logs" / "time_ledger.json"
+    time_ledger = TimeLedger.load(ledger_path)
     log = run_round(
         round_id=1,
         llm=llm,
@@ -142,11 +145,13 @@ def cmd_round(args) -> int:
         parent_result=report,
         # 假执行器直接回放同一份成绩单：链路能跑通即可，分数无意义
         executor=FakeExecutor(next_report=report),
-        scheduler=CostAwareScheduler(),
+        scheduler=CostAwareScheduler(time_ledger=time_ledger),
         module_interface=STUB_INTERFACE,
         example_module=STUB_EXAMPLE,
         current_config=STUB_CONFIG,
+        time_ledger=time_ledger,
     )
+    time_ledger.dump(ledger_path)
 
     print("\n【诊断】")
     _show(log.diagnosis)

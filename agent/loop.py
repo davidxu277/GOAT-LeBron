@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import statistics
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
@@ -57,6 +58,48 @@ class Scheduler(Protocol):
 # ────────────────────────────── 参考实现 ──────────────────────────────
 
 
+class TimeLedger:
+    """训练耗时记账 —— 实测倍数覆盖拍出来的「训练时间倍数」。
+
+    卡片上的倍数是人估的；一张卡真跑过一次之后，真实耗时就摆在那里，不用再猜。
+    倍数的分母用全部已记录运行的中位耗时 —— 自我校准，不需要人工指定基准配置。
+
+    只对确定性的资源消耗做记账（跑一次就可信）。效果类的数字（提升、靠谱度）
+    不归它管 —— 那些有噪声，得走复盘官那条路（见 docs/方法库进度.md 的交接说明）。
+    """
+
+    def __init__(self, records: dict[str, list[float]] | None = None):
+        self.records: dict[str, list[float]] = records or {}
+
+    def record(self, card_id: str, seconds: float) -> None:
+        if not card_id or seconds <= 0:
+            return
+        self.records.setdefault(card_id, []).append(float(seconds))
+
+    def multiplier(self, card_id: str, default: float) -> float:
+        """该卡的实测倍数。没跑过、或没有别的卡可对比时，退回给定的猜测值。"""
+        runs = self.records.get(card_id)
+        others = [s for cid, secs in self.records.items() if cid != card_id for s in secs]
+        if not runs or not others:
+            return default
+        all_secs = [s for secs in self.records.values() for s in secs]
+        return statistics.median(runs) / statistics.median(all_secs)
+
+    # ── 持久化：每轮结束后 dump 一次，重启不丢账 ──
+
+    def dump(self, path: pathlib.Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.records, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+    @classmethod
+    def load(cls, path: pathlib.Path) -> "TimeLedger":
+        if not path.exists():
+            return cls()
+        return cls(records=json.loads(path.read_text(encoding="utf-8")))
+
+
 class CostAwareScheduler:
     """成本感知调度器 —— 纯代码，不调用任何模型。
 
@@ -65,21 +108,29 @@ class CostAwareScheduler:
         性价比 = 预计提升 × 卡片靠谱度 ÷ 力气
         力气   = 代码难度 × 训练时间倍数
 
+    训练时间倍数优先用 TimeLedger 里的实测值；这张卡没跑过才用军师报的数。
     没被选中的方案存为备胎：工兵写不出代码时直接换，
     不用重新去问军师，省一次大模型调用。
     """
 
-    def __init__(self, tried_cards: set[str] | None = None):
+    def __init__(
+        self,
+        tried_cards: set[str] | None = None,
+        time_ledger: TimeLedger | None = None,
+    ):
         self.tried_cards = tried_cards or set()
+        self.time_ledger = time_ledger
 
     def score(self, proposal: dict[str, Any], cards: CardLibrary) -> float:
         gain = sum(max(0.0, v) for v in proposal["expected"].values())
         card = cards.get(proposal["card_id"]) if proposal["card_id"] else None
         prior = card.prior if card else 0.5     # 自创方案给中性先验
-        effort = (
-            DIFFICULTY.get(proposal["cost"]["代码难度"], 2.0)
-            * max(0.1, float(proposal["cost"]["训练时间倍数"]))
-        )
+
+        multiplier = max(0.1, float(proposal["cost"]["训练时间倍数"]))
+        if self.time_ledger is not None and proposal["card_id"]:
+            multiplier = max(0.1, self.time_ledger.multiplier(proposal["card_id"], multiplier))
+
+        effort = DIFFICULTY.get(proposal["cost"]["代码难度"], 2.0) * multiplier
         return gain * prior / effort
 
     def pick(
@@ -133,7 +184,8 @@ class RoundLog:
     recoveries: list[str] = field(default_factory=list)
     interventions: int = 0
     tokens: int = 0
-    seconds: float = 0.0
+    seconds: float = 0.0        # 整轮耗时（含 LLM 调用）
+    train_seconds: float = 0.0  # 其中训练耗时。逐轮累加就是交付物要求的 GPU 总时长
 
     def dump(self, path: pathlib.Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,6 +208,7 @@ def run_round(
     current_config: str,
     history_brief: list[dict[str, Any]] | None = None,
     budget_left: str = "一般",
+    time_ledger: TimeLedger | None = None,
 ) -> RoundLog:
     """跑完整的一轮：诊断 → 筛卡 → 提案 → 调度 → 实现 → 执行 → 复盘。"""
 
@@ -218,6 +271,10 @@ def run_round(
     # ── 执行：成员4 的地盘 ──
     result = executor.run(patch, fidelity)
     log.run_ok = result.ok
+    log.train_seconds = result.seconds
+    # 耗时记账：实测值覆盖拍出来的倍数，下一轮调度就用真数
+    if time_ledger is not None and result.ok and log.chosen.get("card_id"):
+        time_ledger.record(log.chosen["card_id"], result.seconds)
     if not result.ok:
         log.recoveries.append(f"执行失败：{result.error}")
         log.tokens = llm.ledger.total_tokens - tokens_before
