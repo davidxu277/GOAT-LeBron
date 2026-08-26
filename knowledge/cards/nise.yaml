@@ -1,0 +1,44 @@
+# 骨架由成员3 从 NISE 源码整理，成员2 补「怎么实现」
+#
+# ⚠️ 这张卡特殊：NISE 很可能**就是官方 baseline 本身**。
+#    如果是，实现它的 delta 是 0，这张卡只能拆开当零件用。
+#    见 docs/baseline笔记.md 第零节 Q2。
+
+编号: NISE
+名字: 未点击样本半监督 + 自适应任务权重
+
+治哪些毛病: [转化样本偏差, 两个任务打架]
+属于哪个环节: 损失函数
+
+为什么管用: |
+  两个动作合在一起。
+  第一，没点击的样本也拉进购买塔训练 —— 但没有真标签，
+  就拿模型自己当下的预测当标签。听起来像空转，实际效果是逼模型
+  在没标签的地方也把话说死（要么很确定买、要么很确定不买），
+  不许含糊。这样它就不会只在点击过的那一小撮样本上过日子。
+  第二，两个任务的权重不再手动定，而是每个 batch 按损失比例自动算，
+  哪个任务落后就多给它一点力气，并设一个上限防止跑偏。
+
+预计能提多少: {点击AUC: 0.0, 购买AUC: 0.0}
+要花多少力气: {代码难度: 中等, 训练时间倍数: 1.2}
+前提条件:
+  - ⚠️ 先确认官方 baseline 是不是 NISE。是的话这张卡作废，只能拆零件
+靠不靠谱: 0.5
+
+怎么实现: |
+  TODO 成员2 填。参考实现：NISE repo
+  torch-rechub/torch_rechub/models/multi_task/ucvrlc.py + mtl_trainer.py:269
+  核心四行：
+    loss_clicked   = BCE(cvr_pred, cvr_label, weight=click)
+    loss_unclicked = BCE(cvr_pred, cvr_pred,  weight=1-click)   # 自己当自己的标签
+    w = min(loss_ctr.item() / loss_cvr.item(), beta)            # beta 默认 50
+    loss = loss_ctr + w * (loss_clicked + loss_unclicked)
+  cvr_pred 必须先 clip 到 [1e-15, 1-1e-15]，否则 log 会炸。
+  beta 和 alpha 必须从配置读（R7），不许写死 50 和 1。
+
+  拆零件的话，两个动作可以单独用 —— NISE 论文自己的消融就是这么做的：
+  ablation_2 = 只要自适应权重，ablation_3 = 只要不含未点击样本的版本。
+
+出处: |
+  RecSys 2024《Utilizing Non-click Samples via Semi-supervised Learning
+  for Conversion Rate Prediction》。**很可能是本次比赛的官方 baseline**

@@ -1,0 +1,31 @@
+# 骨架由成员3 从 NISE 源码整理，成员2 补「怎么实现」
+
+编号: DCMT
+名字: 反事实双塔
+
+治哪些毛病: [转化样本偏差]
+属于哪个环节: 模型 + 损失函数
+
+为什么管用: |
+  没被点击的样本，我们不知道"点了会不会买"，通常只能丢掉。
+  这招不丢：额外造一个塔，专门学"这条样本如果没被点，那它不会买的概率"，
+  让没点击的样本也有活干。
+  再加一条约束：两个塔的输出加起来应该接近 1（要么买要么不买）。
+  这样正反两面的信息互相校正。
+
+预计能提多少: {点击AUC: 0.0, 购买AUC: 0.0}
+要花多少力气: {代码难度: 难, 训练时间倍数: 1.6}
+前提条件:
+  - 需先确认官方 baseline 不是 NISE（见 docs/baseline笔记.md 第零节 Q2）
+靠不靠谱: 0.5
+
+怎么实现: |
+  TODO 成员2 填。参考实现：NISE repo
+  torch-rechub/torch_rechub/models/multi_task/dcmt.py + mtl_trainer.py 的 DCMT 分支
+  注意：输出变成 4 个（cvr / 反事实cvr / ctr / ctcvr），
+  task_types 和日志列名都要跟着改（mlp_model.py:145）。
+  约束项权重 baseline 用的是 1e-3。
+
+出处: |
+  2022《DCMT: A Direct Entire-Space Causal Multi-Task Framework for
+  Post-Click Conversion Estimation》。NISE 论文的对照组之一

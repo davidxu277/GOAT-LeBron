@@ -74,7 +74,13 @@ def test_按病名筛卡片(cards):
 
 
 def test_筛卡片会排除已试过的(cards):
-    assert cards.match(["转化样本偏差"], exclude_ids={"ESMM"}) == []
+    """卡片库会一直长大，所以断言「被排除的那张不在结果里」，而不是断言结果为空。"""
+    命中 = [c.id for c in cards.match(["转化样本偏差"], limit=99)]
+    assert "ESMM" in 命中
+
+    排除后 = [c.id for c in cards.match(["转化样本偏差"], exclude_ids={"ESMM"}, limit=99)]
+    assert "ESMM" not in 排除后
+    assert set(排除后) == set(命中) - {"ESMM"}   # 只少了那一张，别的没被误伤
 
 
 # ────────────────── 医生：病名 enum 由词表生成 ──────────────────
