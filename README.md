@@ -55,9 +55,14 @@ config/                 ← 流水线配置（Agent 通过改这里来做实验�
 modules/                ← 可替换零件
   features/             ←   特征类
   models/               ←   模型类
-agent/                  ← Agent 大脑
-  prompts/              ←   四个角色的提示词
-  fixtures/             ←   假成绩单，用于离线调试提示词
+agent/                  ← Agent 大脑（成员3）
+  knowledge.py          ←   读词表与卡片；按病名筛卡片
+  schemas.py            ←   四个角色的输出结构
+  llm.py                ←   Claude 调用入口 + 按角色记账
+  roles.py              ←   医生 / 军师 / 工兵 / 复盘官
+  loop.py               ←   一轮循环 + 与成员4 的接口
+  prompts/              ←   四段提示词
+  fixtures/             ←   假成绩单，用于离线调试
 knowledge/              ← 方法知识库
   symptoms.yaml         ←   12 个病名（医生与卡片之间的"暗号"）
   卡片格式.md            ←   药方卡规范 + 样例
@@ -74,6 +79,7 @@ logs/                   ← 逐轮运行日志（内容不入库）
 | [knowledge/symptoms.yaml](knowledge/symptoms.yaml) | 12 个病名及判定规则 | 成员1、2、3 |
 | [knowledge/卡片格式.md](knowledge/卡片格式.md) | 药方卡的六个栏目 + 两张样例卡 | 成员2 |
 | [docs/四个角色接口.md](docs/四个角色接口.md) | 医生/军师/工兵/复盘官的输入输出 | 成员3、4 |
+| [agent/README.md](agent/README.md) | Agent 大脑怎么跑、怎么改 | 成员3、4 |
 
 ---
 
@@ -89,9 +95,27 @@ logs/                   ← 逐轮运行日志（内容不入库）
 
 ---
 
-## 环境与复现
+## 跑起来
 
-*（待补：安装步骤、数据下载与预处理命令、一键复现脚本）*
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# 不调用模型，零成本：检查病名词表和药方卡是否自洽
+.venv/bin/python -m agent.cli check
+
+# 离线测试
+.venv/bin/python -m pytest tests/ -q
+
+# 跑 Agent 大脑（需要凭据）
+export ANTHROPIC_API_KEY=sk-ant-...
+.venv/bin/python -m agent.cli doctor --all      # 5 份假成绩单对照标准答案
+.venv/bin/python -m agent.cli round 正常起步     # 用假执行器跑完整一轮
+```
+
+数据和模型都还没好也能开发 —— 假成绩单和假执行器让整条 Agent 链路今天就能跑通。
+详见 [agent/README.md](agent/README.md)。
+
+*（待补：数据下载与预处理命令、真实训练的一键复现脚本）*
 
 ## 局限性与改进方向
 
