@@ -26,7 +26,7 @@
 靠不靠谱: 0.5
 
 怎么实现: |
-  TODO 成员2 填。参考实现：NISE repo
+  参考实现：NISE repo
   torch-rechub/torch_rechub/models/multi_task/ucvrlc.py + mtl_trainer.py:269
   核心四行：
     loss_clicked   = BCE(cvr_pred, cvr_label, weight=click)
@@ -38,6 +38,22 @@
 
   拆零件的话，两个动作可以单独用 —— NISE 论文自己的消融就是这么做的：
   ablation_2 = 只要自适应权重，ablation_3 = 只要不含未点击样本的版本。
+  补充：
+    ⭐ 自训练那一项的直觉要说清楚（这是整招的关键）：
+    对没点击的样本，模型没有真标签，就拿它自己当前的预测当标签去拟合自己。
+    这不是空转 —— 数学上等价于最小化预测分布的熵，效果是逼模型在无标签区域
+    也给出确定的判断（要么很确定买、要么很确定不买），而不是一律输出 0.5。
+    副作用是它会强化模型已有的偏见，所以 beta 上限很重要，别让这一项主导训练。
+
+    实现顺序建议：先只加自适应权重（相当于 ablation_2）跑一轮，
+    再加未点击样本那一项，这样能分清两个动作各自的贡献。
+
+失败信号: |
+  · 购买塔的预测全部挤在 0 或 1 附近 —— 自训练那一项过头了（熵最小化过度），
+    调小 beta 上限，或给未点击样本那一项单独配一个更小的系数。
+  · 训练早期就发散 —— cvr_pred 没有 clip，log 炸了。
+  · delta 接近 0 —— 如果官方 baseline 就是 NISE，这是预期结果（见 Q2），
+    此时应该拆零件用（只取自适应权重、或只取自训练），而不是整招照搬。
 
 出处: |
   RecSys 2024《Utilizing Non-click Samples via Semi-supervised Learning

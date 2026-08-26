@@ -68,9 +68,14 @@ def test_缺少为什么管用的卡片直接报错(vocab, tmp_path):
 
 
 def test_按病名筛卡片(cards):
-    hits = cards.match(["冷门商品学不动"])
-    assert [c.id for c in hits] == ["类目兜底"]
-    assert cards.match(["训练太慢"]) == []
+    """同上：卡片库会一直长大，所以断言「对症的在、不对症的不在」，不锁死具体名单。"""
+    命中 = [c.id for c in cards.match(["冷门商品学不动"], limit=99)]
+    assert "类目兜底" in 命中
+    assert "ESMM" not in 命中          # ESMM 不治这个病，不该被筛出来
+
+    # 每一张被筛出来的卡，标签里都必须真的有这个病
+    for card in cards.match(["冷门商品学不动"], limit=99):
+        assert "冷门商品学不动" in card.treats
 
 
 def test_筛卡片会排除已试过的(cards):

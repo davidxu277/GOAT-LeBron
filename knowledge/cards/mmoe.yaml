@@ -22,9 +22,22 @@
 靠不靠谱: 0.5
 
 怎么实现: |
-  TODO 成员2 填。参考实现：NISE repo
+  参考实现：NISE repo
   torch-rechub/torch_rechub/models/multi_task/mmoe.py
   baseline 的参数：2 个专家，专家 dims=[80]，每个塔 dims=[40]
+  补充：
+    门控就是一个 softmax 线性层（输入是共享的 embedding 拼接，输出维度 = 专家数）。
+    专家个数、专家维度、塔维度全部从配置读（R7），不许照抄 baseline 的写死值。
+    ⭐ 公平比较纪律：换上 MMoE 时总参数量要和被替换的 shared-bottom 大致持平，
+    否则分不清提升来自"门控解耦"还是单纯"参数变多"。
+    建议记一个诊断量：每个任务的门控权重分布。两个任务的分布如果几乎一样，
+    说明门控没起作用，这招在这份数据上就是无效的。
+
+失败信号: |
+  · 参数量对齐后提升不到噪声带 —— 退回 shared-bottom，别在混合证据上采纳更复杂的结构。
+  · 两个任务的门控权重分布几乎重合 —— 门控没有起到解耦作用，
+    换梯度层面的方案（DTP / DWA / 不确定性加权）而不是继续堆专家。
+  · 购买 AUC 训练涨、验证跌 —— 专家参数太多而转化正样本太少，缩小专家维度。
 
 出处: |
   Google 2018《Modeling Task Relationships in Multi-task Learning with

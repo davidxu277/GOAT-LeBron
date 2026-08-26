@@ -19,11 +19,23 @@
 靠不靠谱: 0.5
 
 怎么实现: |
-  TODO 成员2 填。参考实现：NISE repo mtl_trainer.py:319
+  参考实现：NISE repo mtl_trainer.py:319
   权重 = -(1 - kappa) * log2(kappa)，kappa 是该任务的滑动平均 AUC。
   注意一个坑：单个 batch 里可能一个正样本都没有，算 AUC 会直接抛异常。
   baseline 的办法是**每 100 个 batch 才算一次**并更新权重。
   100 这个数和 alpha=0.5 都要进配置（R7）—— 论文没给 alpha，是实现者自己定的。
+  补充：
+    直觉：哪个任务当前表现差，就给它更大的权重 —— 用 AUC 本身衡量"表现好坏"。
+    kappa 用滑动平均而不是当前值，是为了抗单个 batch 的抖动。
+    ⭐ 那个"每 100 batch 才算一次"不只是省算力，更是为了避开
+    "batch 内没有正样本 → AUC 抛异常"这个坑（转化正样本千分位，这事很常发生）。
+    kappa 的初值建议设成 0.5（相当于随机猜），别设 0，否则第一次权重会爆。
+
+失败信号: |
+  · 训练中途抛 "Only one class present" —— 算 AUC 的那个 batch 里没有正样本，
+    确认"每 N 个 batch 才算一次"的逻辑生效，或改用更大的统计窗口。
+  · 权重在轮次之间剧烈震荡 —— 滑动平均的系数太小，加大平滑。
+  · 某个任务权重持续趋近 0 —— 它的 AUC 被误算了（比如一直是 0.5），先查指标计算。
 
 出处: |
   2018《Dynamic Task Prioritization for Multitask Learning》(ECCV)。

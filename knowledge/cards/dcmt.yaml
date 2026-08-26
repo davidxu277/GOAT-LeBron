@@ -20,11 +20,23 @@
 靠不靠谱: 0.5
 
 怎么实现: |
-  TODO 成员2 填。参考实现：NISE repo
+  参考实现：NISE repo
   torch-rechub/torch_rechub/models/multi_task/dcmt.py + mtl_trainer.py 的 DCMT 分支
   注意：输出变成 4 个（cvr / 反事实cvr / ctr / ctcvr），
   task_types 和日志列名都要跟着改（mlp_model.py:145）。
   约束项权重 baseline 用的是 1e-3。
+  补充：
+    核心思想：给购买塔配一个"反事实"孪生塔，一个学"点了会买"、
+    一个学"点了不会买"，两者相加应该等于 1 —— 用这个约束把没点击样本的信息也用上。
+    ⭐ 四个输出意味着 task_types、损失列表、日志列名三处都要同步改，
+    漏改日志列名会导致成绩单里的指标错位（这个坑很难查，因为不报错）。
+    约束项权重从配置读，baseline 用的 1e-3 是起点不是定论。
+
+失败信号: |
+  · 成绩单里的指标看起来错位（比如购买 AUC 突然和点击 AUC 一样）——
+    四个输出的日志列名没同步改，先查这个再看模型。
+  · 约束权重调大后主任务变差 —— 约束压制了排序能力，往小调。
+  · 四塔结构过拟合（训练验证差距变大）—— 参数量翻倍而正样本没变多，加正则或缩塔。
 
 出处: |
   2022《DCMT: A Direct Entire-Space Causal Multi-Task Framework for
