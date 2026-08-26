@@ -1,0 +1,41 @@
+# ── 数据：绝对不要提交，原始数据几十 GB ──
+data/
+*.csv
+*.parquet
+*.npy
+*.npz
+*.feather
+*.h5
+
+# ── 模型与产物 ──
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+submissions/
+
+# ── 运行产物（日志目录保留结构，内容不提交）──
+logs/*
+!logs/.gitkeep
+runs/
+experiments.db
+*.jsonl
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# ── 密钥：API key 绝对不要提交 ──
+.env
+.env.*
+*.key
+secrets.*
+
+# ── 系统 ──
+.DS_Store
+.idea/
+.vscode/
