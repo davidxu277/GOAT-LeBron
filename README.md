@@ -80,6 +80,7 @@ logs/                   ← 逐轮运行日志（内容不入库）
 | [knowledge/卡片格式.md](knowledge/卡片格式.md) | 药方卡的六个栏目 + 两张样例卡 | 成员2 |
 | [docs/四个角色接口.md](docs/四个角色接口.md) | 医生/军师/工兵/复盘官的输入输出 | 成员3、4 |
 | [agent/README.md](agent/README.md) | Agent 大脑怎么跑、怎么改 | 成员3、4 |
+| [docs/评审说明.md](docs/评审说明.md) | 现状、已知弱点、待决策的设计 | **reviewer 从这里开始** |
 
 ---
 
