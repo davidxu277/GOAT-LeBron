@@ -187,14 +187,16 @@ def _run_train_only(payload: dict, emit) -> None:
 def _run_agent(payload: dict, emit) -> None:
     """完整自主迭代 —— 四个角色的调用会自己发事件，控制台照单全收。"""
     import time
-    from agent.cli import INTERFACE_SPEC, PIPELINE_CONFIG, example_for, make_llm
+    import json as _json
+    from agent.cli import (INTERFACE_SPEC, PIPELINE_CONFIG, _noise_bands,
+                           _noise_floor, example_for, make_llm)
     from agent.knowledge import CardLibrary, SymptomVocab
     from agent.loop import run_session
     from harness.executor import RealExecutor
 
     rounds = int(payload.get("rounds", 5))
-    emit("phase", name="启动自主迭代",
-         detail=f"最多 {rounds} 轮 · 起步 {payload.get('fidelity', '小份')}数据")
+    fidelity = payload.get("fidelity", "小份")
+    emit("phase", name="启动自主迭代", detail=f"最多 {rounds} 轮 · 起步 {fidelity}数据")
 
     vocab = SymptomVocab.load()
     executor = RealExecutor(payload["train"], payload["val_features"],
@@ -202,26 +204,35 @@ def _run_agent(payload: dict, emit) -> None:
                             seed=int(payload.get("seed", 20260827)))
     # 第一份成绩单：先跑一次基线，医生要看着它做第一次诊断
     emit("phase", name="跑基线", detail="给医生第一份成绩单")
-    base = executor.run({"new_files": [], "config_patch": {}},
-                        payload.get("fidelity", "小份"))
+    base = executor.run({"new_files": [], "config_patch": ""}, fidelity)
     if not base.ok:
         raise RuntimeError(f"基线就没跑起来：{base.error}")
 
     t0 = time.time()
+    bands = _noise_bands()
     summary = run_session(
         llm=make_llm(), vocab=vocab, cards=CardLibrary.load(vocab),
         executor=executor, initial_report=base.health_report,
+        # 体检那一跑也烧了算力，要计进 GPU 小时（交付物 #5）
+        initial_train_seconds=base.seconds,
         module_interface=INTERFACE_SPEC, example_module=example_for,
         current_config=PIPELINE_CONFIG, rounds=rounds,
+        start_fidelity=fidelity,        # 界面选了哪档就从哪档起步
+        noise_floor=_noise_floor(bands), noise_bands=bands,
         logs_dir=ROOT / "logs",
     )
+    # 展示最终提交的那一版，不是第 0 轮的基线 —— 跑完十轮还给人看起步分数是误导
+    best_path = ROOT / "logs" / "best_report.json"
+    best_report = (_json.loads(best_path.read_text(encoding="utf-8"))
+                   if best_path.exists() else base.health_report)
     _state["last"] = {
         "mode": "agent", "ok": True, "seconds": time.time() - t0,
         "rounds_run": getattr(summary, "rounds_run", None),
         "stopped_because": getattr(summary, "stopped_because", ""),
         "summary_text": summary.as_table(),
         "total_tokens": summary.total_tokens,
-        "report": base.health_report,
+        "best_round": summary.best_round,
+        "report": best_report,
     }
 
 

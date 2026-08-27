@@ -324,10 +324,11 @@ def _crashed_reflection(chosen: dict[str, Any] | None, error: str) -> dict[str, 
         "verdict": "没跑起来",
         "actual": {"点击AUC": 0.0, "购买AUC": 0.0},
         "vs_expected": f"代码没跑通，拿不到结果：{error}",
-        "symptom_resolved": {
-            "symptom": targets[0] if targets else "",
-            "before": 0.0, "after": 0.0, "resolved": "否",
-        },
+        # 方案声称要治的病，逐个记「否」—— 跑都没跑起来，一个都没治
+        "symptom_resolved": [
+            {"symptom": t, "before": 0.0, "after": 0.0, "resolved": "否"}
+            for t in targets
+        ] or [{"symptom": "", "before": 0.0, "after": 0.0, "resolved": "否"}],
         "card_update": {
             "card_id": chosen.get("card_id", ""),
             "prior_delta": PriorLedger.CRASHED,
@@ -386,7 +387,9 @@ def run_round(
 
     # ── 筛卡片：纯代码，不花钱。试过且失败的卡在这里就被排除 ──
     symptom_ids = [f["symptom"] for f in findings]
-    candidates = cards.match(symptom_ids, exclude_ids=exclude_ids, limit=5)
+    # 医生给的严重度直接进筛卡权重：治一个重病的卡，排在治两个轻病的卡前面
+    severity = {f["symptom"]: f.get("severity", 1.0) for f in findings}
+    candidates = cards.match(symptom_ids, exclude_ids=exclude_ids, limit=5, severity=severity)
 
     # ② 军师
     log.proposals = _guard(
@@ -474,7 +477,9 @@ def run_round(
         gains = log.reflection["actual"].values()
         prior_ledger.apply(
             card.id, log.reflection["verdict"], card.prior,
-            symptom_improved=log.reflection["symptom_resolved"]["resolved"] in ("是", "部分"),
+            # 多个目标里只要有一个真的好转，这张卡就该加分
+            symptom_improved=any(item["resolved"] in ("是", "部分")
+                                 for item in log.reflection["symptom_resolved"]),
             beat_noise=max((abs(v) for v in gains), default=0.0) >= noise_floor,
         )
     return finish()
@@ -591,6 +596,7 @@ def run_session(
     example_module: str | Callable[[str], str],   # 字符串，或按环节取范文的函数
     current_config: str,
     rounds: int = DEFAULT_ROUNDS,
+    start_fidelity: str = FIDELITY_LADDER[0],   # 从哪一档数据起步
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     epsilon: float = DEFAULT_EPSILON,
     patience: int = DEFAULT_PATIENCE,
@@ -615,12 +621,15 @@ def run_session(
     time_ledger = TimeLedger.load(logs_dir / "time_ledger.json")
     prior_ledger = PriorLedger.load(logs_dir / "prior_ledger.json")
 
+    if start_fidelity not in FIDELITY_LADDER:
+        raise ValueError(f"没有「{start_fidelity}」这一档，只能是 {FIDELITY_LADDER}")
+
     cur = parent = initial_report
     history: list[dict[str, Any]] = []
     blacklist: set[str] = set()          # 试过且失败的卡 —— 调度器硬性跳过
     applied: set[str] = set()            # 已经生效、并入流水线的卡 —— 再上一次没意义
     tried: list[dict[str, Any]] = []     # 喂给军师看的「已经试过的」（含结论）
-    rung = 0                             # 当前数据档位，见 FIDELITY_LADDER
+    rung = FIDELITY_LADDER.index(start_fidelity)   # 当前数据档位
     no_finding_streak = 0
     stale = 0                            # 连续多少轮没有超过 epsilon 的提升
 

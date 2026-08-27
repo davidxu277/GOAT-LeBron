@@ -209,7 +209,7 @@ def test_合法的实现放行():
 # ────────────────── 复盘官：防自我欺骗 ──────────────────
 
 
-def _reflect_validate(vocab, data):
+def _reflect_validate(vocab, data, targets=None):
     captured = {}
 
     class _FakeLLM:
@@ -219,21 +219,24 @@ def _reflect_validate(vocab, data):
             captured["validate"] = kw["validate"]
             return data
 
-    roles.reflect(_FakeLLM(), vocab, {}, {}, {}, None)
+    hypothesis = {"targets": targets} if targets else {}
+    roles.reflect(_FakeLLM(), vocab, hypothesis, {}, {}, None)
     captured["validate"](data)
 
 
-def _reflection(verdict, resolved, gain, delta=0.1, promote=False, after=None):
+def _resolved(symptom="冷门商品学不动", resolved="是", before=0.07, after=None):
     # resolved 与 before/after 必须自洽：说治好了，那两个数就得真的变了
     if after is None:
-        after = 0.07 if resolved == "否" else 0.03
+        after = before if resolved == "否" else 0.03
+    return {"symptom": symptom, "before": before, "after": after, "resolved": resolved}
+
+
+def _reflection(verdict, resolved, gain, delta=0.1, promote=False, after=None, items=None):
     return {
         "verdict": verdict,
         "actual": {"点击AUC": 0.0, "购买AUC": gain},
         "vs_expected": "",
-        "symptom_resolved": {
-            "symptom": "冷门商品学不动", "before": 0.07, "after": after, "resolved": resolved,
-        },
+        "symptom_resolved": items or [_resolved(resolved=resolved, after=after)],
         "card_update": {"card_id": "类目兜底", "prior_delta": delta, "note": ""},
         "next_hint": "", "promote": promote,
     }
@@ -855,3 +858,104 @@ def test_max_tokens大时必须走流式():
     llm.call(role="医生", system="", user="", schema={},
              max_tokens=_STREAM_THRESHOLD - 1)
     assert not 用了流式, "小请求不必流式，非流式更简单"
+
+
+# ────────────────── 复盘官：多个目标毛病 ──────────────────
+
+
+def test_方案打了几个病就得逐个交代(vocab):
+    """26 张卡里 11 张是多病卡。一个方案打三个病、复盘只报一个，
+    剩下两个就永远没人验证 —— 这是最容易漏掉的一种"没做完"。
+    """
+    data = _reflection("猜对了", "是", 0.004,
+                       items=[_resolved("冷门商品学不动")])
+    with pytest.raises(SchemaViolation, match="没有交代"):
+        _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+
+
+def test_逐个交代了就放行(vocab):
+    data = _reflection("猜对了", "是", 0.004, items=[
+        _resolved("冷门商品学不动", "是"),
+        _resolved("新用户不会做", "部分", before=0.05, after=0.04),
+    ])
+    _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+
+
+def test_多个目标里有一个好转就算数(vocab):
+    """两个目标，一个治好了一个没有 —— 这仍然可以判「猜对了」。"""
+    data = _reflection("猜对了", "是", 0.004, items=[
+        _resolved("冷门商品学不动", "是"),
+        _resolved("新用户不会做", "否", before=0.05),
+    ])
+    _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+
+
+def test_全部目标都没好转就不许判猜对了(vocab):
+    data = _reflection("猜对了", "否", 0.004, items=[
+        _resolved("冷门商品学不动", "否"),
+        _resolved("新用户不会做", "否", before=0.05),
+    ])
+    with pytest.raises(SchemaViolation, match="所有目标毛病都没有改善"):
+        _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+
+
+def test_多个目标里任何一个自我申报对不上数字都打回(vocab):
+    data = _reflection("猜对了", "是", 0.004, items=[
+        _resolved("冷门商品学不动", "是"),
+        _resolved("新用户不会做", "是", before=0.05, after=0.05),   # 没动却说治好了
+    ])
+    with pytest.raises(SchemaViolation, match="自我申报必须跟数字一致"):
+        _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+
+
+# ────────────────── 筛卡：按严重度加权 ──────────────────
+
+
+def test_筛卡_一个重病优先于两个轻病(cards):
+    """医生本来就给了 severity，以前这一步只做集合求交，把它扔了。
+
+    同样三个病，只是权重不同，选出来的第一张卡就该不一样：
+      治「冷门商品学不动 + 新用户不会做」的卡 → 0.2 + 0.2 = 0.4
+      治「在背题」的卡                      → 0.9
+    """
+    症状 = ["冷门商品学不动", "新用户不会做", "在背题"]
+
+    加权 = cards.match(症状, severity={"冷门商品学不动": 0.2,
+                                     "新用户不会做": 0.2,
+                                     "在背题": 0.9})
+    assert "在背题" in 加权[0].treats                      # 重病的卡排第一
+
+    不加权 = cards.match(症状)                              # 退化成"命中几个病"
+    assert len(set(不加权[0].treats) & set(症状)) == 2      # 命中两个的排第一
+    assert "在背题" not in 不加权[0].treats                 # 严重度被忽略了
+
+
+def test_筛卡_不给severity跟以前完全一致(cards):
+    症状 = ["冷门商品学不动", "新用户不会做"]
+    assert [c.id for c in cards.match(症状)] == [c.id for c in cards.match(症状, severity={})]
+
+
+def test_一整场_可以指定起步档位(tmp_path):
+    """控制台上选了「中份」就该真的从中份起步，不能嘴上说中份、实际跑小份。"""
+    llm = ScriptedLLM(promote_on=())
+    ex = DriftingExecutor()
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("中份"),
+        module_interface="", example_module="", current_config="",
+        rounds=2, start_fidelity="中份", logs_dir=tmp_path,
+    )
+    rows = [json.loads(l) for l in (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert all(r["fidelity"] == "中份" for r in rows)
+
+
+def test_一整场_起步档位写错当场报错(tmp_path):
+    ex = DriftingExecutor()
+    with pytest.raises(ValueError, match="没有「超大份」这一档"):
+        run_session(
+            llm=ScriptedLLM(), vocab=SymptomVocab.load(),
+            cards=CardLibrary.load(SymptomVocab.load()),
+            executor=ex, initial_report=ex.report(), module_interface="",
+            example_module="", current_config="", start_fidelity="超大份",
+            logs_dir=tmp_path,
+        )

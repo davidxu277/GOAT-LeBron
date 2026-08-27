@@ -111,17 +111,21 @@ def render_panel(r: dict, idx: int) -> str:
     # ── ④ 复盘官 ──
     if refl:
         verdict = refl.get("verdict", "—")
-        sym = refl.get("symptom_resolved") or {}
+        # symptom_resolved 是数组（一个方案可以打好几个病）。
+        # 兼容旧日志里的单对象写法，免得历史 rounds.jsonl 渲染不出来。
+        syms = refl.get("symptom_resolved") or []
+        if isinstance(syms, dict):
+            syms = [syms]
         card_up = refl.get("card_update") or {}
         refl_body = (
             f'<div class="verdict {VERDICT_TONE.get(verdict, "muted")}">{esc(verdict)}</div>'
             f'<div class="chips">{kv_chips(refl.get("actual") or {})}</div>'
             f'<p class="body-text">{esc(refl.get("vs_expected", ""))}</p>'
-            + (
+            + "".join(
                 f'<p class="note">目标毛病「{esc(sym.get("symptom"))}」好转：'
                 f'<b>{esc(sym.get("resolved"))}</b>'
                 f'（{fmt_delta(sym.get("before"))} → {fmt_delta(sym.get("after"))}）</p>'
-                if sym else ""
+                for sym in syms
             )
             + (
                 f'<p class="note">卡片信任分 {fmt_delta(card_up.get("prior_delta"))}'

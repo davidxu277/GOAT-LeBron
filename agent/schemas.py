@@ -150,15 +150,23 @@ def reflector_schema(vocab: SymptomVocab) -> dict[str, Any]:
             "verdict": {"type": "string", "enum": VERDICT},
             "actual": _obj({m: {"type": "number"} for m in METRICS}, METRICS),
             "vs_expected": {"type": "string"},
-            "symptom_resolved": _obj(
-                {
-                    "symptom": {"type": "string", "enum": vocab.ids},
-                    "before": {"type": "number"},
-                    "after": {"type": "number"},
-                    "resolved": {"type": "string", "enum": RESOLVED},
-                },
-                ["symptom", "before", "after", "resolved"],
-            ),
+            # 数组，不是单个 —— 一个方案可以同时打好几个病（26 张卡里 11 张是多病卡）。
+            # 方案声称要治的每一个病，都必须在这里给出 before/after，
+            # 少报一个就等于那个病没人验证。校验见 roles.reflect。
+            "symptom_resolved": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 3,
+                "items": _obj(
+                    {
+                        "symptom": {"type": "string", "enum": vocab.ids},
+                        "before": {"type": "number"},
+                        "after": {"type": "number"},
+                        "resolved": {"type": "string", "enum": RESOLVED},
+                    },
+                    ["symptom", "before", "after", "resolved"],
+                ),
+            },
             "card_update": _obj(
                 {
                     "card_id": {"type": "string"},

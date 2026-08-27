@@ -120,15 +120,17 @@ class ScriptedLLM:
         }
 
     def _复盘官(self, schema: dict) -> dict[str, Any]:
-        symptom = (self._last_findings or [{}])[0].get("symptom", "冷门商品学不动")
+        # 方案声称要治哪几个病，就得逐个交代 —— 跟真复盘官一样的规矩
+        symptoms = [f["symptom"] for f in self._last_findings] or ["冷门商品学不动"]
         promote = self.calls.get("复盘官", 0) in self.promote_on
         return {
             "verdict": "猜对了",
             "actual": {"点击AUC": 0.0008, "购买AUC": 0.0031},
             "vs_expected": "比预计的 0.004 略低",
-            "symptom_resolved": {
-                "symptom": symptom, "before": 0.086, "after": 0.061, "resolved": "部分",
-            },
+            "symptom_resolved": [
+                {"symptom": s, "before": 0.086, "after": 0.061, "resolved": "部分"}
+                for s in symptoms
+            ],
             "card_update": {"card_id": "", "prior_delta": 0.1, "note": "小份数据上有效"},
             "next_hint": "去看新用户那一组",
             "promote": promote,

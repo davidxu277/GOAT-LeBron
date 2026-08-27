@@ -250,6 +250,8 @@ def reflect(
     """
     floor = max(MIN_REAL_GAIN, float(noise_floor))
 
+    targets = list(hypothesis.get("targets") or [])
+
     def validate(data: dict[str, Any]) -> None:
         verdict = data["verdict"]
         gains = data["actual"]
@@ -259,20 +261,34 @@ def reflect(
             raise SchemaViolation(
                 f"最大变化只有 {best:.6f}，低于 {floor:.6f} 的门槛，不能判「猜对了」"
             )
-        # 最重要的一条：分数涨了但毛病没治好 → 必须判「说不清」
-        sr = data["symptom_resolved"]
-        if sr["resolved"] == "否" and verdict == "猜对了":
+
+        items = data["symptom_resolved"]
+        reported = {item["symptom"] for item in items}
+        # 方案声称要治哪几个病，就得逐个交代 —— 少报一个，那个病就没人验证了。
+        # 这正是"一个方案打三个病、复盘只报一个"那个洞。
+        missing = [t for t in targets if t not in reported]
+        if missing:
             raise SchemaViolation(
-                "目标毛病没有改善却判「猜对了」。"
-                "分数上涨另有原因时必须判「说不清」。"
+                f"方案声称要治 {targets}，但 symptom_resolved 里没有交代 {missing}。"
+                f"每一个目标毛病都要给出 before / after / resolved。"
             )
-        # 上面那条防的是"承认没治好还硬说猜对了"。这条防的是更隐蔽的一种：
-        # before / after 两个数一模一样，却自己填 resolved=是。
-        # resolved 是模型自己报的，必须拿它自己给的数字对一遍。
-        if sr["resolved"] in ("是", "部分") and abs(sr["after"] - sr["before"]) < 1e-9:
+
+        for item in items:
+            # 防一种隐蔽的自欺：before / after 一模一样，却自己填 resolved=是。
+            # resolved 是模型自己报的，必须拿它自己给的数字对一遍。
+            if item["resolved"] in ("是", "部分") and abs(item["after"] - item["before"]) < 1e-9:
+                raise SchemaViolation(
+                    f"「{item['symptom']}」的 before={item['before']} 与 "
+                    f"after={item['after']} 完全没变，却填了 resolved=「{item['resolved']}」。"
+                    f"自我申报必须跟数字一致。"
+                )
+
+        # 最重要的一条：分数涨了但毛病没治好 → 必须判「说不清」。
+        # 多个目标时只要有一个真的好转就算数，全是「否」才拦。
+        if verdict == "猜对了" and all(item["resolved"] == "否" for item in items):
             raise SchemaViolation(
-                f"目标指标 before={sr['before']} 与 after={sr['after']} 完全没变，"
-                f"却填了 resolved=「{sr['resolved']}」。自我申报必须跟数字一致。"
+                "所有目标毛病都没有改善却判「猜对了」。"
+                "分数上涨另有原因时必须判「说不清」。"
             )
         # 两个指标一个都没涨，就不存在"猜对了"这回事
         if verdict == "猜对了" and all(v <= 0 for v in gains.values()):
