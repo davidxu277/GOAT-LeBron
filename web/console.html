@@ -55,9 +55,24 @@ button:disabled{opacity:.45; cursor:not-allowed}
 .chip b{font-weight:500; color:var(--faint); margin-right:.25rem}
 .stream{font-family:"SF Mono",ui-monospace,Menlo,monospace; font-size:.74rem;
   line-height:1.65; color:var(--soft); white-space:pre-wrap; word-break:break-word}
-.stream .ev{padding:.15rem 0; border-bottom:1px solid #F2F0EB}
+.stream .ev{padding:.2rem 0; border-bottom:1px solid #F2F0EB}
 .stream .ts{color:var(--faint); margin-right:.5rem}
-.stream .role{color:var(--accent); font-weight:600}
+.stream .role{color:var(--accent); font-weight:600; margin-right:.35rem}
+.stream .ev.clickable{cursor:pointer}
+.stream .ev.clickable:hover{background:#FAF9F6}
+.stream .ev.warn{color:#7A5C3C; background:var(--warm-soft);
+  border-radius:5px; padding:.25rem .5rem; margin:.2rem 0}
+.stream .more{color:var(--accent); margin-left:.5rem; font-size:.7rem}
+.detail{
+  background:#FAF9F6; border:1px solid var(--line); border-radius:8px;
+  padding:.6rem .8rem; margin:.35rem 0 .5rem; max-height:22rem; overflow-y:auto;
+}
+.dsec{margin-bottom:.6rem; white-space:pre-wrap; word-break:break-word}
+.dsec:last-child{margin-bottom:0}
+.dlabel{
+  display:block; font-size:.68rem; color:var(--faint); letter-spacing:.06em;
+  margin-bottom:.25rem; font-family:"Noto Sans SC",sans-serif;
+}
 .metrics{display:grid; grid-template-columns:repeat(auto-fit,minmax(7rem,1fr)); gap:.6rem}
 .metric{background:#FAF9F6; border:1px solid var(--line); border-radius:9px; padding:.6rem .8rem}
 .metric b{display:block; font-size:1.15rem; font-weight:600; font-variant-numeric:tabular-nums}
@@ -123,7 +138,26 @@ button:disabled{opacity:.45; cursor:not-allowed}
 
 <script>
 const $ = id => document.getElementById(id);
-let offset = 0, timer = null;
+let offset = 0, timer = null, finished = false;
+const startLine = {};      // 角色 → 本次调用在事件文件里的起始行号
+
+// 点「详情」拉取该次调用的完整内容：推理过程 + 正式输出
+async function toggleDetail(div){
+  const open = div.nextElementSibling?.classList?.contains('detail');
+  if(open){ div.nextElementSibling.remove();
+            div.querySelector('.more').textContent = '详情 ▸'; return; }
+  div.querySelector('.more').textContent = '收起 ▾';
+  const r = await fetch(`/api/detail?start=${div.dataset.start}&end=${div.dataset.end}`);
+  const d = await r.json();
+  const box = document.createElement('div');
+  box.className = 'detail';
+  const esc = t => t.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+  box.innerHTML =
+    (d.reasoning ? `<div class="dsec"><span class="dlabel">推理过程</span>${esc(d.reasoning)}</div>` : '') +
+    (d.answer ? `<div class="dsec"><span class="dlabel">正式输出</span>${esc(d.answer)}</div>` : '') ||
+    '<div class="dsec">（这次调用没有留下内容）</div>';
+  div.after(box);
+}
 
 function paths(){
   return {train:$('train').value.trim(), val_features:$('valx').value.trim(),
@@ -171,6 +205,7 @@ $('btnRun').onclick = async () => {
   const p = paths();
   $('runBox').innerHTML = '<div class="stream" id="stream"></div>';
   $('btnRun').disabled = true;
+  finished = false;              // 新一轮开始，重置结束标志
   await fetch('/api/run', {method:'POST', body:JSON.stringify(p)});
   setRunning(true);
   timer = setInterval(poll, 700);
@@ -186,16 +221,47 @@ async function poll(){
   const d = await r.json();
   offset = d.offset;
   const s = $('stream');
-  if(s) d.events.filter(e => e.type !== 'llm_delta').forEach(e => {
-    const div = document.createElement('div');
-    div.className = 'ev';
-    div.innerHTML = `<span class="ts">${e.ts}</span>` +
-      (e.role ? `<span class="role">${e.role}</span> ` : '') +
-      (e.name ? `<b>${e.name}</b> ` : '') +
-      (e.detail || e.text || e.type);
-    s.appendChild(div); s.scrollTop = s.scrollHeight;
-  });
-  if(!d.running){
+  if(s){
+    // 事件在全局的行号 = 本批起始偏移 + 批内序号，展开详情时用它定位区间
+    const base = d.offset - d.events.length;
+    d.events.forEach((e, i) => {
+      const lineNo = base + i;
+      if(e.type === 'llm_delta') return;              // 增量太碎，不逐条显示
+      if(e.type === 'llm_start'){ startLine[e.role] = lineNo; return; }
+
+      const div = document.createElement('div');
+      div.className = 'ev';
+      let text;
+      if(e.type === 'llm_end'){
+        const tok = (e.tokens_in||0) + (e.tokens_out||0);
+        text = `思考完成 · ${tok.toLocaleString()} token` +
+               (e.retries ? ` · 重试 ${e.retries} 次` : '');
+        div.dataset.start = startLine[e.role] ?? 0;
+        div.dataset.end = lineNo;
+        div.classList.add('clickable');
+      } else if(e.type === 'recovery'){
+        div.classList.add('warn'); text = e.text || '出错并恢复';
+      } else if(e.type === 'metrics'){
+        const f = x => x==null ? '算不出' : (+x).toFixed(4);
+        text = `成绩单：点击 AUC ${f(e.ctr_auc)} · 购买 AUC ${f(e.cvr_auc)}`;
+      } else if(e.type === 'phase'){
+        text = `${e.name}${e.detail ? '：' + e.detail : ''}`;
+      } else if(e.type === 'round_end'){
+        text = `本轮结束 · ${e.verdict || ''}`;
+      } else {
+        text = e.detail || e.text || e.type;
+      }
+      div.innerHTML = `<span class="ts">${e.ts}</span>` +
+        (e.role ? `<span class="role">${e.role}</span> ` : '') + text +
+        (div.classList.contains('clickable') ? '<span class="more">详情 ▸</span>' : '');
+      if(div.classList.contains('clickable')) div.onclick = () => toggleDetail(div);
+      s.appendChild(div); s.scrollTop = s.scrollHeight;
+    });
+  }
+  // poll 里有 await，一次结束判定后、拿状态期间定时器还会再触发一次，
+  // 那次同样看到 running=false 就会重复渲染。用 finished 抢先关门。
+  if(!d.running && !finished){
+    finished = true;
     clearInterval(timer); setRunning(false);
     const st = await (await fetch('/api/status')).json();
     if(st.last) showResult(st.last);
@@ -222,7 +288,9 @@ function showResult(last){
   if(v['购买分可信度警告'])
     html += `<div class="check warn" style="margin-top:.7rem"><span class="i">!</span><span>${v['购买分可信度警告']}</span></div>`;
   html += `<p class="empty" style="margin-top:.7rem">耗时 ${last.seconds.toFixed(1)} 秒 · 完整成绩单已写入日志</p>`;
-  $('runBox').insertAdjacentHTML('afterbegin', html);
+  // 移除上一次的结果块（如果有），再插到事件流上方 —— 保证只有一份
+  $('runBox').querySelector('.result')?.remove();
+  $('runBox').insertAdjacentHTML('afterbegin', `<div class="result">${html}</div>`);
 }
 </script>
 </body></html>

@@ -65,6 +65,26 @@ class Handler(BaseHTTPRequestHandler):
                 offset = len(all_lines)
             _json(self, 200, {"events": lines, "offset": offset,
                               "running": _state["running"]})
+        elif self.path.startswith("/api/detail"):
+            # 取某次 LLM 调用的完整内容：把 llm_delta 拼回去，
+            # 推理过程和正式输出分开返回（前端折叠显示）
+            q = dict(kv.split("=", 1) for kv in self.path.split("?", 1)[1].split("&")) \
+                if "?" in self.path else {}
+            start, end = int(q.get("start", 0)), int(q.get("end", 0))
+            path = ROOT / "logs" / "live_events.jsonl"
+            reasoning, answer = [], []
+            if path.exists():
+                lines = path.read_text(encoding="utf-8").splitlines()[start:end]
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    e = json.loads(line)
+                    if e.get("type") != "llm_delta":
+                        continue
+                    (reasoning if e.get("kind") == "reasoning" else answer).append(
+                        e.get("text", ""))
+            _json(self, 200, {"reasoning": "".join(reasoning), "answer": "".join(answer)})
+
         elif self.path.startswith("/api/status"):
             _json(self, 200, {"running": _state["running"], "last": _state["last"]})
         else:
