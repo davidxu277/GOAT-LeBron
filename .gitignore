@@ -15,11 +15,19 @@ checkpoints/
 submissions/
 
 # ── 运行产物（日志目录保留结构，内容不提交）──
+# 开发期间的日志是噪音，而且演习跑的是假数据，进仓库只会误导人。
 logs/*
 !logs/.gitkeep
 runs/
 experiments.db
 *.jsonl
+
+# ── 但交付物必须进仓库（交付物 #3 明确要求提交逐轮日志）──
+# 最终那一场跑完：agent.cli finalize
+# 只放行 deliverables/，logs/ 依然挡着，别把演习数据也带进去。
+# （注意跟上面第 15 行的 submissions/ 区分开：那个装模型产物，是忽略的）
+!deliverables/
+!deliverables/**
 
 # ── Python ──
 __pycache__/

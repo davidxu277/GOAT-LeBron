@@ -398,6 +398,7 @@ class RoundLog:
 
     round_id: int
     started_at: str
+    run_id: str = ""       # 哪一场跑的。日志是追加的，轮次每场都从 1 重数，没这个分不清
     diagnosis: dict[str, Any] | None = None
     proposals: dict[str, Any] | None = None
     chosen: dict[str, Any] | None = None
@@ -464,6 +465,7 @@ def _crashed_reflection(chosen: dict[str, Any] | None, error: str) -> dict[str, 
 def run_round(
     *,
     round_id: int,
+    run_id: str = "",
     llm: LLM,
     vocab: SymptomVocab,
     cards: CardLibrary,
@@ -490,7 +492,8 @@ def run_round(
     """
 
     t0 = time.time()
-    log = RoundLog(round_id=round_id, started_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    log = RoundLog(round_id=round_id, run_id=run_id,
+                   started_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
     tokens_before = llm.ledger.total_tokens
 
     def finish() -> RoundLog:
@@ -658,7 +661,7 @@ def snapshot_round(logs_dir: pathlib.Path, log: RoundLog, config_text: str,
     只存配置文本 + 一张"哪个文件是哪一轮写的"清单；文件内容本来就在
     rounds.jsonl 的 patch_files 里，不重复存。`agent.cli restore N` 照着还原。
     """
-    path = logs_dir / "snapshots" / f"round_{log.round_id:03d}.json"
+    path = logs_dir / "snapshots" / (log.run_id or "unknown") / f"round_{log.round_id:03d}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
         "轮次": log.round_id,
@@ -681,7 +684,7 @@ def write_narrative(logs_dir: pathlib.Path, history: list[dict[str, Any]],
     lines = [
         "# 这一场发生了什么",
         "",
-        f"> 跑了 {summary.rounds_run} 轮 · {summary.stopped_because}",
+        f"> 第 `{summary.run_id}` 场 · 跑了 {summary.rounds_run} 轮 · {summary.stopped_because}",
         f"> 人工干预 {summary.interventions} 次 · 错误恢复 {summary.recoveries} 次",
         f"> 最终提交第 {summary.best_round} 轮（{summary.best_fidelity}数据）",
         "",
@@ -737,6 +740,7 @@ def _brief(log: RoundLog) -> dict[str, Any]:
 class SessionSummary:
     """一整场跑完的汇总 —— 直接对应交付物 #5 的结果表。"""
 
+    run_id: str = ""
     rounds_run: int = 0
     stopped_because: str = ""
     best_round: int = 0
@@ -818,6 +822,7 @@ def run_session(
     example_module: str | Callable[[str], str],   # 字符串，或按环节取范文的函数
     current_config: str,
     rounds: int = DEFAULT_ROUNDS,
+    run_id: str | None = None,                  # 这一场的编号，不给就用时间戳
     start_fidelity: str = FIDELITY_LADDER[0],   # 从哪一档数据起步
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     epsilon: float = DEFAULT_EPSILON,
@@ -846,6 +851,7 @@ def run_session(
     interventions = InterventionLog(logs_dir / "interventions.jsonl")
     module_owner: dict[str, int] = {}      # 零件路径 → 哪一轮写的这一版
 
+    run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
     if start_fidelity not in FIDELITY_LADDER:
         raise ValueError(f"没有「{start_fidelity}」这一档，只能是 {FIDELITY_LADDER}")
 
@@ -860,7 +866,7 @@ def run_session(
 
     best_score = total_score(cur)
     best = {"round": 0, "report": cur, "fidelity": FIDELITY_LADDER[rung]}
-    summary = SessionSummary(baseline=dict(baseline or {}),
+    summary = SessionSummary(run_id=run_id, baseline=dict(baseline or {}),
                              total_train_seconds=initial_train_seconds)
 
     def escalate(round_id: int, reason: str) -> bool:
@@ -908,7 +914,7 @@ def run_session(
         emit("round_start", round=rid, fidelity=FIDELITY_LADDER[rung])
 
         log = run_round(
-            round_id=rid,
+            round_id=rid, run_id=run_id,
             llm=llm, vocab=vocab, cards=cards,
             health_report=_with_bands(cur, noise_bands), parent_result=parent,
             executor=executor,

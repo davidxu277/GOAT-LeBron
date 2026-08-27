@@ -1198,9 +1198,9 @@ def test_快照_每轮都留一份(tmp_path):
         llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
         executor=ex, initial_report=ex.report("小份"),
         module_interface="", example_module="", current_config="model:\n  name: mlp\n",
-        rounds=3, logs_dir=tmp_path,
+        rounds=3, run_id="测试场", logs_dir=tmp_path,
     )
-    snaps = sorted((tmp_path / "snapshots").glob("round_*.json"))
+    snaps = sorted((tmp_path / "snapshots" / "测试场").glob("round_*.json"))
     assert len(snaps) == 3
     snap = json.loads(snaps[0].read_text(encoding="utf-8"))
     assert snap["配置"] and snap["零件"]           # 配置文本 + 哪个文件哪轮写的
@@ -1214,9 +1214,10 @@ def test_快照_记住每个零件是哪一轮写的(tmp_path):
         llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
         executor=ex, initial_report=ex.report("小份"),
         module_interface="", example_module="", current_config="",
-        rounds=3, logs_dir=tmp_path,
+        rounds=3, run_id="测试场", logs_dir=tmp_path,
     )
-    第三轮 = json.loads((tmp_path / "snapshots" / "round_003.json").read_text(encoding="utf-8"))
+    第三轮 = json.loads(
+        (tmp_path / "snapshots" / "测试场" / "round_003.json").read_text(encoding="utf-8"))
     # 假工兵每轮写同一个路径 → 第 3 轮的快照该指向第 3 轮那一版
     assert set(第三轮["零件"].values()) == {3}
 
@@ -1246,3 +1247,88 @@ def test_叙事_把一整场压成一条线(tmp_path):
     assert "人工干预 0 次" in text
     assert text.count("| 1 |") == 1 and "| 3 |" in text     # 每轮一行
     assert "最终提交第" in text
+
+
+def test_两个人各跑一次_日志能分得开(tmp_path):
+    """日志是追加的、轮次每场都从 1 重数 —— 没有 run_id，两场会糊成
+    [1,2,3,1,2,3,4] 这么一串，评委读到的就是一团乱麻。
+    """
+    v = SymptomVocab.load()
+    for who, n in (("队友A", 3), ("队友B", 4)):
+        run_session(
+            llm=ScriptedLLM(promote_on=()), vocab=v, cards=CardLibrary.load(v),
+            executor=DriftingExecutor(), initial_report=DriftingExecutor().report("小份"),
+            module_interface="", example_module="", current_config="",
+            rounds=n, run_id=who, logs_dir=tmp_path,
+        )
+    rows = [json.loads(l) for l in
+            (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["round_id"] for r in rows] == [1, 2, 3, 1, 2, 3, 4]      # 编号确实会撞
+    assert len([r for r in rows if r["run_id"] == "队友A"]) == 3        # 但分得开
+    assert len([r for r in rows if r["run_id"] == "队友B"]) == 4
+    # 快照也各存各的，不互相覆盖
+    assert (tmp_path / "snapshots" / "队友A").is_dir()
+    assert (tmp_path / "snapshots" / "队友B").is_dir()
+
+
+# ────────────────── finalize：一条命令出齐提交包 ──────────────────
+
+
+def test_整理提交包_只取一场(tmp_path):
+    """几个人各跑几次混在一个日志里，提交包必须只含一场，否则轮次编号是乱的。"""
+    import argparse as _ap
+    from agent import cli
+
+    v = SymptomVocab.load()
+    for who, n in (("旧的一场", 2), ("要交的那场", 3)):
+        run_session(
+            llm=ScriptedLLM(promote_on=()), vocab=v, cards=CardLibrary.load(v),
+            executor=DriftingExecutor(), initial_report=DriftingExecutor().report("小份"),
+            module_interface="", example_module="", current_config="",
+            rounds=n, run_id=who, logs_dir=tmp_path,
+        )
+    out = tmp_path / "deliverables"
+    cli.cmd_finalize(_ap.Namespace(run="要交的那场", out=str(out), logs=str(tmp_path)))
+
+    rows = [json.loads(l) for l in
+            (out / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["round_id"] for r in rows] == [1, 2, 3]           # 编号连续可读
+    assert {r["run_id"] for r in rows} == {"要交的那场"}
+    for name in ("narrative.md", "session_summary.json", "dashboard.html"):
+        assert (out / name).exists(), name
+    assert (out / "best_pipeline" / "config" / "pipeline.yaml").exists()
+
+
+def test_整理提交包_默认取最后一场(tmp_path):
+    import argparse as _ap
+    from agent import cli
+
+    v = SymptomVocab.load()
+    for who in ("先跑的", "后跑的"):
+        run_session(
+            llm=ScriptedLLM(promote_on=()), vocab=v, cards=CardLibrary.load(v),
+            executor=DriftingExecutor(), initial_report=DriftingExecutor().report("小份"),
+            module_interface="", example_module="", current_config="",
+            rounds=2, run_id=who, logs_dir=tmp_path,
+        )
+    out = tmp_path / "deliverables"
+    cli.cmd_finalize(_ap.Namespace(run=None, out=str(out), logs=str(tmp_path)))
+    rows = [json.loads(l) for l in
+            (out / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert {r["run_id"] for r in rows} == {"后跑的"}
+
+
+def test_整理提交包_场次不存在时说清楚有哪些(tmp_path):
+    import argparse as _ap
+    from agent import cli
+
+    v = SymptomVocab.load()
+    run_session(
+        llm=ScriptedLLM(promote_on=()), vocab=v, cards=CardLibrary.load(v),
+        executor=DriftingExecutor(), initial_report=DriftingExecutor().report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=2, run_id="真有的那场", logs_dir=tmp_path,
+    )
+    with pytest.raises(SystemExit, match="真有的那场"):
+        cli.cmd_finalize(_ap.Namespace(run="不存在", out=str(tmp_path / "x"),
+                                       logs=str(tmp_path)))

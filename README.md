@@ -184,15 +184,29 @@ export AGENT_PROVIDER=deepseek DEEPSEEK_API_KEY=...      # 或 ANTHROPIC_API_KEY
 | `snapshots/round_XX.json` | #4 的还原依据：每一轮的配置 + 零件清单 |
 | `best_report.json` | 最终提交那一版的完整成绩单 |
 
-要交第 5 轮那一版（假设它是验证集最佳）：
+### 最后一天：一条命令
 
 ```bash
-.venv/bin/python -m agent.cli restore 5 --out submission/
+.venv/bin/python -m agent.cli finalize        # 默认整理最后那一场
 ```
 
-把那一轮的配置和零件原样还原出来，照着重跑一次即可产出提交用的预测结果。
-**必须这样做** —— 工兵的改动是叠加在同一份配置上的，跑到第 20 轮时磁盘上
-只剩最后那个叠加态，第 5 轮的样子早被盖掉了。
+它会把这一场的产物整理进 `deliverables/`（这个目录**不受 .gitignore 挡**，
+可以直接提交）：逐轮日志、叙事、结果表、最佳版本的成绩单、评委可读的看板，
+以及**最佳那一轮的配置与零件**（`best_pipeline/`）。
+
+只取**一场**的记录 —— 日志是追加的、轮次每场都从 1 重数，几个人各跑几次
+混在一个文件里，评委读到的会是 `[1,2,3,1,2,3,4]` 这么一串。
+每一场有自己的 `run_id`，`--run <id>` 可以指定要哪一场。
+
+`best_pipeline/` 尤其重要：工兵的改动是**叠加**在同一份配置上的，跑到第 20 轮时
+磁盘上只剩最后那个叠加态，第 5 轮的样子早被盖掉了。照着它重跑一次，
+才能产出提交用的预测结果（交付物 #4）。
+
+单独还原某一轮也行：
+
+```bash
+.venv/bin/python -m agent.cli restore 5 --out 看看第5轮/
+```
 
 ## 局限性与改进方向
 

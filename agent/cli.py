@@ -345,14 +345,24 @@ def cmd_restore(args) -> int:
     磁盘上只剩最后那个叠加态。要交"验证集最佳的那一版"，就得从日志里还原。
     """
     logs = pathlib.Path(args.logs)
-    snap_path = logs / "snapshots" / f"round_{args.round:03d}.json"
-    if not snap_path.exists():
-        raise SystemExit(f"没有第 {args.round} 轮的快照：{snap_path}")
+    name = f"round_{args.round:03d}.json"
+    run = getattr(args, "run", None)
+    # 快照按场分目录。没指定哪一场就挑最新的那一场
+    候选 = ([logs / "snapshots" / run / name] if run
+            else sorted((logs / "snapshots").glob(f"*/{name}")))
+    候选 = [p_ for p_ in 候选 if p_.exists()]
+    if not 候选:
+        raise SystemExit(f"没有第 {args.round} 轮的快照（找过 {logs / 'snapshots'}）")
+    snap_path = 候选[-1]
     snap = json.loads(snap_path.read_text(encoding="utf-8"))
+    这一场 = snap_path.parent.name
 
     rows = [json.loads(l) for l in
             (logs / "rounds.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
-    by_round = {r["round_id"]: r for r in rows}
+    # 只认同一场的记录 —— 轮次编号每场都从 1 重数，跨场取会拿到别人那一轮的代码
+    by_round = {r["round_id"]: r for r in rows if (r.get("run_id") or "") == 这一场}
+    if not by_round:
+        by_round = {r["round_id"]: r for r in rows}      # 旧日志没有 run_id，退回全量
 
     out = pathlib.Path(args.out)
     (out / "config").mkdir(parents=True, exist_ok=True)
@@ -368,11 +378,79 @@ def cmd_restore(args) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    print(f"第 {args.round} 轮已还原到 {out}")
+    print(f"第「{这一场}」场第 {args.round} 轮已还原到 {out}")
     print(f"  配置 1 份 · 零件 {len(snap['零件'] or {}) - len(missing)} 个 · 分数 {snap['分数']}")
     if missing:
         print(f"  ⚠️ 这些零件在日志里找不到内容：{', '.join(missing)}")
     return 1 if missing else 0
+
+
+def cmd_finalize(args) -> int:
+    """把一场跑的产物整理成可提交的一包。
+
+    最后一天不该再想"该交什么、在哪" —— 一条命令出齐，照着清单核对就行。
+
+    只取**一场**（run_id）的记录：日志是追加的、轮次每场都从 1 重数，
+    几个人各跑几次混在一个文件里，评委读到的会是 [1,2,3,1,2,3,4] 这么一串。
+    """
+    logs = pathlib.Path(args.logs)
+    out = pathlib.Path(args.out)
+    rounds_path = logs / "rounds.jsonl"
+    if not rounds_path.exists():
+        raise SystemExit(f"没有逐轮日志：{rounds_path}")
+
+    rows = [json.loads(l) for l in
+            rounds_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    run_id = args.run or (rows[-1].get("run_id") or "")
+    mine = [r for r in rows if (r.get("run_id") or "") == run_id]
+    if not mine:
+        有哪些 = sorted({r.get("run_id") or "(无编号)" for r in rows})
+        raise SystemExit(f"日志里没有第「{run_id}」场。现有：{', '.join(有哪些)}")
+
+    out.mkdir(parents=True, exist_ok=True)
+    # ① 逐轮日志：只留这一场，轮次编号才是连续可读的
+    (out / "rounds.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in mine) + "\n", encoding="utf-8")
+
+    # ② 叙事 / ③ 结果表 / ④ 最佳版本的成绩单
+    带过去 = []
+    for name in ("narrative.md", "session_summary.json", "best_report.json",
+                 "noise_bands.json", "interventions.jsonl"):
+        src = logs / name
+        if src.exists():
+            (out / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            带过去.append(name)
+
+    # ⑤ 最佳那一轮的流水线 —— 交付物 #4 要照着它重跑出预测结果
+    summary = {}
+    sp = logs / "session_summary.json"
+    if sp.exists():
+        summary = json.loads(sp.read_text(encoding="utf-8"))
+    best = summary.get("best_round") or 0
+    restored = "（没有 session_summary.json，跳过）"
+    if best:
+        rc = cmd_restore(argparse.Namespace(
+            round=best, out=str(out / "best_pipeline"), logs=str(logs), run=run_id))
+        restored = f"第 {best} 轮 → {out / 'best_pipeline'}" + ("（有缺件，见上）" if rc else "")
+
+    # ⑥ 评委可读的看板
+    try:
+        sys.path.insert(0, str(ROOT / "web"))
+        import build_report                                   # noqa: PLC0415
+        (out / "dashboard.html").write_text(build_report.build(mine), encoding="utf-8")
+        带过去.append("dashboard.html")
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"⚠️ 看板没生成：{exc}（可以手动跑 web/build_report.py）")
+
+    print(f"\n══════════ 提交包已备好 · 第「{run_id}」场 ══════════")
+    print(f"目录：{out}")
+    print(f"  逐轮日志      {len(mine)} 轮（交付物 #3）")
+    print(f"  一起带过去    {', '.join(带过去) or '—'}")
+    print(f"  最佳版本      {restored}")
+    print(f"\n还要人做的两件事：")
+    print(f"  · 照着 best_pipeline/ 重跑一次，产出提交用的预测结果（交付物 #4）")
+    print(f"  · README 的「局限性与改进方向」（交付物 #2 明确要求）")
+    return 0
 
 
 def cmd_noise(args) -> int:
@@ -428,6 +506,12 @@ def main() -> int:
                    help="演习：让医生的第几次调用抛异常")
     p.set_defaults(func=cmd_run)
 
+    p = sub.add_parser("finalize", help="把一场跑的产物整理成可提交的一包")
+    p.add_argument("--run", help="哪一场（run_id）。默认最后那一场")
+    p.add_argument("--out", default="deliverables", help="整理到哪个目录")
+    p.add_argument("--logs", default=str(LOGS), help="从哪份日志整理")
+    p.set_defaults(func=cmd_finalize)
+
     p = sub.add_parser("intervene", help="记一次人工干预（跑的过程中插了手就敲一条）")
     p.add_argument("reason", help="干了什么、为什么")
     p.add_argument("--round", type=int, help="当时第几轮（可选）")
@@ -437,6 +521,7 @@ def main() -> int:
     p.add_argument("round", type=int, help="要还原第几轮")
     p.add_argument("--out", default="restored", help="还原到哪个目录")
     p.add_argument("--logs", default=str(LOGS), help="从哪份日志还原")
+    p.add_argument("--run", help="哪一场（run_id）。默认最新那一场")
     p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("noise", help="量噪声带：同配置换种子看分数抖多少")
