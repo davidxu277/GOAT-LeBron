@@ -17,8 +17,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from agent.knowledge import Card, CardLibrary, SymptomVocab
 from agent.llm import Ledger, SchemaViolation
-from agent.loop import (SHELF_KEEP, CostAwareScheduler, PriorLedger, Shelf,
-                        TimeLedger, _with_bands, run_round, run_session)
+from agent.loop import (SHELF_KEEP, CostAwareScheduler, InterventionLog, PriorLedger,
+                        Shelf, TimeLedger, _with_bands, effective_config,
+                        run_round, run_session)
 from agent.offline import DriftingExecutor, ScriptedLLM
 from agent import noise, roles, schemas
 
@@ -1150,3 +1151,98 @@ def test_泛化落差算的是开发集减锁定集():
 
     # 没做裁决时不该编一个落差出来
     assert SessionSummary().generalization_gap == {}
+# ────────────────── 人工干预：让 0 成为观测值而不是常量 ──────────────────
+
+
+def test_干预记录_跑之前就有的不算(tmp_path):
+    """准备阶段的记录属于搭建，不是"跑起来之后插手"。"""
+    path = tmp_path / "interventions.jsonl"
+    InterventionLog.record(path, "跑之前改了数据路径")
+    log = InterventionLog(path)              # 开跑时初始化，把已有的记成"已知"
+    assert log.drain() == []
+
+    InterventionLog.record(path, "第 3 轮撞 OOM，手动把 batch 调小", round_id=3)
+    fresh = log.drain()
+    assert len(fresh) == 1 and fresh[0]["第几轮"] == 3
+    assert log.drain() == []                 # 取过就不再重复计
+
+
+def test_干预记录_真的会进逐轮日志(tmp_path):
+    """跑到一半有人插手，那一轮的日志里必须体现出来 —— 交付物 #3 的要求。"""
+    llm, ex = ScriptedLLM(promote_on=()), DriftingExecutor()
+
+    def 第一轮之后插一手(log, summary):
+        if log.round_id == 1:
+            InterventionLog.record(tmp_path / "interventions.jsonl",
+                                   "手动改了学习率", round_id=2)
+
+    summary = run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, logs_dir=tmp_path, on_round=第一轮之后插一手,
+    )
+    rows = [json.loads(l) for l in (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["interventions"] == 0
+    assert rows[1]["interventions"] == 1
+    assert rows[1]["intervention_notes"] == ["手动改了学习率"]
+    assert summary.interventions == 1        # 结果表里的总数也对得上
+
+
+# ────────────────── 快照与还原：交付物 #4 ──────────────────
+
+
+def test_快照_每轮都留一份(tmp_path):
+    llm, ex = ScriptedLLM(promote_on=()), DriftingExecutor()
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="model:\n  name: mlp\n",
+        rounds=3, logs_dir=tmp_path,
+    )
+    snaps = sorted((tmp_path / "snapshots").glob("round_*.json"))
+    assert len(snaps) == 3
+    snap = json.loads(snaps[0].read_text(encoding="utf-8"))
+    assert snap["配置"] and snap["零件"]           # 配置文本 + 哪个文件哪轮写的
+    assert snap["分数"]["点击AUC"] > 0
+
+
+def test_快照_记住每个零件是哪一轮写的(tmp_path):
+    """同一个路径被后面的轮次覆盖时，早期那一版只能靠这张清单找回来。"""
+    llm, ex = ScriptedLLM(promote_on=()), DriftingExecutor()
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, logs_dir=tmp_path,
+    )
+    第三轮 = json.loads((tmp_path / "snapshots" / "round_003.json").read_text(encoding="utf-8"))
+    # 假工兵每轮写同一个路径 → 第 3 轮的快照该指向第 3 轮那一版
+    assert set(第三轮["零件"].values()) == {3}
+
+
+def test_有效配置_用执行器里真正生效的那份():
+    """执行器把改动合并进内存里的 config，磁盘上那份一直是初始状态。"""
+    class _带配置的执行器(DriftingExecutor):
+        config = {"model": {"name": "esmm"}, "train": {"seed": 7}}
+
+    assert "esmm" in effective_config(_带配置的执行器(), "model:\n  name: mlp\n")
+    # 执行器没有 config（假执行器）→ 退回传进来的文本
+    assert effective_config(DriftingExecutor(), "model:\n  name: mlp\n") == "model:\n  name: mlp\n"
+
+
+# ────────────────── 叙事：跨轮的故事线 ──────────────────
+
+
+def test_叙事_把一整场压成一条线(tmp_path):
+    llm, ex = ScriptedLLM(promote_on=()), DriftingExecutor()
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, logs_dir=tmp_path,
+    )
+    text = (tmp_path / "narrative.md").read_text(encoding="utf-8")
+    assert "人工干预 0 次" in text
+    assert text.count("| 1 |") == 1 and "| 3 |" in text     # 每轮一行
+    assert "最终提交第" in text

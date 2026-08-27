@@ -190,6 +190,7 @@ def render_panel(r: dict, idx: int) -> str:
       <div class="status-meta">
         {esc(r.get('fidelity', '—'))}数据 · {r.get('tokens', 0):,} token ·
         {mins:.1f} 分钟 · 人工干预 {esc(r.get('interventions', 0))}
+        {'· ' + esc('；'.join(r.get('intervention_notes') or [])) if r.get('intervention_notes') else ''}
       </div>
     </div>
     {rec_panel}

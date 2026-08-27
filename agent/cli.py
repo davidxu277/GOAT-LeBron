@@ -23,6 +23,7 @@ import yaml
 from .knowledge import CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
 from .loop import (
+    InterventionLog,
     DEFAULT_EPSILON,
     DEFAULT_PATIENCE,
     DEFAULT_ROUNDS,
@@ -325,6 +326,55 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_intervene(args) -> int:
+    """记一次人工干预。
+
+    报出来的「干预 0 次」要有分量，前提是"非零"随手可得 ——
+    一个只能是 0 的数字，评委翻一眼代码就知道不算数。
+    """
+    InterventionLog.record(LOGS / "interventions.jsonl", args.reason, args.round)
+    print(f"已记一次人工干预：{args.reason}")
+    print(f"（写入 logs/interventions.jsonl，正在跑的那一场下一轮就会把它记进日志）")
+    return 0
+
+
+def cmd_restore(args) -> int:
+    """把某一轮的流水线原样还原出来 —— 交付物 #4 靠它。
+
+    工兵的改动是叠加在同一份配置和同一个 modules/ 上的，跑完 20 轮，
+    磁盘上只剩最后那个叠加态。要交"验证集最佳的那一版"，就得从日志里还原。
+    """
+    logs = pathlib.Path(args.logs)
+    snap_path = logs / "snapshots" / f"round_{args.round:03d}.json"
+    if not snap_path.exists():
+        raise SystemExit(f"没有第 {args.round} 轮的快照：{snap_path}")
+    snap = json.loads(snap_path.read_text(encoding="utf-8"))
+
+    rows = [json.loads(l) for l in
+            (logs / "rounds.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    by_round = {r["round_id"]: r for r in rows}
+
+    out = pathlib.Path(args.out)
+    (out / "config").mkdir(parents=True, exist_ok=True)
+    (out / "config" / "pipeline.yaml").write_text(snap["配置"], encoding="utf-8")
+
+    missing = []
+    for rel, owner in (snap["零件"] or {}).items():
+        content = (by_round.get(owner, {}).get("patch_files") or {}).get(rel)
+        if content is None:
+            missing.append(f"{rel}（第 {owner} 轮）")
+            continue
+        target = out / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    print(f"第 {args.round} 轮已还原到 {out}")
+    print(f"  配置 1 份 · 零件 {len(snap['零件'] or {}) - len(missing)} 个 · 分数 {snap['分数']}")
+    if missing:
+        print(f"  ⚠️ 这些零件在日志里找不到内容：{', '.join(missing)}")
+    return 1 if missing else 0
+
+
 def cmd_noise(args) -> int:
     """量噪声带：同一份配置换种子跑几次，看分数自己抖多少。"""
     from .noise import measure
@@ -377,6 +427,17 @@ def main() -> int:
     p.add_argument("--fail-role-call", type=int,
                    help="演习：让医生的第几次调用抛异常")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("intervene", help="记一次人工干预（跑的过程中插了手就敲一条）")
+    p.add_argument("reason", help="干了什么、为什么")
+    p.add_argument("--round", type=int, help="当时第几轮（可选）")
+    p.set_defaults(func=cmd_intervene)
+
+    p = sub.add_parser("restore", help="把某一轮的流水线还原出来（交付物 #4）")
+    p.add_argument("round", type=int, help="要还原第几轮")
+    p.add_argument("--out", default="restored", help="还原到哪个目录")
+    p.add_argument("--logs", default=str(LOGS), help="从哪份日志还原")
+    p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("noise", help="量噪声带：同配置换种子看分数抖多少")
     _add_data_args(p)
