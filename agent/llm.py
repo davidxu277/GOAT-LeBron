@@ -25,10 +25,15 @@ BIG_MODEL = os.getenv("AGENT_BIG_MODEL", "claude-opus-5")
 SMALL_MODEL = os.getenv("AGENT_SMALL_MODEL", "claude-haiku-4-5")
 
 # 每 100 万 token 的价格（美元），用于成本估算
+# DeepSeek 用非高峰的 cache-miss 价（2026-08 官方价）。实际账单会更低：
+# 每次请求自带上下文缓存，system prompt 这类重复前缀按 cache-hit 计价（便宜约 31 倍），
+# 所以这里的估算是保守上限。高峰时段（周一至周五 UTC 01-04、06-10 点）价格翻倍。
 PRICING = {
     "claude-opus-5": (5.00, 25.00),
     "claude-sonnet-5": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
+    "deepseek-v4-flash": (0.22, 0.66),
+    "deepseek-v4-pro": (0.55, 2.19),
 }
 
 # effort 只在 Opus / Sonnet 5 系列上可用，Haiku 4.5 传了会报错

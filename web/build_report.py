@@ -24,6 +24,15 @@ DEFAULT_OUT = ROOT / "logs" / "report.html"
 
 VERDICT_TONE = {"猜对了": "good", "猜错了": "bad", "说不清": "muted", "没跑起来": "bad"}
 
+# 每 100 万 token 的价格（美元），与 agent/llm.py 的 PRICING 保持一致。
+# 日志里只记了 token 总数没记模型，按默认模型估算，是保守上限。
+PRICE_PER_MTOK = float(__import__("os").getenv("REPORT_PRICE_PER_MTOK", "0.44"))
+
+
+def estimate_cost(rows: list[dict]) -> float:
+    """按 token 总量估算花费。输入输出价不同，这里取中间值做粗估。"""
+    return sum(r.get("tokens", 0) for r in rows) / 1e6 * PRICE_PER_MTOK
+
 
 def esc(x) -> str:
     return html.escape(str(x))
@@ -126,27 +135,60 @@ def render_panel(r: dict, idx: int) -> str:
     else:
         refl_body = '<p class="empty">本轮没有复盘（多半中途失败了）</p>'
 
-    rec_block = (
-        '<div class="recoveries">'
-        + "".join(f'<span class="recovery">{esc(x)}</span>' for x in recoveries)
-        + "</div>"
-    ) if recoveries else ""
+    # ── 底部状态栏：四阶段进度 + 完整报错（点击展开）──
+    stages = [
+        ("医生", bool(findings) or diag.get("no_finding")),
+        ("军师", bool(props)),
+        ("工兵", bool(patch)),
+        ("复盘", bool(refl)),
+    ]
+    # 找出第一个没完成的阶段，它之前的算已完成、它本身算中断点
+    first_fail = next((i for i, (_, ok) in enumerate(stages) if not ok), None)
+    steps = "".join(
+        f'<span class="step {"done" if ok else ("stop" if i == first_fail else "skip")}">'
+        f'{esc(name)}</span>'
+        for i, (name, ok) in enumerate(stages)
+    )
+
+    if recoveries:
+        status_tone = "warn"
+        status_text = f"{len(recoveries)} 条恢复事件"
+    elif refl.get("verdict") == "猜对了":
+        status_tone = "ok"
+        status_text = "本轮顺利完成"
+    else:
+        status_tone = "idle"
+        status_text = "本轮完成，无异常事件"
+
+    rec_detail = "".join(
+        f'<li>{esc(x)}</li>' for x in recoveries
+    )
+    rec_panel = (
+        f'<ul class="rec-list">{rec_detail}</ul>' if recoveries else ""
+    )
 
     mins = r.get("seconds", 0) / 60
     return f"""
 <div class="panel{' active' if idx == 0 else ''}" data-panel="{idx}">
-  <div class="panel-meta">
-    <span>{esc(r.get('fidelity', '—'))}数据</span><span>·</span>
-    <span>{r.get('tokens', 0):,} token</span><span>·</span>
-    <span>{mins:.1f} 分钟</span><span>·</span>
-    <span>人工干预 {esc(r.get('interventions', 0))}</span>
-    {rec_block}
-  </div>
   <div class="bento">
     <section class="cell"><h3><i>①</i>医生 · 诊断</h3><div class="scroll">{doctor_body}</div></section>
     <section class="cell"><h3><i>②</i>军师 · 提案</h3><div class="scroll">{strat_body}</div></section>
     <section class="cell"><h3><i>③</i>工兵 · 实现</h3><div class="scroll">{impl_body}</div></section>
     <section class="cell"><h3><i>④</i>复盘官 · 判定</h3><div class="scroll">{refl_body}</div></section>
+  </div>
+  <div class="statusbar {status_tone}">
+    <div class="status-line">
+      <div class="steps">{steps}</div>
+      <div class="status-msg">
+        <span class="dot"></span>{esc(status_text)}
+        {'<button class="expand" type="button">展开详情</button>' if recoveries else ''}
+      </div>
+      <div class="status-meta">
+        {esc(r.get('fidelity', '—'))}数据 · {r.get('tokens', 0):,} token ·
+        {mins:.1f} 分钟 · 人工干预 {esc(r.get('interventions', 0))}
+      </div>
+    </div>
+    {rec_panel}
   </div>
 </div>"""
 
@@ -182,6 +224,12 @@ body{
   background:var(--card); border:1px solid var(--line); border-radius:12px;
   padding:.6rem; overflow-y:auto; display:flex; flex-direction:column; gap:.3rem;
 }
+.rounds-title{
+  font-size:.76rem; font-weight:600; color:var(--soft); letter-spacing:.04em;
+  padding:.2rem .7rem .5rem; border-bottom:1px solid var(--line);
+  margin-bottom:.4rem; display:flex; flex-direction:column;
+}
+.rounds-title span{font-size:.68rem; font-weight:400; color:var(--faint); letter-spacing:0}
 .round-btn{
   text-align:left; background:none; border:1px solid transparent; border-radius:9px;
   padding:.55rem .7rem; cursor:pointer; font:inherit; color:var(--ink);
@@ -196,19 +244,49 @@ body{
 .round-btn.active .v{color:var(--accent)}
 
 .stage{position:relative; min-height:0}
-.panel{position:absolute; inset:0; display:none; flex-direction:column; gap:.6rem}
+.panel{position:absolute; inset:0; display:none; flex-direction:column; gap:.7rem}
 .panel.active{display:flex}
-.panel-meta{
-  display:flex; align-items:center; flex-wrap:wrap; gap:.5rem; flex:none;
-  font-size:.76rem; color:var(--faint); font-variant-numeric:tabular-nums;
-  padding:0 .2rem;
+
+/* ── 底部状态栏：阶段进度 + 状态消息 + 可展开的完整报错 ── */
+.statusbar{
+  flex:none; background:var(--card); border:1px solid var(--line);
+  border-radius:12px; padding:.6rem .9rem;
 }
-.recoveries{display:flex; gap:.4rem; flex-wrap:wrap; margin-left:auto}
-.recovery{
-  background:var(--warm-soft); color:#7A5C3C; border-radius:6px;
-  padding:.1rem .55rem; font-size:.72rem; max-width:38rem;
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+.statusbar.warn{background:var(--warm-soft); border-color:#EADCC8}
+.statusbar.ok{background:var(--accent-soft); border-color:#DCE6DF}
+.status-line{display:flex; align-items:center; gap:1rem; flex-wrap:wrap}
+.steps{display:flex; align-items:center; gap:.3rem}
+.step{
+  font-size:.74rem; padding:.1rem .55rem; border-radius:99px;
+  background:#F0EEE9; color:var(--faint); position:relative;
 }
+.step + .step::before{
+  content:""; position:absolute; left:-.3rem; top:50%; width:.3rem; height:1px;
+  background:var(--line);
+}
+.step.done{background:var(--accent-soft); color:var(--accent)}
+.step.stop{background:var(--bad-soft); color:var(--bad); font-weight:500}
+.step.skip{opacity:.45}
+.status-msg{display:flex; align-items:center; gap:.5rem; font-size:.78rem; color:var(--soft)}
+.status-msg .dot{width:.45rem; height:.45rem; border-radius:50%; background:var(--faint)}
+.statusbar.warn .dot{background:var(--warm)}
+.statusbar.ok .dot{background:var(--accent)}
+.expand{
+  font:inherit; font-size:.73rem; color:var(--soft); cursor:pointer;
+  background:rgba(255,255,255,.7); border:1px solid var(--line);
+  border-radius:5px; padding:.05rem .5rem;
+}
+.expand:hover{color:var(--ink)}
+.status-meta{
+  margin-left:auto; font-size:.74rem; color:var(--faint);
+  font-variant-numeric:tabular-nums;
+}
+.rec-list{
+  margin:.6rem 0 .1rem; padding:0 0 0 1rem; display:none;
+  font-size:.78rem; color:#7A5C3C; line-height:1.6;
+}
+.rec-list.show{display:block}
+.rec-list li{margin:.25rem 0}
 
 /* ── 便当盒：2×2 等分，格子内部各自滚动 ── */
 .bento{flex:1; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr;
@@ -270,6 +348,14 @@ document.querySelectorAll('.round-btn').forEach(btn=>{
       p.classList.toggle('active', p.dataset.panel===i));
   });
 });
+// 状态栏「展开详情」：显示完整的恢复事件文本，不再被截断
+document.querySelectorAll('.expand').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const list = btn.closest('.statusbar').querySelector('.rec-list');
+    const shown = list.classList.toggle('show');
+    btn.textContent = shown ? '收起' : '展开详情';
+  });
+});
 """
 
 
@@ -283,7 +369,7 @@ def build(rows: list[dict]) -> str:
     stats = [
         (f"{len(rows)}", "轮次"),
         (f"{hits}", "猜对了"),
-        (f"{total_tokens:,}", "token"),
+        (f"{total_tokens:,}", f"token · ${estimate_cost(rows):.3f}"),
         (f"{total_min:.0f}", "分钟"),
         (f"{interventions}", "人工干预"),
     ]
@@ -316,7 +402,10 @@ def build(rows: list[dict]) -> str:
     <div class="stats">{stat_html}</div>
   </header>
   <div class="main">
-    <nav class="rounds">{btns}</nav>
+    <nav class="rounds">
+      <div class="rounds-title">迭代轮次<span>点击查看该轮</span></div>
+      {btns}
+    </nav>
     <div class="stage">{panels}</div>
   </div>
 </div>
