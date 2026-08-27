@@ -37,6 +37,38 @@ BASE_FEATURES = ["101", "121", "122", "124", "125", "126", "127", "128", "129",
 
 FIDELITY_FRAC = {"小份": 0.15, "中份": 0.4, "大份": 0.75, "全量": 1.0}
 
+# 工兵能调的超参数：配置里的键名 → (sklearn 参数名, 下限, 上限, 默认值)。
+#
+# 区间是**护栏不是建议**：一个 n_estimators: 100000 就能让一轮跑到天亮，
+# 把整场的算力预算烧光，而 Agent 自己看不出这是它干的。
+# 配置里没写、写歪了、写成字符串 —— 一律退回默认值，绝不让训练因为
+# 一个配置错字整轮报废。
+LGBM_PARAMS = {
+    "n_estimators":     ("n_estimators",      10,   2000,  120),
+    "num_leaves":       ("num_leaves",         4,    512,   31),
+    "learning_rate":    ("learning_rate",  0.001,    0.5, 0.05),
+    "min_data_in_leaf": ("min_child_samples",  1,  10000,   20),
+    "feature_fraction": ("colsample_bytree", 0.1,    1.0,  1.0),
+}
+
+
+def lgbm_kwargs(base: dict[str, Any] | None,
+                overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    """把配置里的超参数翻译成 LGBMClassifier 的入参，越界的夹回区间内。
+
+    纯函数，不碰 lightgbm，方便离线测。
+    """
+    merged = {**(base or {}), **(overrides or {})}
+    out: dict[str, Any] = {}
+    for key, (sk_name, lo, hi, default) in LGBM_PARAMS.items():
+        raw = merged.get(key, default)
+        try:
+            value = type(default)(raw)
+        except (TypeError, ValueError):
+            value = default                      # 写成 "很多" 这种，退回默认
+        out[sk_name] = min(hi, max(lo, value))
+    return out
+
 
 def _load_pipeline_config() -> dict[str, Any]:
     """读 config/pipeline.yaml。文件不在就返回空配置，用代码里的默认值兜底。"""
@@ -271,16 +303,20 @@ class RealExecutor:
             val_x[col] = val_x[col].astype("category")
 
         # 点击模型：全部行
-        ctr_model = LGBMClassifier(n_estimators=120, num_leaves=31, learning_rate=0.05,
-                                   random_state=self.seed, verbosity=-1)
+        # 超参数从配置读（R7）—— 这以前是写死的，工兵改了 model.lightgbm.* 也纹丝不动
+        model_cfg = self.config.get("model") or {}
+        ctr_kw = lgbm_kwargs(model_cfg.get("lightgbm"))
+        cvr_kw = lgbm_kwargs(model_cfg.get("lightgbm"), model_cfg.get("cvr_overrides"))
+        emit("phase", name="超参数", detail=f"点击塔 {ctr_kw}")
+
+        ctr_model = LGBMClassifier(random_state=self.seed, verbosity=-1, **ctr_kw)
         ctr_model.fit(train[features], train["click"], categorical_feature=features)
 
         # 购买模型：只用 click=1 的行
         clicked = train[train["click"] == 1]
         cvr_model = None
         if clicked["conversion"].nunique() >= 2:
-            cvr_model = LGBMClassifier(n_estimators=60, num_leaves=15, learning_rate=0.05,
-                                       random_state=self.seed, verbosity=-1)
+            cvr_model = LGBMClassifier(random_state=self.seed, verbosity=-1, **cvr_kw)
             cvr_model.fit(clicked[features], clicked["conversion"],
                           categorical_feature=features)
 
@@ -335,6 +371,7 @@ class RealExecutor:
                 "购买分": tr_cvr,
             },
             "当前特征": features,
+            "实际超参数": {"点击塔": ctr_kw, "购买塔": cvr_kw},
             "未使用的字段": [c for c in ("109_14", "110_14", "127_14", "150_14",
                                       "508", "509", "702", "853")
                           if c in train.columns and c not in features],

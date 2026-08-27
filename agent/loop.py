@@ -672,6 +672,58 @@ def snapshot_round(logs_dir: pathlib.Path, log: RoundLog, config_text: str,
     }, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def read_snapshot(logs_dir: pathlib.Path, run_id: str, round_id: int
+                  ) -> tuple[dict[str, Any], dict[str, str]] | None:
+    """读出某一轮的流水线：(配置字典, {零件路径: 完整代码})。读不出返回 None。
+
+    零件内容不在快照里 —— 快照只记「这个文件是哪一轮写的」，
+    内容从 rounds.jsonl 的 patch_files 取，避免同一份代码存两遍。
+    """
+    snap_path = logs_dir / "snapshots" / (run_id or "unknown") / f"round_{round_id:03d}.json"
+    rounds_path = logs_dir / "rounds.jsonl"
+    if not snap_path.exists() or not rounds_path.exists():
+        return None
+    snap = json.loads(snap_path.read_text(encoding="utf-8"))
+    config = yaml.safe_load(snap.get("配置") or "") or {}
+    if not isinstance(config, dict):
+        return None
+
+    rows = [json.loads(l) for l in
+            rounds_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    # 只认同一场 —— 轮次编号每场都从 1 重数，跨场取会拿到别人那一轮的代码
+    by_round = {r["round_id"]: r for r in rows if (r.get("run_id") or "") == run_id}
+    files: dict[str, str] = {}
+    for rel, owner in (snap.get("零件") or {}).items():
+        content = (by_round.get(owner, {}).get("patch_files") or {}).get(rel)
+        if content is None:
+            return None                     # 缺件就别装了，半个流水线比没有更糟
+        files[rel] = content
+    return config, files
+
+
+def install_pipeline(logs_dir: pathlib.Path, run_id: str, round_id: int,
+                     executor: Any) -> bool:
+    """把某一轮的流水线装回执行器，供最终裁决使用。
+
+    为什么必须装：工兵的改动是**叠加**的，跑到最后磁盘上只剩末态。
+    而收敛条件是「连续 patience 轮没进步」—— 最佳轮之后必然还跑了至少
+    patience 轮，**末态永远不等于最佳轮**，不是偶发情况。
+    拿末态去考锁定集，考的是另一个模型，而锁定集只许读一次，机会就烧掉了。
+    """
+    if not hasattr(executor, "config"):
+        return False
+    got = read_snapshot(logs_dir, run_id, round_id)
+    if got is None:
+        return False
+    config, files = got
+    for rel, content in files.items():
+        target = ROOT / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    executor.config = config
+    return True
+
+
 def write_narrative(logs_dir: pathlib.Path, history: list[dict[str, Any]],
                     summary: "SessionSummary") -> None:
     """把一整场压成一条故事线。
@@ -748,6 +800,7 @@ class SessionSummary:
     best_scores: dict[str, float] = field(default_factory=dict)
     # 锁定集上的分数（R3：整场只评一次）。空 = 没配锁定集，或裁决失败。
     holdout_scores: dict[str, float] = field(default_factory=dict)
+    holdout_note: str = ""      # 锁定集大考的说明（跳过时写明为什么）
     baseline: dict[str, float] = field(default_factory=dict)
     total_tokens: int = 0
     total_train_seconds: float = 0.0
@@ -786,6 +839,8 @@ class SessionSummary:
             lines.append(f"  {metric} 相对基线  {delta:+.4f}")
         if not self.baseline:
             lines.append("  ⚠️ 官方基线分未填，delta 算不出来（--baseline-ctr / --baseline-cvr）")
+        if self.holdout_note:
+            lines.append(f"锁定集          {self.holdout_note}")
         if self.holdout_scores:
             lines.append("锁定集裁决      （整场只读一次，从未参与任何决策）")
             for metric, value in self.holdout_scores.items():
@@ -855,7 +910,7 @@ def run_session(
     if start_fidelity not in FIDELITY_LADDER:
         raise ValueError(f"没有「{start_fidelity}」这一档，只能是 {FIDELITY_LADDER}")
 
-    cur = parent = initial_report
+    cur = initial_report          # 当前这一版的成绩单。复盘官要的「改动之前那一版」就是它
     history: list[dict[str, Any]] = []
     blacklist: set[str] = set()          # 试过且失败的卡 —— 调度器硬性跳过
     applied: set[str] = set()            # 已经生效、并入流水线的卡 —— 再上一次没意义
@@ -877,7 +932,7 @@ def run_session(
 
         已经在最高档上时返回 False —— 没地方可升了，交给调用方判停。
         """
-        nonlocal rung, cur, parent, best_score, best, stale, no_finding_streak
+        nonlocal rung, cur, best_score, best, stale, no_finding_streak
         if rung >= len(FIDELITY_LADDER) - 1:
             return False
         rung += 1
@@ -889,7 +944,7 @@ def run_session(
             print(f"  ⚠️ 重测失败：{exc}，档位已升，下一轮直接用新档位")
             result = None
         if result is not None and result.ok:
-            cur = parent = result.health_report
+            cur = result.health_report
             summary.total_train_seconds += result.seconds
         elif result is not None:
             # 重测没跑起来：档位照升，但沿用旧成绩单，并记一笔恢复事件
@@ -916,7 +971,11 @@ def run_session(
         log = run_round(
             round_id=rid, run_id=run_id,
             llm=llm, vocab=vocab, cards=cards,
-            health_report=_with_bands(cur, noise_bands), parent_result=parent,
+            # 两个都传 cur：医生看当前状态做诊断，复盘官拿它当「改动之前那一版」。
+            # 这里曾经传过一个落后两轮的 parent —— 第 3 轮会拿第 1 轮来比，
+            # 中间两轮的进步全算在这一次头上，虚报的收益还会传染到
+            # 卡片信任分、黑名单和升档决策。
+            health_report=_with_bands(cur, noise_bands), parent_result=cur,
             executor=executor,
             scheduler=CostAwareScheduler(tried_cards=blacklist | applied, time_ledger=time_ledger),
             module_interface=module_interface,
@@ -991,7 +1050,7 @@ def run_session(
             continue                        # 这一轮没跑出结果，状态不动
 
         # ── 接线：本轮成绩单成为下一轮的输入 ──
-        parent, cur = cur, log.metrics or cur
+        cur = log.metrics or cur
 
         score = total_score(cur)
         if score > best_score + epsilon:
@@ -1019,6 +1078,12 @@ def run_session(
     # 开发集被反复看了几十轮，挑出来的改动里混着「恰好迎合它」的部分。
     # 这份从没被任何决策看过的数据，是唯一能说清泛化落差有多大的裁判。
     judge = getattr(executor, "final_judge", None)
+    if callable(judge) and not install_pipeline(logs_dir, run_id, summary.best_round, executor):
+        # 装不回最佳轮就别考 —— 锁定集只许读一次，宁可没有这个数，也不要一个错的数
+        summary.holdout_note = (
+            f"跳过锁定集大考：没能把第 {summary.best_round} 轮的流水线装回来。"
+            f"末态跟最佳轮不是同一个模型，拿末态去考等于白烧唯一一次机会。")
+        judge = None
     if callable(judge):
         verdict = judge(summary.best_fidelity or "全量")
         if verdict.ok:

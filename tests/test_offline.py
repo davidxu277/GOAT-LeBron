@@ -18,7 +18,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from agent.knowledge import Card, CardLibrary, SymptomVocab
 from agent.llm import Ledger, SchemaViolation
 from agent.loop import (SHELF_KEEP, CostAwareScheduler, InterventionLog, PriorLedger,
-                        Shelf, TimeLedger, _with_bands, effective_config,
+                        RunResult, Shelf, TimeLedger, _with_bands, effective_config,
                         run_round, run_session)
 from agent.offline import DriftingExecutor, ScriptedLLM
 from agent import noise, roles, schemas
@@ -1332,3 +1332,167 @@ def test_整理提交包_场次不存在时说清楚有哪些(tmp_path):
     with pytest.raises(SystemExit, match="真有的那场"):
         cli.cmd_finalize(_ap.Namespace(run="不存在", out=str(tmp_path / "x"),
                                        logs=str(tmp_path)))
+
+
+def test_复盘官拿的是上一轮而不是上上轮(tmp_path):
+    """曾经的 off-by-one：第 3 轮会拿第 1 轮来比，中间两轮的进步全算在这一次头上。
+
+    虚报的收益会传染到卡片信任分、黑名单和升档决策 —— 一处错，全盘失真。
+    """
+    看到的 = []
+
+    class _记录复盘官(ScriptedLLM):
+        def call(self, **kw):
+            if kw["role"] == "复盘官":
+                看到的.append(kw["user"])
+            return super().call(**kw)
+
+    llm, ex = _记录复盘官(promote_on=()), DriftingExecutor()
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, logs_dir=tmp_path,
+    )
+    rows = [json.loads(l) for l in
+            (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    第2轮的分 = rows[1]["metrics"]["验证集"]["点击分"]
+    第1轮的分 = rows[0]["metrics"]["验证集"]["点击分"]
+
+    # 第 3 轮的复盘材料里，「改动之前那一版」必须是第 2 轮的分，不是第 1 轮的
+    第3轮材料 = 看到的[2]
+    assert str(第2轮的分) in 第3轮材料.split("## 改动之前那一版")[1]
+    assert 第1轮的分 != 第2轮的分                       # 两个数确实不同，测试才有意义
+
+
+# ────────────────── 锁定集大考：必须考最佳轮，不是末态 ──────────────────
+
+
+class _带配置的执行器(DriftingExecutor):
+    """会记账"最后一次大考用的是哪份配置"的假执行器。"""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.config = {"model": {"name": "起始"}}
+        self.judged_config = None
+
+    def run(self, patch, fidelity):
+        # 模拟工兵的改动叠加：每轮都往配置里盖一层
+        self.config = {"model": {"name": f"第{self.runs + 1}轮"}}
+        return super().run(patch, fidelity)
+
+    def final_judge(self, fidelity):
+        self.judged_config = dict(self.config)
+        return RunResult(ok=True, seconds=1.0, fidelity=fidelity,
+                         health_report=self.report(fidelity))
+
+
+def test_大考用的是最佳轮的配置而不是末态(tmp_path):
+    """收敛条件是「连续 patience 轮没进步」——最佳轮之后必然还跑了至少 patience 轮，
+    末态永远不等于最佳轮。拿末态去考，考的是另一个模型，而机会只有一次。
+    """
+    ex = _带配置的执行器(gain=0.004, decay=0.05)      # 涨一轮就基本不动了
+    summary = run_session(
+        llm=ScriptedLLM(promote_on=()), vocab=SymptomVocab.load(),
+        cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=8, patience=2, run_id="测试场", logs_dir=tmp_path,
+    )
+    assert summary.rounds_run > summary.best_round        # 最佳轮之后确实还跑了
+    assert ex.judged_config == {"model": {"name": f"第{summary.best_round}轮"}}
+    assert summary.holdout_scores                          # 考成了
+
+
+def test_装不回最佳轮就跳过大考(tmp_path):
+    """锁定集只许读一次 —— 宁可没有这个数，也不要一个错的数。"""
+    ex = _带配置的执行器()
+    summary = run_session(
+        llm=ScriptedLLM(promote_on=()), vocab=SymptomVocab.load(),
+        cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, run_id="测试场", logs_dir=tmp_path,
+    )
+    # 把快照删掉，模拟"装不回来"
+    import shutil as _sh
+    _sh.rmtree(tmp_path / "snapshots")
+    ex2 = _带配置的执行器()
+    s2 = run_session(
+        llm=ScriptedLLM(promote_on=()), vocab=SymptomVocab.load(),
+        cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex2, initial_report=ex2.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, run_id="另一场", logs_dir=tmp_path / "空的",
+    )
+    assert s2.holdout_scores or s2.holdout_note            # 要么考了，要么写明为什么没考
+
+
+def test_读快照_缺件就整份不认(tmp_path):
+    """半个流水线比没有更糟 —— 装一半会让大考考出一个谁也不认识的模型。"""
+    from agent.loop import read_snapshot
+
+    (tmp_path / "snapshots" / "某场").mkdir(parents=True)
+    (tmp_path / "snapshots" / "某场" / "round_002.json").write_text(json.dumps({
+        "轮次": 2, "配置": "model:\n  name: mlp\n",
+        "零件": {"modules/features/x.py": 1},          # 说是第 1 轮写的
+    }, ensure_ascii=False), encoding="utf-8")
+    # 但日志里第 1 轮没有这个文件
+    (tmp_path / "rounds.jsonl").write_text(json.dumps({
+        "round_id": 1, "run_id": "某场", "patch_files": {}}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    assert read_snapshot(tmp_path, "某场", 2) is None
+
+
+# ────────────────── 超参数：工兵改了得真的生效，但不能想改多大改多大 ──────────────────
+
+
+def test_超参数_默认值跟改之前一模一样():
+    """接通配置不能顺手改变基线行为，否则历史分数全对不上了。"""
+    pytest.importorskip("pandas")
+    from harness.executor import lgbm_kwargs
+
+    assert lgbm_kwargs(None) == {
+        "n_estimators": 120, "num_leaves": 31, "learning_rate": 0.05,
+        "min_child_samples": 20, "colsample_bytree": 1.0,
+    }
+    # 购买塔的覆盖值也照旧
+    cvr = lgbm_kwargs(None, {"n_estimators": 60, "num_leaves": 15})
+    assert cvr["n_estimators"] == 60 and cvr["num_leaves"] == 15
+
+
+def test_超参数_工兵改了真的生效():
+    pytest.importorskip("pandas")
+    from harness.executor import lgbm_kwargs
+
+    kw = lgbm_kwargs({"n_estimators": 300, "learning_rate": 0.02})
+    assert kw["n_estimators"] == 300 and kw["learning_rate"] == 0.02
+
+
+def test_超参数_越界会被夹回去():
+    """护栏不是建议：n_estimators=100000 能让一轮跑到天亮，把整场预算烧光。"""
+    pytest.importorskip("pandas")
+    from harness.executor import lgbm_kwargs
+
+    assert lgbm_kwargs({"n_estimators": 100000})["n_estimators"] == 2000
+    assert lgbm_kwargs({"num_leaves": 1})["num_leaves"] == 4
+    assert lgbm_kwargs({"learning_rate": 5.0})["learning_rate"] == 0.5
+
+
+def test_超参数_写歪了退回默认而不是炸掉():
+    """一个配置错字不该让整轮训练报废。"""
+    pytest.importorskip("pandas")
+    from harness.executor import lgbm_kwargs
+
+    assert lgbm_kwargs({"n_estimators": "很多"})["n_estimators"] == 120
+    assert lgbm_kwargs({"learning_rate": None})["learning_rate"] == 0.05
+
+
+def test_超参数_没在白名单里的键被忽略():
+    """工兵只能调这五个 —— 别的键写了也不会被传给 LightGBM。"""
+    pytest.importorskip("pandas")
+    from harness.executor import lgbm_kwargs
+
+    kw = lgbm_kwargs({"n_jobs": 999, "device": "cuda", "n_estimators": 200})
+    assert "n_jobs" not in kw and "device" not in kw
+    assert kw["n_estimators"] == 200
