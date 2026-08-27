@@ -12,6 +12,19 @@
 2. **输出完整文件内容，不要 diff 片段。**
    new_files 里每一项的 content 必须是从第一行到最后一行的完整文件。
 
+   **写了新零件，就必须在 config_patch 里指路**，否则没有任何东西会去加载它：
+
+   ```yaml
+   features:
+     你这个零件的名字:
+       enabled: true
+       impl: modules/features/你写的那个文件.py    # ← 少了这行 = 零件白写
+       # 零件要用的参数也写在这里，代码里不许写死（R7）
+   ```
+
+   零件类自己去 config 里挖 `features.<名字>` 这一块（范文里就是这么写的），
+   所以两边的名字必须对上。新长出来的特征列会自动进特征表，不用改 base_fields。
+
 3. **绝对不许把这五个字段放进模型输入**：
    sample_id、common_id、click、conversion、ctcvr
    其中 ctcvr = click × conversion，放进去等于直接把答案告诉模型。

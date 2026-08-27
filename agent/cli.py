@@ -258,6 +258,16 @@ def cmd_run(args) -> int:
     cards = CardLibrary.load(vocab)
 
     logs_dir = LOGS
+    if getattr(args, "fresh", False):
+        # 之前那些"改动其实没生效却被判无效"的轮次，已经把靠谱度和黑名单污染了。
+        # 正式跑之前清一次，别让 Agent 带着一堆错误的偏见开跑。
+        清掉 = []
+        for name in ("prior_ledger.json", "time_ledger.json", "shelf.json"):
+            f = LOGS / name
+            if f.exists():
+                f.unlink()
+                清掉.append(name)
+        print(f"已清空历史记忆：{', '.join(清掉) or '（本来就是空的）'}\n")
     if args.offline:
         from .offline import DriftingExecutor, ScriptedLLM
         faults = {"医生": [args.fail_role_call]} if args.fail_role_call else {}
@@ -503,6 +513,9 @@ def main() -> int:
     p.add_argument("--token-budget", type=int, default=DEFAULT_TOKEN_BUDGET)
     p.add_argument("--baseline-ctr", type=float, help="官方基线的点击 AUC，用来算 delta")
     p.add_argument("--baseline-cvr", type=float, help="官方基线的购买 AUC，用来算 delta")
+    p.add_argument("--fresh", action="store_true",
+                   help="清空历史账本再跑 —— 正式那一场应该带上它，"
+                        "免得带着开发期间攒下的错误偏见开跑")
     p.add_argument("--offline", action="store_true",
                    help="演习模式：假模型 + 假执行器，不联网不花钱")
     p.add_argument("--fail-round", type=int, action="append",

@@ -1496,3 +1496,111 @@ def test_超参数_没在白名单里的键被忽略():
     kw = lgbm_kwargs({"n_jobs": 999, "device": "cuda", "n_estimators": 200})
     assert "n_jobs" not in kw and "device" not in kw
     assert kw["n_estimators"] == 200
+
+
+# ────────────────── 加特征零件：写进去的文件必须真的被跑起来 ──────────────────
+
+
+def _写个零件(tmp_path, monkeypatch, body: str) -> None:
+    """在临时 ROOT 下放一个零件文件，并把执行器的 ROOT 指过去。"""
+    from harness import executor as ex_mod
+
+    monkeypatch.setattr(ex_mod, "ROOT", tmp_path)
+    path = tmp_path / "modules" / "features" / "demo.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+零件范本 = '''
+class Demo:
+    def __init__(self, config):
+        self.k = config["features"]["演示零件"]["k"]
+        self.seen = None
+    def fit(self, train_df):
+        self.seen = float(train_df["a"].mean()) * self.k
+    def transform(self, df):
+        df = df.copy()
+        df["新列"] = self.seen
+        return df
+'''
+
+
+def test_零件_启用了就真的被加载并跑起来(tmp_path, monkeypatch):
+    """这是 ① 的核心：以前文件写进去了，但没有任何机制去加载和运行它。"""
+    pd = pytest.importorskip("pandas")
+    from harness.executor import apply_feature_ops, load_feature_ops
+
+    _写个零件(tmp_path, monkeypatch, 零件范本)
+    cfg = {"features": {"演示零件": {
+        "enabled": True, "impl": "modules/features/demo.py", "k": 2}}}
+
+    ops = load_feature_ops(cfg)
+    assert [n for n, _ in ops] == ["演示零件"]
+
+    train = pd.DataFrame({"a": [1.0, 3.0]})
+    val = pd.DataFrame({"a": [99.0]})
+    train, (val,), 新列 = apply_feature_ops(ops, train, [val])
+    assert 新列 == ["新列"]
+    assert train["新列"].iloc[0] == 4.0          # (1+3)/2 * 2
+    assert val["新列"].iloc[0] == 4.0            # 验证集套用训练集的统计量（R2）
+
+
+def test_零件_没启用的不加载(tmp_path, monkeypatch):
+    pytest.importorskip("pandas")
+    from harness.executor import load_feature_ops
+
+    _写个零件(tmp_path, monkeypatch, 零件范本)
+    assert load_feature_ops({"features": {"演示零件": {
+        "enabled": False, "impl": "modules/features/demo.py"}}}) == []
+
+
+def test_零件_启用了却没写impl直接报错(tmp_path, monkeypatch):
+    """以前这种情况是**静默无效**：配置改了、文件写了，训练纹丝不动，
+    却被记成「这个方案没用」，工兵白挨一次负分。宁可当场炸。"""
+    pytest.importorskip("pandas")
+    from harness.executor import load_feature_ops
+
+    _写个零件(tmp_path, monkeypatch, 零件范本)
+    with pytest.raises(ValueError, match="没写 impl"):
+        load_feature_ops({"features": {"演示零件": {"enabled": True}}})
+
+
+def test_零件_不许从modules之外加载(tmp_path, monkeypatch):
+    """放开一寸就等于让 Agent import 任意文件（R5）。"""
+    pytest.importorskip("pandas")
+    from harness.executor import load_feature_ops
+
+    _写个零件(tmp_path, monkeypatch, 零件范本)
+    for 坏路径 in ("harness/executor.py", "modules/../harness/x.py"):
+        with pytest.raises(ValueError, match="非法零件路径"):
+            load_feature_ops({"features": {"x": {"enabled": True, "impl": 坏路径}}})
+
+
+def test_零件_文件里没有合格的类会说清楚(tmp_path, monkeypatch):
+    pytest.importorskip("pandas")
+    from harness.executor import load_feature_ops
+
+    _写个零件(tmp_path, monkeypatch, "class 不合格:\n    pass\n")
+    with pytest.raises(TypeError, match="没有实现 FeatureOp 接口"):
+        load_feature_ops({"features": {"x": {
+            "enabled": True, "impl": "modules/features/demo.py"}}})
+
+
+def test_零件_fit只看训练集(tmp_path, monkeypatch):
+    """R2：读验证集来算统计量 = 作弊，分数虚高，测试集必掉。"""
+    pd = pytest.importorskip("pandas")
+    from harness.executor import apply_feature_ops, load_feature_ops
+
+    _写个零件(tmp_path, monkeypatch, '''
+class Demo:
+    def __init__(self, config): self.fit_rows = []
+    def fit(self, train_df): self.fit_rows.append(len(train_df))
+    def transform(self, df):
+        df = df.copy(); df["新列"] = 1; return df
+''')
+    ops = load_feature_ops({"features": {"x": {
+        "enabled": True, "impl": "modules/features/demo.py"}}})
+    train = pd.DataFrame({"a": [1, 2, 3]})
+    val = pd.DataFrame({"a": [9]})
+    apply_feature_ops(ops, train, [val])
+    assert ops[0][1].fit_rows == [3]             # 只 fit 过训练集，一次

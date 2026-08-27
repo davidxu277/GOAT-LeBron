@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import pathlib
 import time
 from typing import Any
@@ -50,6 +51,75 @@ LGBM_PARAMS = {
     "min_data_in_leaf": ("min_child_samples",  1,  10000,   20),
     "feature_fraction": ("colsample_bytree", 0.1,    1.0,  1.0),
 }
+
+
+def _load_op_class(rel_path: str) -> Any:
+    """从 modules/ 下的一个文件里取出零件类。
+
+    只认 modules/ 下的路径（R5）—— 这是 Agent 唯一被允许写入的地方，
+    放开一寸就等于让它 import 任意文件。
+    """
+    rel = str(rel_path).replace("\\", "/")
+    if not rel.startswith("modules/") or ".." in rel.split("/"):
+        raise ValueError(f"非法零件路径：{rel}（只能在 modules/ 下，R5）")
+    path = ROOT / rel
+    if not path.exists():
+        raise FileNotFoundError(f"配置里指的零件文件不存在：{rel}")
+
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for obj in vars(module).values():
+        if (isinstance(obj, type) and obj.__module__ == module.__name__
+                and callable(getattr(obj, "fit", None))
+                and callable(getattr(obj, "transform", None))):
+            return obj
+    raise TypeError(f"{rel} 里没有实现 FeatureOp 接口（fit + transform）的类")
+
+
+def load_feature_ops(config: dict[str, Any]) -> list[tuple[str, Any]]:
+    """按配置实例化启用了的加特征零件，返回 [(名字, 实例)]。
+
+    约定：配置块里的 `impl` 指向实现文件。零件类自己去 config 里挖自己那一块
+    （见 modules/features/frequency_bucket.py 的范文），所以这里把整份 config 传给它。
+
+    `enabled: true` 却没写 `impl` —— 直接报错。以前这种情况是**静默无效**：
+    文件写进去了、配置也改了，但没有任何东西去加载它，训练结果纹丝不动，
+    却被记成"这个方案没用"，工兵白挨一次负分。宁可当场炸，也不要假装跑过。
+    """
+    ops: list[tuple[str, Any]] = []
+    for name, block in (config.get("features") or {}).items():
+        if not isinstance(block, dict) or not block.get("enabled"):
+            continue
+        impl = block.get("impl")
+        if not impl:
+            raise ValueError(
+                f"features.{name} 启用了但没写 impl —— 不知道该加载哪个文件。"
+                f"配置块里加一行 impl: modules/features/xxx.py")
+        ops.append((name, _load_op_class(impl)(config)))
+    return ops
+
+
+def apply_feature_ops(ops: list[tuple[str, Any]], train: pd.DataFrame,
+                      others: list[pd.DataFrame]
+                      ) -> tuple[pd.DataFrame, list[pd.DataFrame], list[str]]:
+    """先在训练集上 fit，再对每份数据 transform。
+
+    返回 (加工后的训练集, 加工后的其他数据集, 新长出来的列名)。
+
+    ⚠️ fit **只看训练集**（R2）。读验证集算统计量 = 作弊，分数虚高，测试集必掉。
+    新列会自动接进特征列表 —— 工兵不用再记得去改 base_fields，
+    忘了改就等于零件白装，那正是这次要修掉的那类"静默无效"。
+    """
+    before = set(train.columns)
+    for name, op in ops:
+        emit("phase", name="装零件", detail=name)
+        op.fit(train)
+        train = op.transform(train)
+        others = [op.transform(df) for df in others]
+        if not isinstance(train, pd.DataFrame):
+            raise TypeError(f"零件「{name}」的 transform 没有返回 DataFrame")
+    return train, others, [c for c in train.columns if c not in before]
 
 
 def lgbm_kwargs(base: dict[str, Any] | None,
@@ -259,14 +329,21 @@ class RealExecutor:
         # 特征清单从配置读（R7）—— 工兵改 features.base_fields 才真的生效。
         # 写死在代码里的话，医生诊断出「特征没用上」也没人能修。
         wanted = (self.config.get("features") or {}).get("base_fields") or BASE_FEATURES
+        # 装上配置里启用的加特征零件 —— 以前工兵写的零件文件躺在 modules/ 下
+        # 从来没有被 import 过，训练结果纹丝不动却被记成"这个方案没用"
+        ops = load_feature_ops(self.config)
+        train, (val_x,), 新列 = apply_feature_ops(ops, train, [val_x])
+
         features = [str(c) for c in wanted if str(c) in train.columns]
         missing = [str(c) for c in wanted if str(c) not in train.columns]
         if missing:
             emit("phase", name="特征缺失",
                  detail=f"配置里有 {len(missing)} 个字段数据里没有：{missing[:5]}")
+        # 零件新长出来的列自动进特征表，工兵不用再记得改 base_fields
+        features += [c for c in 新列 if c in val_x.columns and c not in features]
         if not features:
             raise ValueError(f"配置里的特征一个都不在数据里：{wanted[:8]}")
-        guard_features(features)          # R1 运行时防线
+        guard_features(features)          # R1 运行时防线（新列也走这一关）
         emit("phase", name="训练", detail=f"{fidelity} · {len(train):,} 行 · {len(features)} 个特征")
 
         # 数据里有些字段是数组（4 个交叉字段大多单值，853 和历史行为字段是真多值）。
@@ -332,10 +409,12 @@ class RealExecutor:
         assert len(merged) == len(val_x), "按 sample_id 关联后丢行了"
 
         return self._build_report(merged, ctr_pred, cvr_pred, train, features,
-                                  ctr_model, cvr_model, fidelity)
+                                  ctr_model, cvr_model, fidelity,
+                                  op_names=[name for name, _ in ops])
 
     def _build_report(self, val, ctr_pred, cvr_pred, train, features,
-                      ctr_model, cvr_model, fidelity) -> dict[str, Any]:
+                      ctr_model, cvr_model, fidelity,
+                      op_names: list[str] | None = None) -> dict[str, Any]:
         """组装成绩单 —— 医生诊断需要的全部字段都在这里。"""
         clicked_mask = (val["click"] == 1).values
         ctr_auc = _auc(val["click"], ctr_pred)
@@ -371,6 +450,7 @@ class RealExecutor:
                 "购买分": tr_cvr,
             },
             "当前特征": features,
+            "装上的零件": op_names or [],
             "实际超参数": {"点击塔": ctr_kw, "购买塔": cvr_kw},
             "未使用的字段": [c for c in ("109_14", "110_14", "127_14", "150_14",
                                       "508", "509", "702", "853")
