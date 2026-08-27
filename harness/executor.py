@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import yaml
 from sklearn.metrics import log_loss, roc_auc_score
 
 from agent.events import emit
@@ -119,8 +120,15 @@ class RealExecutor:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f["content"], encoding="utf-8")
             emit("phase", name="落地代码", detail=rel)
-        for key, value in (patch.get("config_patch") or {}).items():
+        # 工兵产出的 config_patch 是 YAML **文本**（见 agent/schemas.py），
+        # 不是 dict —— 直接 .items() 会当场 AttributeError。
+        raw = patch.get("config_patch") or {}
+        parsed = yaml.safe_load(raw) if isinstance(raw, str) else raw
+        if parsed and not isinstance(parsed, dict):
+            raise ValueError(f"config_patch 解析出来是 {type(parsed).__name__}，必须是键值对")
+        for key, value in (parsed or {}).items():
             self.config[key] = value
+            emit("phase", name="改配置", detail=str(key))
 
     def _train_and_score(self, fidelity: str) -> dict[str, Any]:
         from lightgbm import LGBMClassifier

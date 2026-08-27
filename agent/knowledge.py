@@ -88,6 +88,7 @@ class Card:
     preconditions: list[str] = field(default_factory=list)
     prior: float = 0.5        # 靠不靠谱，会被复盘官更新
     how_to: str = ""          # 实现草图（不是代码，代码由工兵自己写）
+    failure_signals: str = ""  # 这招失败时长什么样。只喂复盘官，别喂军师
     source: str = ""
 
     @classmethod
@@ -103,11 +104,16 @@ class Card:
             preconditions=list(d.get("前提条件", [])),
             prior=float(d.get("靠不靠谱", 0.5)),
             how_to=(d.get("怎么实现") or "").strip(),
+            failure_signals=(d.get("失败信号") or "").strip(),
             source=d.get("出处", ""),
         )
 
     def as_prompt_block(self) -> str:
-        """喂给军师的卡片摘要。刻意不含 how_to —— 那是工兵才需要的。"""
+        """喂给军师的卡片摘要。
+
+        刻意不含 how_to（那是工兵才需要的），也不含 failure_signals ——
+        失败信号是复盘官的判据，提前给军师看会把它的预期往负面带偏。
+        """
         return (
             f"【{self.id}】{self.name}\n"
             f"  治：{', '.join(self.treats)}\n"

@@ -1,2 +1,13 @@
+# Agent 大脑（四个角色）
 anthropic>=0.75
+openai>=1.0          # DeepSeek 走 OpenAI 兼容接口，见 agent/llm_deepseek.py
 pyyaml>=6.0
+
+# 真执行器 harness/executor.py（只跑 agent.cli check / run --offline 可以不装）
+pandas>=2.0
+pyarrow>=14.0        # 读 parquet
+scikit-learn>=1.3
+lightgbm>=4.0
+
+# 测试
+pytest>=8.0

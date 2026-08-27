@@ -4,6 +4,11 @@
   python -m agent.cli doctor 一切正常        用一份假成绩单跑医生
   python -m agent.cli doctor --all          跑全部 5 份，对照标准答案
   python -m agent.cli round 正常起步         用假执行器跑完整一轮
+  python -m agent.cli run --offline         不花钱的整场演习（假模型+假执行器）
+  python -m agent.cli run --rounds 10 --train ... --val-features ...
+                                            真数据自主迭代，中途不需要人碰键盘
+  python -m agent.cli noise --seeds 3 --train ...
+                                            量噪声带：同配置换种子，看分数自己抖多少
 """
 
 from __future__ import annotations
@@ -17,8 +22,19 @@ import yaml
 
 from .knowledge import CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
-from .llm_deepseek import make_llm
-from .loop import CostAwareScheduler, FakeExecutor, TimeLedger, run_round
+from .loop import (
+    DEFAULT_EPSILON,
+    DEFAULT_PATIENCE,
+    DEFAULT_ROUNDS,
+    DEFAULT_TOKEN_BUDGET,
+    CostAwareScheduler,
+    FakeExecutor,
+    PriorLedger,
+    TimeLedger,
+    read_scores,
+    run_round,
+    run_session,
+)
 from . import roles
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -43,8 +59,65 @@ def example_for(stage: str) -> str:
     return _EXAMPLES["训练"].read_text(encoding="utf-8")
 
 
+LOGS = ROOT / "logs"
+
+
+def make_llm(*args, **kwargs):
+    """延迟导入真模型入口 —— check 和 run --offline 不该因为缺 SDK 就跑不起来。"""
+    from .llm_deepseek import make_llm as _make
+    return _make(*args, **kwargs)
+
+
 def _load_fixtures() -> dict:
     return yaml.safe_load(FIXTURES.read_text(encoding="utf-8"))
+
+
+def _add_data_args(p) -> None:
+    """三条数据路径。给了就用真执行器，不给就用假的。"""
+    p.add_argument("--train", help="训练集：单个文件或分片目录")
+    p.add_argument("--val-features", help="验证集特征")
+    p.add_argument("--val-labels", help="验证集标签（验证集自带标签时可省）")
+    p.add_argument("--seed", type=int, default=20260827, help="随机种子（CLAUDE.md R8）")
+
+
+def _make_executor(args, fallback_report: dict):
+    """有数据路径 → 真执行器；没有 → 假执行器。返回 (执行器, 是不是真的)。"""
+    if not args.train:
+        return FakeExecutor(next_report=fallback_report), False
+    if not args.val_features:
+        raise SystemExit("给了 --train 就必须给 --val-features")
+    from harness.executor import RealExecutor
+    return RealExecutor(args.train, args.val_features, args.val_labels,
+                        seed=args.seed), True
+
+
+def _initial_report(executor, real: bool, fallback: dict) -> tuple[dict, float]:
+    """第 0 轮体检：真执行器就原样跑一次拿真成绩单，假的就用假成绩单。
+
+    医生必须看着真数字做诊断 —— 拿假成绩单配真训练是最容易骗到自己的组合。
+    """
+    if not real:
+        return fallback, 0.0
+    print("体检中（原样跑一次当前流水线，拿第 0 轮成绩单）……")
+    first = executor.run({"new_files": [], "config_patch": ""}, "小份")
+    if not first.ok:
+        raise SystemExit(f"❌ 第 0 轮就没跑起来：{first.error}")
+    print(f"第 0 轮：{read_scores(first.health_report)}  用时 {first.seconds:.0f}s\n")
+    return first.health_report, first.seconds
+
+
+def _noise_bands() -> dict:
+    """读实测噪声带。没测过就返回空 dict（见 agent/noise.py）。"""
+    path = LOGS / "noise_bands.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _noise_floor(bands: dict | None = None) -> float:
+    """判断"这次提升是不是真的"的门槛。没测过就退回 R11 的 0.0005。"""
+    bands = _noise_bands() if bands is None else bands
+    return float(bands.get("单指标噪声带") or roles.MIN_REAL_GAIN)
 
 
 def _show(obj) -> None:
@@ -122,9 +195,14 @@ def cmd_round(args) -> int:
 
     report = fixtures[args.name]["report"]
     llm = make_llm()
-    # 耗时账本：实测倍数覆盖卡上拍的「训练时间倍数」（假执行器耗时为 0，不会记账）
-    ledger_path = ROOT / "logs" / "time_ledger.json"
-    time_ledger = TimeLedger.load(ledger_path)
+    # 两个账本：耗时（实测倍数覆盖卡上拍的数）、靠谱度（复盘结论累积）
+    time_ledger = TimeLedger.load(LOGS / "time_ledger.json")
+    prior_ledger = PriorLedger.load(LOGS / "prior_ledger.json")
+    prior_ledger.apply_to(cards)
+    executor, real = _make_executor(args, report)
+    if real:
+        print(f"真执行器：{args.train}")
+    report, _ = _initial_report(executor, real, report)
     log = run_round(
         round_id=1,
         llm=llm,
@@ -132,15 +210,17 @@ def cmd_round(args) -> int:
         cards=cards,
         health_report=report,
         parent_result=report,
-        # 假执行器直接回放同一份成绩单：链路能跑通即可，分数无意义
-        executor=FakeExecutor(next_report=report),
+        executor=executor,
         scheduler=CostAwareScheduler(time_ledger=time_ledger),
         module_interface=INTERFACE_SPEC,
         example_module=example_for,      # 按方案环节选范文
         current_config=PIPELINE_CONFIG,
         time_ledger=time_ledger,
+        prior_ledger=prior_ledger,
+        noise_floor=_noise_floor(),
     )
-    time_ledger.dump(ledger_path)
+    time_ledger.dump(LOGS / "time_ledger.json")
+    prior_ledger.dump(LOGS / "prior_ledger.json")
 
     print("\n【诊断】")
     _show(log.diagnosis)
@@ -160,9 +240,100 @@ def cmd_round(args) -> int:
         for r in log.recoveries:
             print(f"  · {r}")
 
-    log.dump(ROOT / "logs" / "rounds.jsonl")
+    log.dump(LOGS / "rounds.jsonl")
     print(f"\n{llm.ledger.report()}")
     print(f"本轮耗时 {log.seconds:.1f}s，日志已追加到 logs/rounds.jsonl")
+    return 0
+
+
+def cmd_run(args) -> int:
+    """自主迭代：一轮接一轮，中途不需要人碰键盘。
+
+    这条命令就是赛题里「自主性」那一项的实现。跑完会打印结果表。
+    """
+    vocab = SymptomVocab.load()
+    cards = CardLibrary.load(vocab)
+
+    logs_dir = LOGS
+    if args.offline:
+        from .offline import DriftingExecutor, ScriptedLLM
+        faults = {"医生": [args.fail_role_call]} if args.fail_role_call else {}
+        llm = ScriptedLLM(faults=faults)
+        executor = DriftingExecutor(fail_rounds=tuple(args.fail_round or ()))
+        initial, first_seconds = executor.report("小份"), 0.0
+        # 演习产出的假日志绝不能混进交付物 —— 单独一个目录
+        logs_dir = LOGS / "offline"
+        print(f"离线演习：假模型 + 假执行器，不联网不花钱（日志写 {logs_dir}）\n")
+    else:
+        llm = make_llm()
+        fallback = _load_fixtures()[args.name]["report"]
+        executor, real = _make_executor(args, fallback)
+        if real:
+            print(f"真执行器：{args.train}")
+        else:
+            print(f"假执行器 + 假成绩单「{args.name}」——"
+                  f"要跑真数据请给 --train / --val-features\n")
+        initial, first_seconds = _initial_report(executor, real, fallback)
+
+    baseline = {}
+    if args.baseline_ctr is not None:
+        baseline["点击AUC"] = args.baseline_ctr
+    if args.baseline_cvr is not None:
+        baseline["购买AUC"] = args.baseline_cvr
+
+    def on_round(log, summary) -> None:
+        ref = log.reflection or {}
+        scores = read_scores(log.metrics or {})
+        line = (f"第 {log.round_id:>2} 轮 · {log.fidelity or '—'} · "
+                f"{(log.chosen or {}).get('card_id') or '（自创/未选）'} · "
+                f"{ref.get('verdict', '本轮作废')}")
+        if scores:
+            line += f" · 点击 {scores['点击AUC']:.4f} 购买 {scores['购买AUC']:.4f}"
+        print(line)
+        for r in log.recoveries:
+            print(f"        ↳ 恢复：{r}")
+
+    bands = _noise_bands()
+    if bands:
+        print(f"读到实测噪声带：单指标 {bands['单指标噪声带']:.4f}\n")
+    summary = run_session(
+        llm=llm, vocab=vocab, cards=cards, executor=executor,
+        initial_report=initial,
+        initial_train_seconds=first_seconds,
+        module_interface=STUB_INTERFACE,
+        example_module=STUB_EXAMPLE,
+        current_config=STUB_CONFIG,
+        rounds=args.rounds,
+        token_budget=args.token_budget,
+        epsilon=args.epsilon,
+        patience=args.patience,
+        noise_floor=_noise_floor(bands),
+        noise_bands=bands,
+        baseline=baseline,
+        logs_dir=logs_dir,
+        on_round=on_round,
+    )
+    print(f"\n{summary.as_table()}")
+    print(f"\n{llm.ledger.report()}")
+    rel = logs_dir.relative_to(ROOT)
+    print(f"\n我交这一版：第 {summary.best_round} 轮 "
+          f"（成绩单已存 {rel}/best_report.json，结果表存 {rel}/session_summary.json）")
+    return 0
+
+
+def cmd_noise(args) -> int:
+    """量噪声带：同一份配置换种子跑几次，看分数自己抖多少。"""
+    from .noise import measure
+
+    if not args.train:
+        raise SystemExit("量噪声带必须给真数据：--train / --val-features")
+    bands = measure(
+        train=args.train, val_features=args.val_features, val_labels=args.val_labels,
+        seeds=[args.seed + i for i in range(args.seeds)],
+        fidelity=args.fidelity,
+        out_path=LOGS / "noise_bands.json",
+    )
+    print(bands["表格"])
     return 0
 
 
@@ -177,9 +348,35 @@ def main() -> int:
     p.add_argument("--all", action="store_true", help="跑全部 5 份")
     p.set_defaults(func=cmd_doctor)
 
-    p = sub.add_parser("round", help="用假执行器跑完整一轮")
-    p.add_argument("name", nargs="?", default="正常起步")
+    p = sub.add_parser("round", help="跑完整一轮")
+    p.add_argument("name", nargs="?", default="正常起步", help="没给真数据时用哪份假成绩单")
+    _add_data_args(p)
     p.set_defaults(func=cmd_round)
+
+    p = sub.add_parser("run", help="自主迭代 N 轮，中途不碰键盘")
+    p.add_argument("name", nargs="?", default="正常起步", help="没给真数据时用哪份假成绩单")
+    _add_data_args(p)
+    p.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
+    p.add_argument("--epsilon", type=float, default=DEFAULT_EPSILON,
+                   help="提升小于它不算提升。Starter Kit 给了官方 ε 就换成官方的")
+    p.add_argument("--patience", type=int, default=DEFAULT_PATIENCE,
+                   help="连续几轮没有真提升算收敛")
+    p.add_argument("--token-budget", type=int, default=DEFAULT_TOKEN_BUDGET)
+    p.add_argument("--baseline-ctr", type=float, help="官方基线的点击 AUC，用来算 delta")
+    p.add_argument("--baseline-cvr", type=float, help="官方基线的购买 AUC，用来算 delta")
+    p.add_argument("--offline", action="store_true",
+                   help="演习模式：假模型 + 假执行器，不联网不花钱")
+    p.add_argument("--fail-round", type=int, action="append",
+                   help="演习：让第几轮训练失败（可重复）")
+    p.add_argument("--fail-role-call", type=int,
+                   help="演习：让医生的第几次调用抛异常")
+    p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("noise", help="量噪声带：同配置换种子看分数抖多少")
+    _add_data_args(p)
+    p.add_argument("--seeds", type=int, default=3, help="跑几个种子")
+    p.add_argument("--fidelity", default="小份", help="在哪个数据档位上量")
+    p.set_defaults(func=cmd_noise)
 
     args = parser.parse_args()
     try:

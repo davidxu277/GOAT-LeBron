@@ -11,6 +11,8 @@ import pathlib
 import re
 from typing import Any
 
+import yaml
+
 from .knowledge import Card, CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
 from . import schemas
@@ -22,6 +24,14 @@ FORBIDDEN_FIELDS = ("sample_id", "common_id", "click", "conversion", "ctcvr")
 _HAS_DIGIT = re.compile(r"\d")
 _HEDGE_WORDS = ("试试看", "可能有帮助", "值得一试", "一般来说效果不错", "应该有帮助")
 
+# 工兵只准动配置里的这三棵子树。别的键（数据路径、评估口径、预算）
+# 一旦被改，跑出来的分数就没法跟前几轮比了 —— 那等于偷偷换了考卷。
+ALLOWED_CONFIG_ROOTS = ("features", "model", "train")
+
+# CLAUDE.md R11：提升小于这个数一律记「说不清」。
+# 测过噪声带之后（agent/noise.py）用实测值顶掉它，取两者较大的那个。
+MIN_REAL_GAIN = 0.0005
+
 
 def _prompt(name: str, **subs: str) -> str:
     text = (PROMPTS / f"{name}.md").read_text(encoding="utf-8")
@@ -32,6 +42,33 @@ def _prompt(name: str, **subs: str) -> str:
 
 def _dump(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
+
+
+def _check_config_patch(text: str) -> None:
+    """配置补丁必须是能解析的 YAML，且只碰 ALLOWED_CONFIG_ROOTS 那几棵子树。
+
+    执行器会把这段文本合并进当前配置。语法炸了或者键写歪了，
+    要么当场崩、要么悄悄改掉评估口径 —— 两种都比打回重写贵得多。
+    """
+    if not text.strip():
+        return
+    try:
+        parsed = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise SchemaViolation(f"config_patch 不是合法 YAML：{exc}")
+    if parsed is None:
+        return
+    if not isinstance(parsed, dict):
+        raise SchemaViolation(
+            f"config_patch 解析出来是 {type(parsed).__name__}，必须是键值对"
+        )
+    for key in parsed:
+        root = str(key).split(".", 1)[0]
+        if root not in ALLOWED_CONFIG_ROOTS:
+            raise SchemaViolation(
+                f"config_patch 想改「{key}」。只准动 "
+                f"{' / '.join(ALLOWED_CONFIG_ROOTS)} 这三棵子树，别的键由人来管。"
+            )
 
 
 # ────────────────────────────── ① 医生 ──────────────────────────────
@@ -150,12 +187,17 @@ def implement(
                 raise SchemaViolation(
                     f"{path} 不在 modules/ 下。只能在 modules/ 里新建文件（CLAUDE.md R5）。"
                 )
+            if ".." in path.split("/"):
+                raise SchemaViolation(
+                    f"{path} 里有 `..`。用它可以从 modules/ 爬出去改主程序，一律打回。"
+                )
             for bad in FORBIDDEN_FIELDS:
                 if re.search(rf"""["']{bad}["']""", f["content"]):
                     raise SchemaViolation(
                         f"{path} 里出现了禁用字段 {bad}（CLAUDE.md R1）。"
                         f"这五个字段永远不许进入模型输入。"
                     )
+        _check_config_patch(data.get("config_patch") or "")
         blob = " ".join(data["self_check"])
         if not any(x in blob for x in FORBIDDEN_FIELDS) and "禁用" not in blob:
             raise SchemaViolation("self_check 里必须有一条确认没有使用禁用字段")
@@ -197,23 +239,54 @@ def reflect(
     result: dict[str, Any],
     parent_result: dict[str, Any],
     card: Card | None,
+    noise_floor: float = MIN_REAL_GAIN,
 ) -> dict[str, Any]:
+    """复盘一轮。
+
+    noise_floor：同配置换种子的实测抖动（agent/noise.py 测出来的）。
+    小于它的"提升"是噪声，不许当成假设成立。没测过就退回 R11 的 0.0005。
+    """
+    floor = max(MIN_REAL_GAIN, float(noise_floor))
+
     def validate(data: dict[str, Any]) -> None:
+        verdict = data["verdict"]
         gains = data["actual"]
         best = max(abs(v) for v in gains.values()) if gains else 0.0
-        # CLAUDE.md R11：提升小于 0.0005 一律判「说不清」
-        if best < 0.0005 and data["verdict"] == "猜对了":
+        # CLAUDE.md R11：提升小于门槛（或小于实测噪声带）一律判「说不清」
+        if best < floor and verdict == "猜对了":
             raise SchemaViolation(
-                f"最大变化只有 {best:.6f}，低于 0.0005 的门槛，不能判「猜对了」"
+                f"最大变化只有 {best:.6f}，低于 {floor:.6f} 的门槛，不能判「猜对了」"
             )
         # 最重要的一条：分数涨了但毛病没治好 → 必须判「说不清」
-        if data["symptom_resolved"]["resolved"] == "否" and data["verdict"] == "猜对了":
+        sr = data["symptom_resolved"]
+        if sr["resolved"] == "否" and verdict == "猜对了":
             raise SchemaViolation(
                 "目标毛病没有改善却判「猜对了」。"
                 "分数上涨另有原因时必须判「说不清」。"
             )
-        if data["verdict"] == "说不清" and abs(data["card_update"]["prior_delta"]) > 0.05:
+        # 上面那条防的是"承认没治好还硬说猜对了"。这条防的是更隐蔽的一种：
+        # before / after 两个数一模一样，却自己填 resolved=是。
+        # resolved 是模型自己报的，必须拿它自己给的数字对一遍。
+        if sr["resolved"] in ("是", "部分") and abs(sr["after"] - sr["before"]) < 1e-9:
+            raise SchemaViolation(
+                f"目标指标 before={sr['before']} 与 after={sr['after']} 完全没变，"
+                f"却填了 resolved=「{sr['resolved']}」。自我申报必须跟数字一致。"
+            )
+        # 两个指标一个都没涨，就不存在"猜对了"这回事
+        if verdict == "猜对了" and all(v <= 0 for v in gains.values()):
+            raise SchemaViolation(
+                f"两个指标都没有上涨（{gains}），不能判「猜对了」。"
+            )
+        # 判错了还给卡片加分 = 记忆被污染，下次还会挑中这张卡
+        if verdict == "猜错了" and data["card_update"]["prior_delta"] > 0:
+            raise SchemaViolation("判「猜错了」却调高卡片可信度，方向反了")
+        if verdict == "说不清" and abs(data["card_update"]["prior_delta"]) > 0.05:
             raise SchemaViolation("判「说不清」时不应大幅调整卡片可信度")
+        # 升到更大数据要烧算力，只有确凿的结论才配
+        if data["promote"] and verdict != "猜对了":
+            raise SchemaViolation(
+                f"verdict 是「{verdict}」却建议升到更大数据。只有「猜对了」才准 promote。"
+            )
 
     user = (
         f"## 当初的假设\n\n{_dump(hypothesis)}\n\n"
@@ -221,6 +294,12 @@ def reflect(
         f"## 改动之前那一版\n\n{_dump(parent_result)}\n\n"
         f"## 用到的药方卡\n\n{card.as_prompt_block() if card else '（自创方案，无卡片）'}"
     )
+    if card and card.failure_signals:
+        user += (
+            f"\n\n## 这一招失败时通常长什么样\n\n{card.failure_signals}\n\n"
+            f"对照上面这些信号看结果：对得上就说明是这招本身没起作用，"
+            f"而不是方向选错了 —— 写进 card_update.note 里。"
+        )
     return llm.call(
         role="复盘官",
         system=_prompt("reflector"),

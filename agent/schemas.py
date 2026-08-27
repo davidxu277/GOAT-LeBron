@@ -17,6 +17,9 @@ VERDICT = ["猜对了", "猜错了", "说不清", "没跑起来"]
 RESOLVED = ["是", "部分", "否"]
 METRICS = ["点击AUC", "购买AUC"]
 
+# 军师报的单项预计提升上限（绝对值）。见 strategist_schema 里的说明。
+EXPECTED_CAP = 0.05
+
 
 def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {
@@ -72,8 +75,12 @@ def strategist_schema(vocab: SymptomVocab, card_ids: list[str]) -> dict[str, Any
                 "type": "string",
                 "description": "必须走完两段因果：证据→病根，病根→这招为什么对症",
             },
+            # 预计提升限幅：AUC 上一次改动能挪的量级就在千分位到百分位之间。
+            # 报出 +0.3 这种数字的方案会把调度器的性价比公式整个带偏，
+            # 所以在 schema 层就封死，不靠提示词自觉。
             "expected": _obj(
-                {m: {"type": "number"} for m in METRICS},
+                {m: {"type": "number", "minimum": -EXPECTED_CAP, "maximum": EXPECTED_CAP}
+                 for m in METRICS},
                 METRICS,
             ),
             "cost": _obj(

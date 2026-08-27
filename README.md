@@ -59,8 +59,11 @@ agent/                  ← Agent 大脑（成员3）
   knowledge.py          ←   读词表与卡片；按病名筛卡片
   schemas.py            ←   四个角色的输出结构
   llm.py                ←   Claude 调用入口 + 按角色记账
+  llm_deepseek.py       ←   DeepSeek 入口（OpenAI 兼容接口）
   roles.py              ←   医生 / 军师 / 工兵 / 复盘官
-  loop.py               ←   一轮循环 + 与成员4 的接口
+  loop.py               ←   一轮 run_round + 一整场 run_session + 两个账本
+  noise.py              ←   噪声带：同配置换种子，量出测量误差有多大
+  offline.py            ←   假模型 + 假执行器，不花钱演习整场
   prompts/              ←   四段提示词
   fixtures/             ←   假成绩单，用于离线调试
 knowledge/              ← 方法知识库
@@ -102,23 +105,51 @@ logs/                   ← 逐轮运行日志（内容不入库）
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
-
-# 不调用模型，零成本：检查病名词表和药方卡是否自洽
-.venv/bin/python -m agent.cli check
-
-# 离线测试
-.venv/bin/python -m pytest tests/ -q
-
-# 跑 Agent 大脑（需要凭据）
-export ANTHROPIC_API_KEY=sk-ant-...
-.venv/bin/python -m agent.cli doctor --all      # 5 份假成绩单对照标准答案
-.venv/bin/python -m agent.cli round 正常起步     # 用假执行器跑完整一轮
 ```
 
-数据和模型都还没好也能开发 —— 假成绩单和假执行器让整条 Agent 链路今天就能跑通。
-详见 [agent/README.md](agent/README.md)。
+**不花钱的三条**（不联网、不调用模型）：
 
-*（待补：数据下载与预处理命令、真实训练的一键复现脚本）*
+```bash
+.venv/bin/python -m agent.cli check              # 病名词表与药方卡是否自洽
+.venv/bin/python -m pytest tests/ -q             # 57 个离线测试
+.venv/bin/python -m agent.cli run --offline --rounds 8   # 假模型演习整场
+```
+
+演习模式用假模型 + 假执行器把整条链路从头跑到尾，专门用来验证**接线**：
+状态有没有在轮与轮之间传下去、角色炸了能不能恢复、不涨了会不会自己停。
+可以按需制造事故：
+
+```bash
+.venv/bin/python -m agent.cli run --offline --rounds 8 --fail-round 3 --fail-role-call 2
+```
+
+演习日志写在 `logs/offline/`，不会污染交付用的 `logs/rounds.jsonl`。
+
+**真跑**（需要凭据 + 数据）：
+
+```bash
+export AGENT_PROVIDER=deepseek DEEPSEEK_API_KEY=...      # 或 ANTHROPIC_API_KEY=sk-ant-...
+
+# 先量一次噪声带：同配置换 3 个种子，看分数自己抖多少
+.venv/bin/python -m agent.cli noise --seeds 3 --train data/train --val-features data/val
+
+# 自主迭代，中途不需要人碰键盘
+.venv/bin/python -m agent.cli run --rounds 20 \
+    --train data/train --val-features data/val \
+    --baseline-ctr 0.xxxx --baseline-cvr 0.xxxx
+```
+
+跑完会打印结果表（交付物 #5），并把逐轮日志、两个账本、最佳版本的成绩单
+全部落在 `logs/` 下。中途任何一轮崩掉都不会中断整场。
+
+调单个环节：
+
+```bash
+.venv/bin/python -m agent.cli doctor --all       # 5 份假成绩单对照标准答案
+.venv/bin/python -m agent.cli round 正常起步      # 只跑一轮，看四个角色各说了什么
+```
+
+*（待补：数据下载与预处理命令、NISE 官方基线分数）*
 
 ## 局限性与改进方向
 

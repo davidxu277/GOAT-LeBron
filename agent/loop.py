@@ -14,8 +14,9 @@ import pathlib
 import statistics
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
+from .events import emit
 from .knowledge import Card, CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
 from . import roles
@@ -41,12 +42,17 @@ class RunResult:
     fidelity: str = "小份"
 
 
+@runtime_checkable
 class Executor(Protocol):
-    """成员4：跑代码、超时、错误恢复、红线校验。"""
+    """成员4：跑代码、超时、错误恢复、红线校验。
+
+    标了 runtime_checkable，别人的实现可以用 isinstance 当场自检对不对得上。
+    """
 
     def run(self, patch: dict[str, Any], fidelity: str) -> RunResult: ...
 
 
+@runtime_checkable
 class Scheduler(Protocol):
     """成员4：从军师给的 3 个方案里选 1 个，并决定跑在哪个数据尺寸上。"""
 
@@ -98,6 +104,104 @@ class TimeLedger:
         if not path.exists():
             return cls()
         return cls(records=json.loads(path.read_text(encoding="utf-8")))
+
+
+class PriorLedger:
+    """卡片靠谱度记账 —— 复盘官的结论累积在这里，卡片 yaml 原文不动。
+
+    为什么不直接改 yaml：那是成员2 的知识库，是人写的先验。
+    实验结论是另一回事，两者分开存，出了问题能各查各的。
+
+    规则（docs/方法库进度.md 第五节）：
+        猜对了且超过噪声带   +0.15
+        目标毛病确实改善了   +0.05（可与上一条叠加）
+        猜错了               -0.10
+        没跑起来             -0.15
+        说不清                0
+    限幅 [0.05, 0.95] —— 一张卡永远不该被彻底判死或彻底封神。
+    """
+
+    HIT = 0.15
+    SYMPTOM_IMPROVED = 0.05
+    MISS = -0.10
+    CRASHED = -0.15
+    FLOOR, CEIL = 0.05, 0.95
+
+    def __init__(self, values: dict[str, float] | None = None):
+        self.values: dict[str, float] = values or {}
+
+    def value(self, card_id: str, default: float) -> float:
+        """这张卡当前的靠谱度。没有实验记录就用卡上的先验。"""
+        return float(self.values.get(card_id, default))
+
+    def apply(
+        self,
+        card_id: str,
+        verdict: str,
+        base_prior: float,
+        *,
+        symptom_improved: bool = False,
+        beat_noise: bool = True,
+    ) -> float:
+        """按一次复盘结论更新靠谱度，返回更新后的值。"""
+        if not card_id:                      # 自创方案没有卡可更新
+            return base_prior
+        delta = 0.0
+        if verdict == "猜对了" and beat_noise:
+            delta += self.HIT
+        if symptom_improved:
+            delta += self.SYMPTOM_IMPROVED
+        if verdict == "猜错了":
+            delta += self.MISS
+        if verdict == "没跑起来":
+            delta += self.CRASHED
+
+        updated = self.value(card_id, base_prior) + delta
+        updated = max(self.FLOOR, min(self.CEIL, updated))
+        self.values[card_id] = updated
+        return updated
+
+    def apply_to(self, cards: CardLibrary) -> None:
+        """把账本里的靠谱度盖到内存里的卡片上。每轮开始调一次。"""
+        for card in cards.cards:
+            card.prior = self.value(card.id, card.prior)
+
+    def dump(self, path: pathlib.Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.values, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+    @classmethod
+    def load(cls, path: pathlib.Path) -> "PriorLedger":
+        if not path.exists():
+            return cls()
+        return cls(values=json.loads(path.read_text(encoding="utf-8")))
+
+
+# 成绩单里两个 AUC 可能挂在哪 —— 真执行器写「验证集」，假成绩单写「总分」
+_SCORE_SECTIONS = ("验证集", "总分")
+
+
+def read_scores(report: dict[str, Any]) -> dict[str, float]:
+    """从成绩单里取出两个 AUC。取不到的返回空 dict。
+
+    收敛判定、挑最佳版本、算 delta 全靠它，所以两种成绩单格式都要认。
+    """
+    for section in _SCORE_SECTIONS:
+        block = report.get(section)
+        if isinstance(block, dict) and block.get("点击分") is not None:
+            return {
+                "点击AUC": float(block["点击分"]),
+                "购买AUC": float(block.get("购买分") or 0.0),
+            }
+    return {}
+
+
+def total_score(report: dict[str, Any]) -> float:
+    """两个 AUC 之和 —— 排名按两项 delta 等权平均，和与均值同序。"""
+    scores = read_scores(report)
+    return sum(scores.values()) if scores else float("-inf")
 
 
 class CostAwareScheduler:
@@ -179,7 +283,9 @@ class RoundLog:
     chosen: dict[str, Any] | None = None
     fidelity: str = ""
     patch_summary: dict[str, Any] | None = None
+    patch_files: dict[str, str] = field(default_factory=dict)   # 路径 → 完整代码，交付物要的 code diff
     run_ok: bool = False
+    metrics: dict[str, Any] | None = None                       # 本轮成绩单原文，交付物要的 metrics
     reflection: dict[str, Any] | None = None
     recoveries: list[str] = field(default_factory=list)
     interventions: int = 0
@@ -191,6 +297,46 @@ class RoundLog:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(asdict(self), ensure_ascii=False) + "\n")
+
+
+def _guard(log: RoundLog, what: str, fn, *args, **kwargs):
+    """跑一个可能炸的步骤。炸了就记一笔恢复事件，返回 None，让上层决定怎么办。
+
+    只吞 Exception —— KeyboardInterrupt 是 BaseException，Ctrl-C 照样能停。
+    这是挂机跑一整夜的保险丝：一个角色抽风，作废这一轮，不是作废整场。
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:                     # noqa: BLE001 —— 就是要兜住全部
+        log.recoveries.append(f"{what}失败：{type(exc).__name__}: {exc}")
+        emit("recovery", text=f"{what}失败：{type(exc).__name__}: {exc}")
+        return None
+
+
+def _crashed_reflection(chosen: dict[str, Any] | None, error: str) -> dict[str, Any]:
+    """执行失败时的复盘结论 —— 纯代码合成，不花一分钱去问大模型。
+
+    跑都没跑起来，没有任何结果可复盘。这时候调大模型是纯浪费。
+    """
+    chosen = chosen or {}
+    targets = chosen.get("targets") or []
+    return {
+        "verdict": "没跑起来",
+        "actual": {"点击AUC": 0.0, "购买AUC": 0.0},
+        "vs_expected": f"代码没跑通，拿不到结果：{error}",
+        "symptom_resolved": {
+            "symptom": targets[0] if targets else "",
+            "before": 0.0, "after": 0.0, "resolved": "否",
+        },
+        "card_update": {
+            "card_id": chosen.get("card_id", ""),
+            "prior_delta": PriorLedger.CRASHED,
+            "note": f"这一版没跑起来：{error}",
+        },
+        "next_hint": "换一个方案，或者先修这个报错",
+        "promote": False,
+        "由代码合成": True,          # 标记：不是复盘官说的，是代码填的
+    }
 
 
 def run_round(
@@ -209,35 +355,55 @@ def run_round(
     history_brief: list[dict[str, Any]] | None = None,
     budget_left: str = "一般",
     time_ledger: TimeLedger | None = None,
+    prior_ledger: PriorLedger | None = None,
+    tried_before: list[dict[str, Any]] | None = None,
+    exclude_ids: set[str] | None = None,
+    fidelity_override: str | None = None,
+    noise_floor: float = roles.MIN_REAL_GAIN,
 ) -> RoundLog:
-    """跑完整的一轮：诊断 → 筛卡 → 提案 → 调度 → 实现 → 执行 → 复盘。"""
+    """跑完整的一轮：诊断 → 筛卡 → 提案 → 调度 → 实现 → 执行 → 复盘。
+
+    任何一个角色炸掉，本轮作废并返回，外层循环继续下一轮 —— 绝不把异常抛出去。
+    """
 
     t0 = time.time()
     log = RoundLog(round_id=round_id, started_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
     tokens_before = llm.ledger.total_tokens
 
-    # ① 医生
-    log.diagnosis = roles.diagnose(llm, vocab, health_report, history_brief)
-    findings = log.diagnosis["findings"]
-    if log.diagnosis["no_finding"]:
-        log.recoveries.append("医生未发现明显问题，本轮跳过")
+    def finish() -> RoundLog:
         log.tokens = llm.ledger.total_tokens - tokens_before
         log.seconds = time.time() - t0
         return log
 
-    # ── 筛卡片：纯代码，不花钱 ──
+    # ① 医生
+    log.diagnosis = _guard(log, "医生", roles.diagnose, llm, vocab, health_report, history_brief)
+    if log.diagnosis is None:
+        return finish()
+    findings = log.diagnosis["findings"]
+    if log.diagnosis["no_finding"]:
+        log.recoveries.append("医生未发现明显问题，本轮跳过")
+        return finish()
+
+    # ── 筛卡片：纯代码，不花钱。试过且失败的卡在这里就被排除 ──
     symptom_ids = [f["symptom"] for f in findings]
-    candidates = cards.match(symptom_ids, limit=5)
+    candidates = cards.match(symptom_ids, exclude_ids=exclude_ids, limit=5)
 
     # ② 军师
-    log.proposals = roles.propose(
+    log.proposals = _guard(
+        log, "军师", roles.propose,
         llm, vocab, findings, candidates,
+        tried_before=tried_before,
         budget_left=budget_left, pipeline_state=current_config,
     )
+    if log.proposals is None:
+        return finish()
 
     # ── 调度：纯代码，不花钱 ──
-    chosen, fidelity, backups = scheduler.pick(log.proposals["proposals"], cards, budget_left)
-    log.chosen, log.fidelity = chosen, fidelity
+    picked = _guard(log, "调度器", scheduler.pick, log.proposals["proposals"], cards, budget_left)
+    if picked is None:
+        return finish()
+    chosen, fidelity, backups = picked
+    log.chosen, log.fidelity = chosen, fidelity_override or fidelity
 
     # ③ 工兵（失败可重试，再失败换备胎）
     queue = [chosen, *backups]
@@ -259,38 +425,343 @@ def run_round(
         except SchemaViolation as exc:
             last_error = str(exc)
             log.recoveries.append(f"工兵实现失败（{candidate['card_id'] or '自创'}）：{exc}")
+        except Exception as exc:                 # noqa: BLE001 —— 网络抖动等
+            last_error = str(exc)
+            log.recoveries.append(f"工兵调用出错（{candidate['card_id'] or '自创'}）：{exc}")
 
     if patch is None:
         log.recoveries.append("所有方案都实现失败，本轮放弃")
-        log.tokens = llm.ledger.total_tokens - tokens_before
-        log.seconds = time.time() - t0
-        return log
+        return finish()
 
     log.patch_summary = {
         "change_type": patch["change_type"],
         "new_files": [f["path"] for f in patch["new_files"]],
+        "config_patch": patch.get("config_patch", ""),
         "self_check": patch["self_check"],
     }
+    # 交付物 #3 要的 code diff：完整代码，不是文件名列表
+    log.patch_files = {f["path"]: f["content"] for f in patch["new_files"]}
 
-    # ── 执行：成员4 的地盘 ──
-    result = executor.run(patch, fidelity)
+    # ── 执行：成员4 的地盘。协议说返回 ok=False，但真实现难保不抛 ──
+    result = _guard(log, "执行器", executor.run, patch, log.fidelity)
+    if result is None:
+        result = RunResult(ok=False, error="执行器抛异常，详见恢复记录", fidelity=log.fidelity)
     log.run_ok = result.ok
     log.train_seconds = result.seconds
+    # 指标先落盘，再去复盘 —— 复盘官挂了也不能把这一轮的成绩单弄丢
+    log.metrics = result.health_report or None
+
     # 耗时记账：实测值覆盖拍出来的倍数，下一轮调度就用真数
     if time_ledger is not None and result.ok and log.chosen.get("card_id"):
         time_ledger.record(log.chosen["card_id"], result.seconds)
+
+    card = cards.get(log.chosen["card_id"]) if log.chosen["card_id"] else None
+
     if not result.ok:
         log.recoveries.append(f"执行失败：{result.error}")
-        log.tokens = llm.ledger.total_tokens - tokens_before
-        log.seconds = time.time() - t0
-        return log
+        log.reflection = _crashed_reflection(log.chosen, result.error)
+        if prior_ledger is not None and card is not None:
+            prior_ledger.apply(card.id, "没跑起来", card.prior)
+        return finish()
 
     # ④ 复盘官
-    card = cards.get(log.chosen["card_id"]) if log.chosen["card_id"] else None
-    log.reflection = roles.reflect(
-        llm, vocab, log.chosen, result.health_report, parent_result, card
+    log.reflection = _guard(
+        log, "复盘官", roles.reflect,
+        llm, vocab, log.chosen, result.health_report, parent_result, card,
+        noise_floor=noise_floor,
     )
+    if log.reflection is not None and prior_ledger is not None and card is not None:
+        gains = log.reflection["actual"].values()
+        prior_ledger.apply(
+            card.id, log.reflection["verdict"], card.prior,
+            symptom_improved=log.reflection["symptom_resolved"]["resolved"] in ("是", "部分"),
+            beat_noise=max((abs(v) for v in gains), default=0.0) >= noise_floor,
+        )
+    return finish()
 
-    log.tokens = llm.ledger.total_tokens - tokens_before
-    log.seconds = time.time() - t0
-    return log
+
+# ────────────────────────────── 一整场 ──────────────────────────────
+
+# 收敛判定与预算。Starter Kit 公布官方 ε / N 之后改这里，别散落到各处（R7）。
+DEFAULT_ROUNDS = 10
+DEFAULT_EPSILON = 0.0005        # 提升小于它不算提升（CLAUDE.md R11）
+DEFAULT_PATIENCE = 3            # 连续这么多轮没有真提升 = 收敛
+DEFAULT_TOKEN_BUDGET = 2_000_000
+BUDGET_TIERS = ((0.60, "宽裕"), (0.85, "一般"))   # 用超 85% → 紧张
+NO_FINDING_ESCAPE = 2           # 连续几轮查不出病，就升一档数据再看
+
+
+def _budget_tier(used: int, budget: int) -> str:
+    ratio = used / budget if budget > 0 else 0.0
+    for cap, name in BUDGET_TIERS:
+        if ratio < cap:
+            return name
+    return "紧张"
+
+
+def _with_bands(report: dict[str, Any], bands: dict[str, Any] | None) -> dict[str, Any]:
+    """把实测噪声带挂到成绩单上，医生才知道哪些差距是真的。
+
+    只挂给医生看的那一份，不动执行器产出的原文（原文要进日志）。
+    """
+    if not bands:
+        return report
+    return {**report, "噪声带": {
+        "单指标": bands.get("单指标噪声带"),
+        "分组": {g: {k: v.get("购买分", {}).get("噪声带") for k, v in rows.items()}
+                for g, rows in bands.get("分组", {}).items()},
+        "怎么用": ("这是同配置换随机种子跑出来的抖动幅度。"
+                 "任何小于它的差距都是噪声，不许当成病；"
+                 "分桶差距要跟对应那个桶的噪声带比，别用统一阈值。"),
+    }}
+
+
+def _brief(log: RoundLog) -> dict[str, Any]:
+    """把一轮压成一两行，喂给下一轮的医生和军师。全文喂过去会烧光预算。"""
+    ref = log.reflection or {}
+    return {
+        "轮次": log.round_id,
+        "选了": (log.chosen or {}).get("card_id") or "（自创或未选中）",
+        "数据": log.fidelity,
+        "结论": ref.get("verdict", "本轮作废"),
+        "实际变化": ref.get("actual", {}),
+        "备注": ref.get("next_hint", "") or "；".join(log.recoveries[:2]),
+    }
+
+
+@dataclass
+class SessionSummary:
+    """一整场跑完的汇总 —— 直接对应交付物 #5 的结果表。"""
+
+    rounds_run: int = 0
+    stopped_because: str = ""
+    best_round: int = 0
+    best_fidelity: str = ""
+    best_scores: dict[str, float] = field(default_factory=dict)
+    baseline: dict[str, float] = field(default_factory=dict)
+    total_tokens: int = 0
+    total_train_seconds: float = 0.0
+    interventions: int = 0
+    recoveries: int = 0
+
+    @property
+    def deltas(self) -> dict[str, float]:
+        """相对官方基线的绝对差值 —— 排名真正用的数字。"""
+        if not self.baseline or not self.best_scores:
+            return {}
+        return {m: self.best_scores.get(m, 0.0) - v for m, v in self.baseline.items()}
+
+    def as_table(self) -> str:
+        lines = [
+            "══════════ 结果表（交付物 #5）══════════",
+            f"跑了几轮        {self.rounds_run}（{self.stopped_because}）",
+            f"最终提交        第 {self.best_round} 轮，{self.best_fidelity or '—'}数据",
+        ]
+        for metric, value in self.best_scores.items():
+            lines.append(f"  {metric:<12} {value:.4f}")
+        for metric, delta in self.deltas.items():
+            lines.append(f"  {metric} 相对基线  {delta:+.4f}")
+        if not self.baseline:
+            lines.append("  ⚠️ 官方基线分未填，delta 算不出来（--baseline-ctr / --baseline-cvr）")
+        lines += [
+            f"LLM token 总量  {self.total_tokens:,}",
+            f"训练总时长      {self.total_train_seconds / 3600:.3f} GPU-小时"
+            f"（{self.total_train_seconds:.0f} 秒）",
+            f"人工干预        {self.interventions} 次",
+            f"错误恢复        {self.recoveries} 次",
+        ]
+        return "\n".join(lines)
+
+    def dump(self, path: pathlib.Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = asdict(self)
+        data["deltas"] = self.deltas
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def run_session(
+    *,
+    llm: LLM,
+    vocab: SymptomVocab,
+    cards: CardLibrary,
+    executor: Executor,
+    initial_report: dict[str, Any],
+    initial_train_seconds: float = 0.0,   # 第 0 轮体检也烧了算力，要计进 GPU 小时
+    module_interface: str,
+    example_module: str,
+    current_config: str,
+    rounds: int = DEFAULT_ROUNDS,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+    epsilon: float = DEFAULT_EPSILON,
+    patience: int = DEFAULT_PATIENCE,
+    noise_floor: float = roles.MIN_REAL_GAIN,
+    noise_bands: dict[str, Any] | None = None,
+    baseline: dict[str, float] | None = None,
+    logs_dir: pathlib.Path | None = None,
+    on_round=None,
+) -> SessionSummary:
+    """自主迭代 —— 一轮接一轮，中途不需要人碰键盘。
+
+    这个函数就是"自主性"那 20% 分的实现。它管四件事，每件都不调用大模型：
+
+      1. 接线    —— 这一轮跑出的成绩单，变成下一轮医生的输入
+      2. 记忆    —— 试过且失败的卡拉黑；每轮压成一行喂给下一轮
+      3. 升降级  —— 连着查不出病、或复盘官说值得复查，就升一档数据重测
+      4. 判停    —— 跑满轮数 / 预算耗尽 / 连续 patience 轮没有真提升
+
+    最后挑出"验证集最佳"的那一版作为最终提交（赛题：收敛时的最佳 checkpoint）。
+    """
+    logs_dir = logs_dir or (ROOT / "logs")
+    time_ledger = TimeLedger.load(logs_dir / "time_ledger.json")
+    prior_ledger = PriorLedger.load(logs_dir / "prior_ledger.json")
+
+    cur = parent = initial_report
+    history: list[dict[str, Any]] = []
+    blacklist: set[str] = set()          # 试过且失败的卡 —— 调度器硬性跳过
+    applied: set[str] = set()            # 已经生效、并入流水线的卡 —— 再上一次没意义
+    tried: list[dict[str, Any]] = []     # 喂给军师看的「已经试过的」（含结论）
+    rung = 0                             # 当前数据档位，见 FIDELITY_LADDER
+    no_finding_streak = 0
+    stale = 0                            # 连续多少轮没有超过 epsilon 的提升
+
+    best_score = total_score(cur)
+    best = {"round": 0, "report": cur, "fidelity": FIDELITY_LADDER[rung]}
+    summary = SessionSummary(baseline=dict(baseline or {}),
+                             total_train_seconds=initial_train_seconds)
+
+    def escalate(round_id: int, reason: str) -> bool:
+        """升一档数据，并在新档位上原样重测一次，拿到可比的新基准。
+
+        重测不调用任何角色 —— 只是换个数据量把当前流水线再跑一遍。
+        跨档的分数不可比，所以升档后收敛计数与最佳分全部重置。
+
+        已经在最高档上时返回 False —— 没地方可升了，交给调用方判停。
+        """
+        nonlocal rung, cur, parent, best_score, best, stale, no_finding_streak
+        if rung >= len(FIDELITY_LADDER) - 1:
+            return False
+        rung += 1
+        fidelity = FIDELITY_LADDER[rung]
+        print(f"  ↑ 升到{fidelity}数据（{reason}），原样重测一次")
+        try:
+            result = executor.run({"new_files": [], "config_patch": ""}, fidelity)
+        except Exception as exc:                 # noqa: BLE001
+            print(f"  ⚠️ 重测失败：{exc}，档位已升，下一轮直接用新档位")
+            result = None
+        if result is not None and result.ok:
+            cur = parent = result.health_report
+            summary.total_train_seconds += result.seconds
+        elif result is not None:
+            # 重测没跑起来：档位照升，但沿用旧成绩单，并记一笔恢复事件
+            print(f"  ⚠️ {fidelity}上的重测失败：{result.error}，沿用上一档的成绩单")
+            emit("recovery", text=f"升档重测失败：{result.error}")
+            summary.recoveries += 1
+            summary.total_train_seconds += result.seconds
+        best_score = total_score(cur)
+        # 升档后跨档分数不可比：当前流水线就是新档位上的最佳，轮次记为刚跑完那轮
+        best = {"round": round_id, "report": cur, "fidelity": fidelity}
+        stale = 0
+        no_finding_streak = 0
+        return True
+
+    for rid in range(1, rounds + 1):
+        used = llm.ledger.total_tokens
+        if used >= token_budget:
+            summary.stopped_because = "预算耗尽"
+            break
+
+        prior_ledger.apply_to(cards)     # 实验积累的靠谱度盖到卡片上
+        emit("round_start", round=rid, fidelity=FIDELITY_LADDER[rung])
+
+        log = run_round(
+            round_id=rid,
+            llm=llm, vocab=vocab, cards=cards,
+            health_report=_with_bands(cur, noise_bands), parent_result=parent,
+            executor=executor,
+            scheduler=CostAwareScheduler(tried_cards=blacklist | applied, time_ledger=time_ledger),
+            module_interface=module_interface,
+            example_module=example_module,
+            current_config=current_config,
+            history_brief=history[-5:],
+            budget_left=_budget_tier(used, token_budget),
+            time_ledger=time_ledger,
+            prior_ledger=prior_ledger,
+            tried_before=tried,
+            exclude_ids=blacklist | applied,
+            fidelity_override=FIDELITY_LADDER[rung] if rung else None,
+            noise_floor=noise_floor,
+        )
+
+        # ── 落盘：日志、两个账本。每轮都写，中途断电也不丢 ──
+        log.dump(logs_dir / "rounds.jsonl")
+        time_ledger.dump(logs_dir / "time_ledger.json")
+        prior_ledger.dump(logs_dir / "prior_ledger.json")
+
+        summary.rounds_run = rid
+        summary.total_tokens = llm.ledger.total_tokens
+        summary.total_train_seconds += log.train_seconds
+        summary.interventions += log.interventions
+        summary.recoveries += len(log.recoveries)
+        history.append(_brief(log))
+        ref = log.reflection or {}
+        emit("round_end", round=rid, verdict=ref.get("verdict", "作废"),
+             seconds=log.seconds)
+        if on_round is not None:
+            on_round(log, summary)
+
+        # ── 记忆：试过什么、哪些别再试 ──
+        card_id = (log.chosen or {}).get("card_id")
+        if card_id:
+            verdict = ref.get("verdict", "本轮作废")
+            tried.append({"card_id": card_id, "结论": verdict})
+            if verdict in ("猜错了", "没跑起来"):
+                blacklist.add(card_id)      # 失败的招，别再提
+            elif verdict == "猜对了":
+                applied.add(card_id)        # 已经并进流水线了，再上一次是空转
+            # 「说不清」两边都不进：换个数据量或换个条件还值得再试一次
+
+        # ── 逃生舱：连着查不出病，说明这个数据量已经看不出差别了 ──
+        if log.diagnosis and log.diagnosis.get("no_finding"):
+            no_finding_streak += 1
+        else:
+            no_finding_streak = 0
+        if no_finding_streak >= NO_FINDING_ESCAPE:
+            if escalate(rid, f"连续 {no_finding_streak} 轮查不出病"):
+                continue
+            # 已经在最大数据上了还查不出问题 —— 这就是收敛的定义，别再空转烧医生
+            summary.stopped_because = (
+                f"在{FIDELITY_LADDER[rung]}数据上连续 {no_finding_streak} 轮查不出问题，视为收敛")
+            break
+
+        if not log.run_ok:
+            continue                        # 这一轮没跑出结果，状态不动
+
+        # ── 接线：本轮成绩单成为下一轮的输入 ──
+        parent, cur = cur, log.metrics or cur
+
+        score = total_score(cur)
+        if score > best_score + epsilon:
+            best_score = score
+            best = {"round": rid, "report": cur, "fidelity": log.fidelity}
+            stale = 0
+        else:
+            stale += 1
+
+        if ref.get("promote") and escalate(
+                rid, f"第 {rid} 轮复盘官判「猜对了」，值得在更大数据上复查"):
+            continue
+
+        if stale >= patience:
+            summary.stopped_because = f"连续 {stale} 轮提升小于 {epsilon}，视为收敛"
+            break
+    else:
+        summary.stopped_because = summary.stopped_because or f"跑满 {rounds} 轮"
+
+    summary.best_round = best["round"]
+    summary.best_fidelity = best["fidelity"]
+    summary.best_scores = read_scores(best["report"])
+    summary.dump(logs_dir / "session_summary.json")
+    (logs_dir / "best_report.json").write_text(
+        json.dumps(best["report"], ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    return summary

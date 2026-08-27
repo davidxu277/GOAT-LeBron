@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
@@ -16,8 +17,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from agent.knowledge import Card, CardLibrary, SymptomVocab
 from agent.llm import Ledger, SchemaViolation
-from agent.loop import CostAwareScheduler, TimeLedger
-from agent import roles, schemas
+from agent.loop import CostAwareScheduler, PriorLedger, TimeLedger, _with_bands, run_session
+from agent.offline import DriftingExecutor, ScriptedLLM
+from agent import noise, roles, schemas
 
 
 @pytest.fixture(scope="module")
@@ -221,16 +223,19 @@ def _reflect_validate(vocab, data):
     captured["validate"](data)
 
 
-def _reflection(verdict, resolved, gain, delta=0.1):
+def _reflection(verdict, resolved, gain, delta=0.1, promote=False, after=None):
+    # resolved 与 before/after 必须自洽：说治好了，那两个数就得真的变了
+    if after is None:
+        after = 0.07 if resolved == "否" else 0.03
     return {
         "verdict": verdict,
         "actual": {"点击AUC": 0.0, "购买AUC": gain},
         "vs_expected": "",
         "symptom_resolved": {
-            "symptom": "冷门商品学不动", "before": 0.07, "after": 0.07, "resolved": resolved,
+            "symptom": "冷门商品学不动", "before": 0.07, "after": after, "resolved": resolved,
         },
         "card_update": {"card_id": "类目兜底", "prior_delta": delta, "note": ""},
-        "next_hint": "", "promote": False,
+        "next_hint": "", "promote": promote,
     }
 
 
@@ -362,3 +367,384 @@ def test_按角色记账并估算花费():
     assert led.by_role["医生"].calls == 1
     # 3000/1e6*5 + 500/1e6*25 + 6000/1e6*1 + 1500/1e6*5
     assert led.total_cost_usd == pytest.approx(0.0410, abs=1e-4)
+
+
+# ────────────────── 复盘官：新补的四道墙 ──────────────────
+
+
+def test_自我申报必须跟数字一致(vocab):
+    """更隐蔽的一种自欺：before / after 一模一样，却填 resolved=是。
+
+    resolved 是模型自己写的，不拿它自己给的数字对一遍，这条就是白纸。
+    """
+    with pytest.raises(SchemaViolation, match="自我申报必须跟数字一致"):
+        _reflect_validate(vocab, _reflection("猜对了", "是", 0.004, after=0.07))
+
+
+def test_两个指标都没涨不许判猜对了(vocab):
+    data = _reflection("猜对了", "是", -0.002)
+    with pytest.raises(SchemaViolation, match="都没有上涨"):
+        _reflect_validate(vocab, data)
+
+
+def test_判猜错了还给卡片加分会被打回(vocab):
+    with pytest.raises(SchemaViolation, match="方向反了"):
+        _reflect_validate(vocab, _reflection("猜错了", "否", -0.004, delta=0.1))
+
+
+def test_只有猜对了才准升到更大数据(vocab):
+    with pytest.raises(SchemaViolation, match="才准 promote"):
+        _reflect_validate(vocab, _reflection("说不清", "否", 0.0004, delta=0.0, promote=True))
+    _reflect_validate(vocab, _reflection("猜对了", "是", 0.004, promote=True))
+
+
+def test_噪声带顶掉默认门槛(vocab):
+    """实测抖动 0.006 时，0.004 的"提升"就是噪声，不许判猜对了。"""
+    captured = {}
+
+    class _FakeLLM:
+        ledger = Ledger()
+
+        def call(self, **kw):
+            captured["validate"] = kw["validate"]
+            return {}
+
+    roles.reflect(_FakeLLM(), vocab, {}, {}, {}, None, noise_floor=0.006)
+    with pytest.raises(SchemaViolation, match="低于 0.006"):
+        captured["validate"](_reflection("猜对了", "是", 0.004))
+
+
+# ────────────────── 工兵：路径穿越与配置越权 ──────────────────
+
+
+def test_路径里带两个点会被拦下():
+    data = {
+        "change_type": "加新零件",
+        "config_patch": "",
+        "new_files": [{"path": "modules/../harness/runner.py", "content": "x = 1"}],
+        "self_check": BASE_CHECK,
+    }
+    with pytest.raises(SchemaViolation, match="`..`"):
+        _impl_validate(data)
+
+
+def test_配置补丁只准动三棵子树():
+    data = {
+        "change_type": "只改配置",
+        "config_patch": "eval:\n  cvr_space: all\n",     # 偷偷改评估口径
+        "new_files": [],
+        "self_check": BASE_CHECK,
+    }
+    with pytest.raises(SchemaViolation, match="只准动"):
+        _impl_validate(data)
+
+
+def test_配置补丁语法错了会被拦下():
+    data = {
+        "change_type": "只改配置",
+        "config_patch": "features:\n  - a\n bad indent:\n",
+        "new_files": [],
+        "self_check": BASE_CHECK,
+    }
+    with pytest.raises(SchemaViolation, match="不是合法 YAML"):
+        _impl_validate(data)
+
+
+def test_合法的配置补丁放行():
+    data = {
+        "change_type": "只改配置",
+        "config_patch": "train:\n  early_stopping:\n    patience: 2\n",
+        "new_files": [],
+        "self_check": BASE_CHECK,
+    }
+    _impl_validate(data)
+
+
+# ────────────────── 军师预计提升限幅 ──────────────────
+
+
+def test_预计提升在schema层就限幅(vocab):
+    prop = schemas.strategist_schema(vocab, ["ESMM"])["properties"]["proposals"]["items"]
+    for m in ("点击AUC", "购买AUC"):
+        assert prop["properties"]["expected"]["properties"][m]["maximum"] == schemas.EXPECTED_CAP
+
+
+# ────────────────── 靠谱度账本 ──────────────────
+
+
+def test_靠谱度账本_按规则加减():
+    led = PriorLedger()
+    assert led.value("ESMM", 0.85) == 0.85                       # 空账本用卡上的先验
+    assert led.apply("ESMM", "猜对了", 0.85, symptom_improved=True) == pytest.approx(0.95)  # 限幅
+    assert led.apply("类目兜底", "猜错了", 0.60) == pytest.approx(0.50)
+    assert led.apply("AITM", "没跑起来", 0.50) == pytest.approx(0.35)
+    assert led.apply("DCNv2", "说不清", 0.50) == pytest.approx(0.50)
+
+
+def test_靠谱度账本_猜对了但没超噪声带不加分():
+    led = PriorLedger()
+    assert led.apply("ESMM", "猜对了", 0.50, beat_noise=False) == pytest.approx(0.50)
+
+
+def test_靠谱度账本_限幅在0点05到0点95():
+    led = PriorLedger()
+    for _ in range(20):
+        led.apply("ESMM", "猜错了", 0.5)
+    assert led.values["ESMM"] == pytest.approx(PriorLedger.FLOOR)
+
+
+def test_靠谱度账本_自创方案没有卡可更新():
+    led = PriorLedger()
+    assert led.apply("", "猜对了", 0.5) == 0.5
+    assert led.values == {}
+
+
+def test_靠谱度账本_盖到卡片上而不动yaml(cards):
+    led = PriorLedger(values={"ESMM": 0.21})
+    led.apply_to(cards)
+    assert cards.get("ESMM").prior == pytest.approx(0.21)
+    assert CardLibrary.load(SymptomVocab.load()).get("ESMM").prior == pytest.approx(0.85)
+
+
+def test_靠谱度账本_落盘再读回(tmp_path):
+    led = PriorLedger(values={"ESMM": 0.7})
+    path = tmp_path / "prior_ledger.json"
+    led.dump(path)
+    assert PriorLedger.load(path).values == {"ESMM": 0.7}
+    assert PriorLedger.load(tmp_path / "没有.json").values == {}
+
+
+# ────────────────── 卡片：失败信号 ──────────────────
+
+
+def test_失败信号读进来了但不给军师看(cards):
+    card = cards.get("ESMM")
+    assert "损失接错" in card.failure_signals          # 复盘官要用
+    assert card.failure_signals not in card.as_prompt_block()   # 军师不许看到
+
+
+# ────────────────── 外层循环：整场跑通 ──────────────────
+
+
+def test_一整场_状态在轮与轮之间传下去(tmp_path):
+    """最关键的一条：这一轮跑出的成绩单，必须变成下一轮医生的输入。"""
+    llm, ex = ScriptedLLM(), DriftingExecutor()
+    summary = run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=5, logs_dir=tmp_path,
+    )
+    rows = [json.loads(l) for l in (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == summary.rounds_run >= 2
+    分数 = [r["metrics"]["验证集"]["点击分"] for r in rows if r["metrics"]]
+    assert 分数 == sorted(分数) and 分数[0] < 分数[-1]     # 一轮比一轮高 = 状态真的传下去了
+    assert summary.best_round > 0
+    assert summary.total_tokens > 0
+    assert (tmp_path / "session_summary.json").exists()
+    assert (tmp_path / "best_report.json").exists()
+
+
+def test_一整场_每轮日志都符合交付物要求(tmp_path):
+    llm, ex = ScriptedLLM(), DriftingExecutor()
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, logs_dir=tmp_path,
+    )
+    rows = [json.loads(l) for l in (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    first = rows[0]
+    assert first["diagnosis"]["findings"]          # 假设
+    assert first["patch_files"]                    # 代码改动全文
+    assert first["metrics"]["验证集"]["点击分"]      # 指标
+    assert first["interventions"] == 0             # 人工干预
+    assert "recoveries" in first                   # 错误与恢复
+
+
+def test_一整场_角色炸了不会拖垮整场(tmp_path):
+    """医生第 2 次调用抛异常：那一轮作废，后面的轮次照跑。"""
+    llm = ScriptedLLM(faults={"医生": [2]})
+    ex = DriftingExecutor()
+    summary = run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=4, logs_dir=tmp_path,
+    )
+    rows = [json.loads(l) for l in (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert summary.rounds_run == 4
+    assert rows[1]["diagnosis"] is None and rows[1]["recoveries"]
+    assert rows[2]["run_ok"]                       # 第 3 轮照常跑
+    assert summary.recoveries >= 1
+
+
+def test_一整场_训练失败不调复盘官(tmp_path):
+    """跑都没跑起来就没什么可复盘的，这时候调大模型是纯浪费。"""
+    llm = ScriptedLLM()
+    ex = DriftingExecutor(fail_rounds=(2,))
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, logs_dir=tmp_path,
+    )
+    rows = [json.loads(l) for l in (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    炸掉那轮 = rows[1]
+    assert 炸掉那轮["reflection"]["verdict"] == "没跑起来"
+    assert 炸掉那轮["reflection"]["由代码合成"] is True
+    assert llm.calls["复盘官"] == llm.calls["工兵"] - 1     # 少调了一次
+
+
+def test_一整场_失败的卡会被拉黑(tmp_path):
+    llm = ScriptedLLM()
+    ex = DriftingExecutor(fail_rounds=(1,))
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=4, logs_dir=tmp_path,
+    )
+    rows = [json.loads(l) for l in (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    炸掉的卡 = rows[0]["chosen"]["card_id"]
+    后面选的卡 = [r["chosen"]["card_id"] for r in rows[1:] if r["chosen"]]
+    assert 炸掉的卡 and 炸掉的卡 not in 后面选的卡
+
+
+def test_一整场_不涨了就自己停(tmp_path):
+    """分数不动的执行器：跑满 patience 轮就该判收敛，不该把 20 轮全烧掉。"""
+    llm = ScriptedLLM(promote_on=())
+    ex = DriftingExecutor(gain=0.0, decay=1.0)
+    summary = run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=20, patience=2, logs_dir=tmp_path,
+    )
+    assert summary.rounds_run <= 4
+    assert "收敛" in summary.stopped_because
+
+
+def test_一整场_预算耗尽就停(tmp_path):
+    llm = ScriptedLLM(promote_on=())
+    ex = DriftingExecutor()
+    summary = run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=20, token_budget=20_000, logs_dir=tmp_path,
+    )
+    assert summary.stopped_because == "预算耗尽"
+    assert summary.total_tokens >= 20_000
+
+
+def test_一整场_结果表算得出相对基线的差值(tmp_path):
+    llm, ex = ScriptedLLM(), DriftingExecutor()
+    summary = run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, baseline={"点击AUC": 0.6000, "购买AUC": 0.5900}, logs_dir=tmp_path,
+    )
+    assert summary.deltas["点击AUC"] == pytest.approx(
+        summary.best_scores["点击AUC"] - 0.6000)
+    assert "相对基线" in summary.as_table()
+
+
+# ────────────────── 噪声带 ──────────────────
+
+
+def test_噪声带_正样本越少抖得越厉害():
+    """47 条正样本的 AUC 和 4 万条正样本的 AUC，不是一回事。"""
+    少 = noise.hanley_mcneil_se(0.70, n_pos=47, n_neg=940)
+    多 = noise.hanley_mcneil_se(0.70, n_pos=41_200, n_neg=824_000)
+    assert 少 > 多 * 10
+
+
+def test_噪声带_从多次运行算出来():
+    reports = [
+        {"保真度": "小份", "验证集": {"点击分": 0.610, "购买分": 0.590},
+         "按商品出现次数分组": [{"区间": "<10次", "点击分": 0.59, "购买分": 0.55,
+                            "转化正样本数": 47}]},
+        {"保真度": "小份", "验证集": {"点击分": 0.614, "购买分": 0.596},
+         "按商品出现次数分组": [{"区间": "<10次", "点击分": 0.60, "购买分": 0.57,
+                            "转化正样本数": 45}]},
+        {"保真度": "小份", "验证集": {"点击分": 0.612, "购买分": 0.602},
+         "按商品出现次数分组": [{"区间": "<10次", "点击分": 0.58, "购买分": 0.53,
+                            "转化正样本数": 49}]},
+    ]
+    bands = noise.summarize(reports, seeds=[1, 2, 3])
+    assert bands["单指标噪声带"] > 0
+    assert bands["单指标噪声带"] == pytest.approx(bands["购买分"]["噪声带"])   # 购买分抖得更厉害
+    assert bands["分组"]["按商品出现次数分组"]["<10次"]["转化正样本数"] == 47
+    assert "噪声带" in bands["表格"]
+
+
+def test_噪声带_挂到成绩单上给医生看():
+    bands = {"单指标噪声带": 0.006, "分组": {}}
+    报告 = {"验证集": {"点击分": 0.61}}
+    带了 = _with_bands(报告, bands)
+    assert 带了["噪声带"]["单指标"] == 0.006
+    assert "验证集" in 带了 and "噪声带" not in 报告       # 不动原文
+
+
+# ────────────────── 真执行器：落地补丁那一段 ──────────────────
+
+
+def test_真执行器_能吃下YAML文本的配置补丁(tmp_path, monkeypatch):
+    """工兵产出的 config_patch 是 YAML **文本**，不是 dict。
+
+    执行器早先直接对它 .items()，任何一个带配置改动的补丁都会当场
+    AttributeError —— 而这正是最常见的那种补丁。
+    """
+    pytest.importorskip("pandas")
+    from harness import executor as ex_mod
+
+    monkeypatch.setattr(ex_mod, "ROOT", tmp_path)
+    ex = ex_mod.RealExecutor.__new__(ex_mod.RealExecutor)
+    ex.config = {}
+    ex._apply_patch({
+        "config_patch": "train:\n  seed: 7\nfeatures:\n  x:\n    enabled: true\n",
+        "new_files": [{"path": "modules/features/x.py", "content": "V = 1\n"}],
+    })
+    assert ex.config["train"] == {"seed": 7}
+    assert (tmp_path / "modules" / "features" / "x.py").read_text(encoding="utf-8") == "V = 1\n"
+
+
+def test_真执行器_不许写到modules之外(tmp_path, monkeypatch):
+    pytest.importorskip("pandas")
+    from harness import executor as ex_mod
+
+    monkeypatch.setattr(ex_mod, "ROOT", tmp_path)
+    ex = ex_mod.RealExecutor.__new__(ex_mod.RealExecutor)
+    ex.config = {}
+    with pytest.raises(ValueError, match="非法写入路径"):
+        ex._apply_patch({"config_patch": "",
+                         "new_files": [{"path": "harness/x.py", "content": "V = 1"}]})
+
+
+def test_真执行器_满足外层循环要的协议():
+    pytest.importorskip("pandas")
+    from harness.executor import RealExecutor
+    from agent.loop import Executor
+
+    assert isinstance(RealExecutor("a", "b"), Executor)   # Protocol 运行时检查
+
+
+def test_一整场_最大数据上还查不出病就算收敛(tmp_path):
+    """升到顶了还连着查不出问题 —— 那就是收敛，不该继续空转烧医生。"""
+    class _没病医生(ScriptedLLM):
+        def _医生(self, schema):
+            return {"findings": [], "no_finding": True, "reason_if_none": "都在噪声带内"}
+
+    llm, ex = _没病医生(), DriftingExecutor()
+    summary = run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=30, logs_dir=tmp_path,
+    )
+    # 4 档 × 每档 2 轮 = 8 轮左右就该停，不会把 30 轮烧完
+    assert summary.rounds_run <= 10
+    assert "收敛" in summary.stopped_because
+    assert llm.calls.get("军师") is None          # 一次都没查出病，后面三个角色一次没调
