@@ -38,6 +38,31 @@ BASE_FEATURES = ["101", "121", "122", "124", "125", "126", "127", "128", "129",
 FIDELITY_FRAC = {"小份": 0.15, "中份": 0.4, "大份": 0.75, "全量": 1.0}
 
 
+def _load_pipeline_config() -> dict[str, Any]:
+    """读 config/pipeline.yaml。文件不在就返回空配置，用代码里的默认值兜底。"""
+    path = ROOT / "config" / "pipeline.yaml"
+    if not path.exists():
+        return {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _deep_set(cfg: dict, path: list[str], value) -> None:
+    """按路径深度写入。嵌套字典做递归合并，不覆盖同级的其他键。"""
+    node = cfg
+    for part in path[:-1]:
+        nxt = node.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            node[part] = nxt
+        node = nxt
+    last = path[-1]
+    if isinstance(value, dict) and isinstance(node.get(last), dict):
+        for k, v in value.items():
+            _deep_set(node[last], str(k).split("."), v)
+    else:
+        node[last] = value
+
+
 def _auc(y_true, y_score) -> float | None:
     """算不出来就返回 None，绝不返回 0.5 蒙混过关。"""
     try:
@@ -84,7 +109,9 @@ class RealExecutor:
         # 验证集自带标签时可以不给这个 —— 见 _train_and_score
         self.val_labels_path = pathlib.Path(val_labels_path) if val_labels_path else None
         self.seed = seed
-        self.config = config or {}
+        # 不给 config 就读 config/pipeline.yaml —— 工兵改的就是这份，
+        # 执行器不读它的话，改配置类的方案永远等于没改。
+        self.config = config if config is not None else _load_pipeline_config()
         self._cache: dict[str, pd.DataFrame] = {}
 
     # ── 数据 ──
@@ -127,7 +154,10 @@ class RealExecutor:
         if parsed and not isinstance(parsed, dict):
             raise ValueError(f"config_patch 解析出来是 {type(parsed).__name__}，必须是键值对")
         for key, value in (parsed or {}).items():
-            self.config[key] = value
+            # 支持点号路径（features.类目兜底.K: 20）和嵌套字典两种写法，
+            # 都做深度合并 —— 浅层赋值会把整棵子树冲掉，
+            # 工兵只想改一个 K，结果把其他零件的配置全抹了。
+            _deep_set(self.config, str(key).split("."), value)
             emit("phase", name="改配置", detail=str(key))
 
     def _train_and_score(self, fidelity: str) -> dict[str, Any]:
@@ -150,9 +180,47 @@ class RealExecutor:
         else:
             raise ValueError("验证集不含标签，且没有提供 val_labels 文件，无法评分")
 
-        features = [c for c in BASE_FEATURES if c in train.columns]
+        # 特征清单从配置读（R7）—— 工兵改 features.base_fields 才真的生效。
+        # 写死在代码里的话，医生诊断出「特征没用上」也没人能修。
+        wanted = (self.config.get("features") or {}).get("base_fields") or BASE_FEATURES
+        features = [str(c) for c in wanted if str(c) in train.columns]
+        missing = [str(c) for c in wanted if str(c) not in train.columns]
+        if missing:
+            emit("phase", name="特征缺失",
+                 detail=f"配置里有 {len(missing)} 个字段数据里没有：{missing[:5]}")
+        if not features:
+            raise ValueError(f"配置里的特征一个都不在数据里：{wanted[:8]}")
         guard_features(features)          # R1 运行时防线
         emit("phase", name="训练", detail=f"{fidelity} · {len(train):,} 行 · {len(features)} 个特征")
+
+        # 数据里有些字段是数组（4 个交叉字段大多单值，853 和历史行为字段是真多值）。
+        # 数组不能直接当类别特征 —— LightGBM 要求可哈希，会当场抛
+        # 「unhashable type: numpy.ndarray」。单值的拆出来用，
+        # 真多值的交给专门的编码零件（见「多值字段接回来」那张卡），这里先跳过。
+        def _flatten(v):
+            """数组转单值。空数组不是错误 —— 它的含义是「用户和这个商品没有交集」，
+            本身就是有用的信号（509 有 77% 是空的），所以映射成一个专门的类别 -1。"""
+            if isinstance(v, str) or not hasattr(v, "__len__"):
+                return v
+            return v[0] if len(v) else -1
+
+        multivalue: list[str] = []
+        for col in list(features):
+            if not train[col].map(lambda v: hasattr(v, "__len__")
+                                  and not isinstance(v, str)).any():
+                continue
+            sizes = train[col].map(lambda v: len(v) if hasattr(v, "__len__") else 1)
+            if sizes.max() > 1:
+                # 真多值（853、历史行为字段）交给专门的编码零件，
+                # 见「多值字段接回来」那张卡。硬转单值会丢信息。
+                multivalue.append(col)
+                features.remove(col)
+                continue
+            train[col] = train[col].map(_flatten)
+            val_x[col] = val_x[col].map(_flatten)
+        if multivalue:
+            emit("phase", name="跳过多值字段",
+                 detail=f"{multivalue} 是真多值，需要编码零件才能用")
 
         for col in features:
             train[col] = train[col].astype("category")

@@ -855,3 +855,41 @@ def test_max_tokens大时必须走流式():
     llm.call(role="医生", system="", user="", schema={},
              max_tokens=_STREAM_THRESHOLD - 1)
     assert not 用了流式, "小请求不必流式，非流式更简单"
+
+
+# ────────────────── 配置：白名单与深度合并 ──────────────────
+
+
+def test_特征清单在白名单内可改():
+    """医生最常诊断出的就是「特征没用上」，改特征却被白名单拦住的话，
+    等于一边让它诊断、一边堵死修复的路。base_fields 必须在 features 下。"""
+    import yaml as _yaml
+    from agent.roles import _check_config_patch
+
+    cfg = _yaml.safe_load(
+        (pathlib.Path(__file__).resolve().parent.parent
+         / "config" / "pipeline.yaml").read_text(encoding="utf-8"))
+    assert "base_fields" in cfg["features"], "特征清单要放在 features 下，工兵才改得动"
+    assert "fidelity" not in cfg.get("train", {}), "数据规模归调度器管，不能让工兵改"
+
+    _check_config_patch("features:\n  base_fields: ['101', '205']\n")   # 不该抛
+
+
+def test_改配置不会冲掉同级的其他键():
+    """浅层赋值的坑：工兵只想改一个 K，结果把 features 下其他零件全抹了。"""
+    from harness.executor import _deep_set
+
+    cfg = {"features": {"类目兜底": {"enabled": True, "K": 20},
+                        "目标编码": {"enabled": False}}}
+    _deep_set(cfg, ["features", "类目兜底", "K"], 50)
+    assert cfg["features"]["类目兜底"]["K"] == 50
+    assert cfg["features"]["类目兜底"]["enabled"] is True      # 同级键还在
+    assert "目标编码" in cfg["features"]                       # 兄弟零件还在
+
+
+def test_执行器默认读配置文件():
+    """不读的话，工兵改配置类的方案永远等于没改，复盘官只会一直判「猜错了」。"""
+    from harness.executor import _load_pipeline_config
+
+    cfg = _load_pipeline_config()
+    assert cfg.get("features", {}).get("base_fields"), "应该读到特征清单"
