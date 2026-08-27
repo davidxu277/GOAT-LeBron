@@ -81,14 +81,16 @@ button:disabled{opacity:.45; cursor:not-allowed}
       <h2>数据与运行设置</h2>
       <div class="scroll">
         <label>训练集（含标签）</label>
-        <div class="picker"><input id="train" placeholder="点右侧选择，或直接粘贴路径">
-          <button class="pick" data-for="train" data-title="选择训练集">选择…</button></div>
-        <label>验证集特征（不含标签）</label>
-        <div class="picker"><input id="valx" placeholder="点右侧选择，或直接粘贴路径">
-          <button class="pick" data-for="valx" data-title="选择验证集特征">选择…</button></div>
-        <label>验证集标签（评分用，不给模型）</label>
-        <div class="picker"><input id="valy" placeholder="点右侧选择，或直接粘贴路径">
-          <button class="pick" data-for="valy" data-title="选择验证集标签">选择…</button></div>
+        <div class="picker"><input id="train" placeholder="选文件或分片目录">
+          <button class="pick" data-for="train" data-kind="folder" data-title="选择训练集目录" title="分片数据集选这个">目录</button>
+          <button class="pick" data-for="train" data-kind="file" data-title="选择训练集文件">文件</button></div>
+        <label>验证集</label>
+        <div class="picker"><input id="valx" placeholder="选文件或分片目录">
+          <button class="pick" data-for="valx" data-kind="folder" data-title="选择验证集目录">目录</button>
+          <button class="pick" data-for="valx" data-kind="file" data-title="选择验证集文件">文件</button></div>
+        <label>验证集标签（可选，验证集自带标签时留空）</label>
+        <div class="picker"><input id="valy" placeholder="留空 = 用验证集自带的标签">
+          <button class="pick" data-for="valy" data-kind="file" data-title="选择验证集标签">文件</button></div>
         <div class="row">
           <div style="flex:1"><label>数据规模</label>
             <select id="fidelity">
@@ -102,7 +104,7 @@ button:disabled{opacity:.45; cursor:not-allowed}
           <button id="btnCheck">预检</button>
           <button id="btnRun" class="primary" disabled>开始训练</button>
         </div>
-        <p class="empty" style="margin-top:.6rem">预检通过才能开始训练。数据不出本机。</p>
+        <p class="empty" style="margin-top:.6rem">分片数据集选「目录」，会自动读取里面全部 parquet。数据不出本机。</p>
       </div>
     </section>
 
@@ -133,14 +135,15 @@ function paths(){
 document.querySelectorAll('.pick').forEach(btn => {
   btn.onclick = async () => {
     const target = $(btn.dataset.for);
-    btn.disabled = true; btn.textContent = '选择中…';
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = '…';
     try{
       const r = await fetch('/api/pick', {method:'POST',
-        body: JSON.stringify({title: btn.dataset.title})});
+        body: JSON.stringify({title: btn.dataset.title, kind: btn.dataset.kind})});
       const d = await r.json();
       if(d.path) target.value = d.path;
     } finally {
-      btn.disabled = false; btn.textContent = '选择…';
+      btn.disabled = false; btn.textContent = label;
     }
   };
 });
@@ -166,7 +169,6 @@ $('btnCheck').onclick = async () => {
 
 $('btnRun').onclick = async () => {
   const p = paths();
-  if(!p.val_labels){ alert('评分需要验证集标签文件'); return; }
   $('runBox').innerHTML = '<div class="stream" id="stream"></div>';
   $('btnRun').disabled = true;
   await fetch('/api/run', {method:'POST', body:JSON.stringify(p)});

@@ -56,10 +56,39 @@ class Preflight:
         }
 
 
+def read_any(path: str | pathlib.Path, columns: list[str] | None = None) -> pd.DataFrame:
+    """读数据。路径可以是单个文件，也可以是装着分片的目录。
+
+    分片数据集（一个 split = 几百个 part-xxxx.parquet）是常见形态，
+    这里统一处理：目录 → 按文件名排序读全部分片后拼接。
+    """
+    p = pathlib.Path(path)
+    if p.is_dir():
+        shards = sorted(p.glob("*.parquet")) or sorted(p.glob("*.csv"))
+        if not shards:
+            raise FileNotFoundError(f"目录里没有 parquet/csv 分片：{p}")
+        if shards[0].suffix == ".parquet":
+            frames = [pd.read_parquet(f, columns=columns) for f in shards]
+        else:
+            frames = [pd.read_csv(f, usecols=columns) for f in shards]
+        return pd.concat(frames, ignore_index=True)
+    if p.suffix == ".parquet":
+        return pd.read_parquet(p, columns=columns)
+    return pd.read_csv(p, usecols=columns)
+
+
+def count_rows(path: str | pathlib.Path) -> int:
+    """只读元数据数行数，不把数据载进内存 —— 预检时几百万行也很快。"""
+    p = pathlib.Path(path)
+    files = (sorted(p.glob("*.parquet")) if p.is_dir() else [p])
+    if files and files[0].suffix == ".parquet":
+        import pyarrow.parquet as pq
+        return sum(pq.ParquetFile(f).metadata.num_rows for f in files)
+    return len(read_any(p, columns=None))
+
+
 def _peek(path: pathlib.Path, nrows: int | None = None) -> pd.DataFrame:
-    if path.suffix == ".parquet":
-        return pd.read_parquet(path)
-    return pd.read_csv(path, nrows=nrows)
+    return read_any(path)
 
 
 def preflight(train_path: str, val_features_path: str,
@@ -73,15 +102,28 @@ def preflight(train_path: str, val_features_path: str,
             report.checks.append(Check("bad", f"{name} 文件不存在：{p}"))
             return report
 
-    train = _peek(tp)
-    val_features = _peek(vp)
+    # 只读标签和用户列做预检 —— 几百万行不能整份载进内存
+    probe = ["click", "conversion", "101"]
+    train_cols = set(read_any(tp, columns=None).columns) if tp.stat().st_size < 5_000_000 \
+        else set(pd.read_parquet(sorted(tp.glob("*.parquet"))[0]).columns) if tp.is_dir() \
+        else set(_peek(tp).columns)
+    train = read_any(tp, columns=[c for c in probe if c in train_cols])
+
+    val_cols = set(pd.read_parquet(sorted(vp.glob("*.parquet"))[0]).columns) if vp.is_dir() \
+        else set(_peek(vp).columns)
+    val_features = read_any(vp, columns=[c for c in probe if c in val_cols])
     report.rows = {"train": len(train), "val_features": len(val_features)}
+    if tp.is_dir():
+        report.stats["train_分片数"] = len(list(tp.glob("*.parquet")))
+    if vp.is_dir():
+        report.stats["val_分片数"] = len(list(vp.glob("*.parquet")))
 
     # ── R1：验证集特征文件里绝不能带答案列 ──
-    leaked = [c for c in ("click", "conversion", "ctcvr") if c in val_features.columns]
+    leaked = [c for c in ("click", "conversion", "ctcvr") if c in val_cols]
     if leaked:
         report.checks.append(Check(
-            "bad", f"val_features 里出现了答案列 {leaked}——这等于把答案交给模型（R1）"))
+            "warn", f"验证集里带着答案列 {leaked}——训练时必须把它们剔除（R1）；"
+                    f"若这份就是带标签的完整验证集，可以不填「验证集标签」那一栏"))
     else:
         report.checks.append(Check("ok", "验证集特征文件不含答案列，R1 满足"))
 
@@ -133,17 +175,24 @@ def preflight(train_path: str, val_features_path: str,
         else:
             report.checks.append(Check("ok", "按用户切分正确，两边用户无重叠"))
 
-    # ── 私藏标签（若提供）──
+    # ── 标签：外部私藏文件，或验证集自带 ──
+    labels = None
     if val_labels_path:
         lp = pathlib.Path(val_labels_path)
         if not lp.exists():
-            report.checks.append(Check("warn", f"val_labels 文件不存在：{lp}，无法评分"))
+            report.checks.append(Check("warn", f"val_labels 不存在：{lp}，无法评分"))
         else:
-            labels = _peek(lp)
+            labels = read_any(lp, columns=None)
             report.rows["val_labels"] = len(labels)
             if len(labels) != n_val:
                 report.checks.append(Check(
                     "bad", f"val_labels {len(labels):,} 行与 val_features {n_val:,} 行对不上"))
+    elif "conversion" in val_cols:
+        labels = val_features          # 验证集自带标签，直接用
+        report.checks.append(Check("ok", "验证集自带标签，可直接评分"))
+
+    if labels is not None and len(labels) == n_val:
+        if True:  # noqa: SIM102 —— 保持缩进，下面整段是标签质量检查
             n_val_conv = int(labels["conversion"].sum()) if "conversion" in labels else 0
             n_val_click = int(labels["click"].sum()) if "click" in labels else 0
             report.stats["val_clicks"] = n_val_click

@@ -25,7 +25,7 @@ from sklearn.metrics import log_loss, roc_auc_score
 
 from agent.events import emit
 from agent.loop import RunResult
-from .data import guard_features
+from .data import guard_features, read_any
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -75,11 +75,13 @@ def _bucket_metrics(df: pd.DataFrame, ctr_pred, cvr_pred, by: pd.Series,
 class RealExecutor:
     """真实执行器。数据路径在构造时给定，run() 时按 fidelity 决定用多少数据。"""
 
-    def __init__(self, train_path: str, val_features_path: str, val_labels_path: str,
+    def __init__(self, train_path: str, val_features_path: str,
+                 val_labels_path: str | None = None,
                  seed: int = 20260827, config: dict[str, Any] | None = None):
         self.train_path = pathlib.Path(train_path)
         self.val_features_path = pathlib.Path(val_features_path)
-        self.val_labels_path = pathlib.Path(val_labels_path)
+        # 验证集自带标签时可以不给这个 —— 见 _train_and_score
+        self.val_labels_path = pathlib.Path(val_labels_path) if val_labels_path else None
         self.seed = seed
         self.config = config or {}
         self._cache: dict[str, pd.DataFrame] = {}
@@ -87,10 +89,10 @@ class RealExecutor:
     # ── 数据 ──
 
     def _read(self, path: pathlib.Path) -> pd.DataFrame:
+        """读单个文件或整个分片目录（见 harness.data.read_any）。"""
         key = str(path)
         if key not in self._cache:
-            self._cache[key] = (pd.read_parquet(path) if path.suffix == ".parquet"
-                                else pd.read_csv(path))
+            self._cache[key] = read_any(path)
         return self._cache[key]
 
     # ── Executor 协议 ──
@@ -132,7 +134,13 @@ class RealExecutor:
             train = pd.concat([pos, neg]).sample(frac=1.0, random_state=self.seed)
 
         val_x = self._read(self.val_features_path)
-        val_y = self._read(self.val_labels_path)
+        # 标签来源二选一：单独的私藏文件，或验证集自带（分片数据集常见）
+        if self.val_labels_path is not None:
+            val_y = self._read(self.val_labels_path)
+        elif {"click", "conversion"} <= set(val_x.columns):
+            val_y = val_x[["sample_id", "click", "conversion"]].copy()
+        else:
+            raise ValueError("验证集不含标签，且没有提供 val_labels 文件，无法评分")
 
         features = [c for c in BASE_FEATURES if c in train.columns]
         guard_features(features)          # R1 运行时防线

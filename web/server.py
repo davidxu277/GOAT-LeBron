@@ -75,7 +75,8 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length) or "{}")
 
         if self.path == "/api/pick":
-            _json(self, 200, {"path": _pick_file(payload.get("title", "选择数据文件"))})
+            _json(self, 200, {"path": _pick_path(payload.get("title", "选择数据"),
+                                                 payload.get("kind", "file"))})
 
         elif self.path == "/api/preflight":
             try:
@@ -100,21 +101,24 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, 404, {"error": "not found"})
 
 
-def _pick_file(title: str) -> str:
-    """弹出 macOS 原生文件选择器，返回选中文件的真实路径。
+def _pick_path(title: str, kind: str = "file") -> str:
+    """弹出 macOS 原生选择器，返回真实路径。kind="folder" 时选目录。
 
     浏览器出于安全拿不到本地文件的真实路径，但服务器就跑在本机上，
     直接调系统的选择器即可。用户点取消返回空串。
+
+    选目录是为了支持分片数据集 —— 一个 split 常常是几百个
+    part-xxxx.parquet，选目录比逐个选文件合理。
     """
-    script = (
-        f'set f to choose file with prompt "{title}" '
-        f'of type {{"csv", "parquet", "txt"}}\n'
-        f'POSIX path of f'
-    )
+    if kind == "folder":
+        script = f'set f to choose folder with prompt "{title}"\nPOSIX path of f'
+    else:
+        script = (f'set f to choose file with prompt "{title}" '
+                  f'of type {{"csv", "parquet", "txt"}}\nPOSIX path of f')
     try:
         out = subprocess.run(["osascript", "-e", script],
                              capture_output=True, text=True, timeout=300)
-        return out.stdout.strip()          # 取消时 osascript 报错，stdout 为空
+        return out.stdout.strip().rstrip("/")   # 取消时 stdout 为空
     except Exception:
         return ""
 
