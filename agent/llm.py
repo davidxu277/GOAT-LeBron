@@ -148,6 +148,17 @@ class LLM:
                 self.ledger.add(role, model, inp, out, retries=attempt)
                 raise SchemaViolation(f"{role}：模型拒绝了这次请求")
 
+            # 撞上 max_tokens 时 JSON 必然不完整，报错会是「Unterminated string」
+            # 这种看起来像模型不听话的信息 —— 说清真实原因，别让人和模型都误判。
+            if resp.stop_reason == "max_tokens":
+                self.ledger.add(role, model, inp, out, retries=1)
+                raise SchemaViolation(
+                    f"{role}：输出撞上 max_tokens={max_tokens} 被截断"
+                    f"（已输出 {out} token），JSON 不完整。"
+                    f"这是输出预算不够，不是模型不听话 —— 调大限制，"
+                    f"或让方案产出更短的代码。"
+                )
+
             text = next((b.text for b in resp.content if b.type == "text"), "")
             try:
                 data = json.loads(text)

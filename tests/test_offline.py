@@ -770,3 +770,39 @@ def test_一整场_范文可以是按环节取的函数(tmp_path):
     )
     assert 看到的环节                      # 真的被调用了
     assert all(isinstance(s, str) for s in 看到的环节)
+# ────────────────── 输出被 max_tokens 截断 ──────────────────
+
+
+class _FakeResp:
+    """假的 Anthropic 回复：只需要 stop_reason / usage / content 三样。"""
+
+    def __init__(self, stop_reason, text=""):
+        self.stop_reason = stop_reason
+        self.usage = type("U", (), {"input_tokens": 100, "output_tokens": 96000})()
+        self.content = [type("B", (), {"type": "text", "text": text})()]
+
+
+class _FakeClient:
+    def __init__(self, resp):
+        self.messages = type("M", (), {"create": lambda *a, **k: resp})()
+
+
+def test_撞上token上限要报预算不够而不是JSON坏了():
+    """截断时 JSON 必然不完整，若照原样报「Unterminated string」，
+    人和重试时的模型都会以为是模型不听话，往错误方向诊断。"""
+    from agent.llm import LLM
+
+    llm = LLM(client=_FakeClient(_FakeResp("max_tokens", '{"findings": [')))
+    with pytest.raises(SchemaViolation, match="被截断"):
+        llm.call(role="工兵", system="", user="", schema={})
+
+    # 这次调用照样要记账 —— 烧掉的 token 不能因为失败就漏记
+    assert llm.ledger.total_tokens == 96100
+
+
+def test_模型拒绝与截断是两种不同的错():
+    from agent.llm import LLM
+
+    llm = LLM(client=_FakeClient(_FakeResp("refusal")))
+    with pytest.raises(SchemaViolation, match="拒绝"):
+        llm.call(role="医生", system="", user="", schema={})
