@@ -39,6 +39,10 @@ PRICING = {
 # effort 只在 Opus / Sonnet 5 系列上可用，Haiku 4.5 传了会报错
 _EFFORT_CAPABLE = ("claude-opus-", "claude-sonnet-5", "claude-fable-")
 
+# 超过这个 max_tokens 就必须走流式，否则 SDK 直接抛 ValueError
+# （"Streaming is required for operations that may take longer than 10 minutes"）
+_STREAM_THRESHOLD = 20000
+
 
 @dataclass
 class Usage:
@@ -141,7 +145,14 @@ class LLM:
         last_error = ""
 
         for attempt in range(2):
-            resp = self.client.messages.create(**kwargs, messages=messages)
+            # SDK 规定：预估耗时可能超 10 分钟的请求必须走流式，
+            # 而 max_tokens 一大就会撞上这条线（工兵要写整个文件，给的是 96k）。
+            # 非流式在那种情况下会直接抛 ValueError，一个字都拿不到。
+            if max_tokens > _STREAM_THRESHOLD:
+                with self.client.messages.stream(**kwargs, messages=messages) as stream:
+                    resp = stream.get_final_message()
+            else:
+                resp = self.client.messages.create(**kwargs, messages=messages)
             inp, out = resp.usage.input_tokens, resp.usage.output_tokens
 
             if resp.stop_reason == "refusal":

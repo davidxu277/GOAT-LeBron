@@ -144,25 +144,85 @@ def _pick_path(title: str, kind: str = "file") -> str:
 
 
 def _run_job(payload: dict) -> None:
-    """后台线程里跑训练，结果放进 _state。"""
+    """后台线程里跑任务，结果放进 _state。
+
+    两种模式：
+      train  —— 只跑一次训练（不经过四个角色），用来验证数据管线通不通
+      agent  —— 完整的自主迭代 N 轮，医生/军师/工兵/复盘官全程参与
+    """
+    mode = payload.get("mode", "train")
     try:
         from agent.events import emit
-        from harness.executor import RealExecutor
-        emit("phase", name="启动", detail=f"保真度 {payload.get('fidelity', '全量')}")
-        ex = RealExecutor(payload["train"], payload["val_features"],
-                          payload["val_labels"],
-                          seed=int(payload.get("seed", 20260827)))
-        result = ex.run({"new_files": [], "config_patch": {}},
-                        payload.get("fidelity", "全量"))
-        _state["last"] = {"ok": result.ok, "seconds": result.seconds,
-                          "error": result.error, "report": result.health_report}
-        emit("round_end", seconds=result.seconds,
-             verdict="完成" if result.ok else "失败")
+        if mode == "agent":
+            _run_agent(payload, emit)
+        else:
+            _run_train_only(payload, emit)
     except Exception as exc:
         traceback.print_exc()
-        _state["last"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        _state["last"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                          "traceback": traceback.format_exc()[-2000:]}
+        try:
+            from agent.events import emit as _e
+            _e("recovery", text=f"整场中断：{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
     finally:
         _state["running"] = False
+
+
+def _run_train_only(payload: dict, emit) -> None:
+    from harness.executor import RealExecutor
+    emit("phase", name="启动", detail=f"只跑训练 · 保真度 {payload.get('fidelity', '全量')}")
+    ex = RealExecutor(payload["train"], payload["val_features"],
+                      payload.get("val_labels") or None,
+                      seed=int(payload.get("seed", 20260827)))
+    result = ex.run({"new_files": [], "config_patch": {}},
+                    payload.get("fidelity", "全量"))
+    _state["last"] = {"mode": "train", "ok": result.ok, "seconds": result.seconds,
+                      "error": result.error, "report": result.health_report}
+    emit("round_end", seconds=result.seconds,
+         verdict="完成" if result.ok else "失败")
+
+
+def _run_agent(payload: dict, emit) -> None:
+    """完整自主迭代 —— 四个角色的调用会自己发事件，控制台照单全收。"""
+    import time
+    from agent.cli import INTERFACE_SPEC, PIPELINE_CONFIG, example_for, make_llm
+    from agent.knowledge import CardLibrary, SymptomVocab
+    from agent.loop import run_session
+    from harness.executor import RealExecutor
+
+    rounds = int(payload.get("rounds", 5))
+    emit("phase", name="启动自主迭代",
+         detail=f"最多 {rounds} 轮 · 起步 {payload.get('fidelity', '小份')}数据")
+
+    vocab = SymptomVocab.load()
+    executor = RealExecutor(payload["train"], payload["val_features"],
+                            payload.get("val_labels") or None,
+                            seed=int(payload.get("seed", 20260827)))
+    # 第一份成绩单：先跑一次基线，医生要看着它做第一次诊断
+    emit("phase", name="跑基线", detail="给医生第一份成绩单")
+    base = executor.run({"new_files": [], "config_patch": {}},
+                        payload.get("fidelity", "小份"))
+    if not base.ok:
+        raise RuntimeError(f"基线就没跑起来：{base.error}")
+
+    t0 = time.time()
+    summary = run_session(
+        llm=make_llm(), vocab=vocab, cards=CardLibrary.load(vocab),
+        executor=executor, initial_report=base.health_report,
+        module_interface=INTERFACE_SPEC, example_module=example_for,
+        current_config=PIPELINE_CONFIG, rounds=rounds,
+        logs_dir=ROOT / "logs",
+    )
+    _state["last"] = {
+        "mode": "agent", "ok": True, "seconds": time.time() - t0,
+        "rounds_run": getattr(summary, "rounds_run", None),
+        "stopped_because": getattr(summary, "stopped_because", ""),
+        "summary_text": summary.as_table(),
+        "total_tokens": summary.total_tokens,
+        "report": base.health_report,
+    }
 
 
 def main() -> int:

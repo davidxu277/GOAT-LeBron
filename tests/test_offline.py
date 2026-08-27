@@ -783,8 +783,21 @@ class _FakeResp:
 
 
 class _FakeClient:
+    """假的 Anthropic 客户端。两条路都要有 —— 大请求走 stream，小请求走 create。"""
+
     def __init__(self, resp):
-        self.messages = type("M", (), {"create": lambda *a, **k: resp})()
+        class _Stream:
+            def __enter__(self_inner):
+                return self_inner
+            def __exit__(self_inner, *a):
+                return False
+            def get_final_message(self_inner):
+                return resp
+
+        self.messages = type("M", (), {
+            "create": lambda *a, **k: resp,
+            "stream": lambda *a, **k: _Stream(),
+        })()
 
 
 def test_撞上token上限要报预算不够而不是JSON坏了():
@@ -806,3 +819,39 @@ def test_模型拒绝与截断是两种不同的错():
     llm = LLM(client=_FakeClient(_FakeResp("refusal")))
     with pytest.raises(SchemaViolation, match="拒绝"):
         llm.call(role="医生", system="", user="", schema={})
+
+
+def test_max_tokens大时必须走流式():
+    """SDK 规定预估超 10 分钟的请求必须流式，非流式会直接抛 ValueError。
+
+    max_tokens 提到 96k 后踩过这个坑：医生每轮都失败，整场空转两轮。
+    """
+    from agent.llm import LLM, _STREAM_THRESHOLD
+
+    用了流式 = []
+
+    class _Stream:
+        def __enter__(self):
+            用了流式.append(True)
+            return self
+        def __exit__(self, *a):
+            return False
+        def get_final_message(self):
+            return _FakeResp("end_turn", '{"ok": 1}')
+
+    class _Client:
+        def __init__(self):
+            self.messages = type("M", (), {
+                "create": lambda *a, **k: _FakeResp("end_turn", '{"ok": 1}'),
+                "stream": lambda *a, **k: _Stream(),
+            })()
+
+    llm = LLM(client=_Client())
+    llm.call(role="工兵", system="", user="", schema={},
+             max_tokens=_STREAM_THRESHOLD + 1)
+    assert 用了流式, "max_tokens 超阈值时应该走流式，否则 SDK 会抛 ValueError"
+
+    用了流式.clear()
+    llm.call(role="医生", system="", user="", schema={},
+             max_tokens=_STREAM_THRESHOLD - 1)
+    assert not 用了流式, "小请求不必流式，非流式更简单"
