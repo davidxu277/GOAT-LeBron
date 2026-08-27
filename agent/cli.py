@@ -321,8 +321,10 @@ def cmd_run(args) -> int:
     print(f"\n{summary.as_table()}")
     print(f"\n{llm.ledger.report()}")
     rel = logs_dir.relative_to(ROOT)
-    print(f"\n我交这一版：第 {summary.best_round} 轮 "
-          f"（成绩单已存 {rel}/best_report.json，结果表存 {rel}/session_summary.json）")
+    print(f"\n我交这一版：第 {summary.best_round} 轮")
+    print(f"  分数记录 {rel}/best_report.json · 结果表 {rel}/session_summary.json")
+    print(f"  交付物 #4（模型/预测结果）还要照着这一版的配方重跑一次："
+          f"agent.cli finalize 会把配方整理到 deliverables/best_pipeline/")
     return 0
 
 
@@ -444,11 +446,14 @@ def cmd_finalize(args) -> int:
 
     print(f"\n══════════ 提交包已备好 · 第「{run_id}」场 ══════════")
     print(f"目录：{out}")
-    print(f"  逐轮日志      {len(mine)} 轮（交付物 #3）")
-    print(f"  一起带过去    {', '.join(带过去) or '—'}")
-    print(f"  最佳版本      {restored}")
-    print(f"\n还要人做的两件事：")
-    print(f"  · 照着 best_pipeline/ 重跑一次，产出提交用的预测结果（交付物 #4）")
+    print(f"  逐轮日志      {len(mine)} 轮 —— 交付物 #3")
+    print(f"  结果表        session_summary.json —— 交付物 #5")
+    print(f"  一起带过去    {', '.join(带过去) or '—'}（佐证材料，不是提交物）")
+    print(f"  最佳版本配方  {restored}")
+    print(f"\n⚠️ 交付物 #4（模型本身）这一步产不出来 —— 上面给的是**配方**。")
+    print(f"   照着 best_pipeline/ 重跑一次，导出预测结果或 checkpoint，那个才是要交的。")
+    print(f"\n还要人做的：")
+    print(f"  · 把 best_pipeline/ 重跑一次并导出提交文件（等 Starter Kit 的输出 Schema）")
     print(f"  · README 的「局限性与改进方向」（交付物 #2 明确要求）")
     return 0
 
