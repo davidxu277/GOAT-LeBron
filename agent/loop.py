@@ -179,6 +179,79 @@ class PriorLedger:
         return cls(values=json.loads(path.read_text(encoding="utf-8")))
 
 
+SHELF_KEEP = 5          # 待议架最多留几条 —— 喂给军师的上下文不能越滚越大
+
+
+class Shelf:
+    """待议架 —— 军师提过、但调度器没挑中的方案。
+
+    军师每轮想 3 个，只有 1 个会被执行。剩下两个以前除了当"实现失败的备胎"
+    就直接扔了，下一轮它又从头把同样的推理做一遍 —— 那部分思维链是要花钱的。
+
+    存下来，下一轮把它们摆回军师面前：还对症就直接复用，条件变了就明确放弃。
+
+    三条过期规则（都在 relevant 里）：
+      · 这张卡已经试过（失败拉黑，或已生效并入流水线）→ 丢
+      · 目标毛病这一轮医生没再报 → 丢（病都没了，药自然不用留）
+      · 同一张卡只留最近一次，最多留 SHELF_KEEP 条
+
+    过期规则比"存下来"这件事本身更重要：陈旧的方案会把军师往回带，
+    让它照着三轮前的诊断开药。
+    """
+
+    def __init__(self, entries: list[dict[str, Any]] | None = None):
+        self.entries: list[dict[str, Any]] = entries or []
+
+    @staticmethod
+    def _key(entry: dict[str, Any]) -> tuple:
+        # 自创方案没有 card_id，用目标病组合区分
+        return (entry.get("card_id") or "", tuple(entry.get("targets") or []))
+
+    def shelve(self, round_id: int, proposals: list[dict[str, Any]],
+               chosen: dict[str, Any] | None) -> None:
+        """把这一轮没被挑中的方案收进架子。"""
+        chosen_key = self._key(chosen or {})
+        for p in proposals:
+            if self._key(p) == chosen_key:
+                continue
+            entry = {
+                "提出于第几轮": round_id,
+                "card_id": p.get("card_id", ""),
+                "targets": list(p.get("targets") or []),
+                "expected": p.get("expected", {}),
+                "cost": p.get("cost", {}),
+                # 只留个引子。军师需要的是"我想过这个"，不是把整段推理再读一遍
+                "当时的理由": (p.get("rationale") or "")[:120],
+            }
+            self.entries = [e for e in self.entries if self._key(e) != self._key(entry)]
+            self.entries.append(entry)
+        self.entries = self.entries[-(SHELF_KEEP * 3):]     # 粗剪，精剪在 relevant
+
+    def relevant(self, symptom_ids: list[str],
+                 exclude_ids: set[str] | None = None) -> list[dict[str, Any]]:
+        """挑出这一轮还说得通的存货。"""
+        wanted = set(symptom_ids)
+        exclude = exclude_ids or set()
+        alive = [
+            e for e in self.entries
+            if (not e["card_id"] or e["card_id"] not in exclude)
+            and wanted & set(e["targets"])
+        ]
+        return alive[-SHELF_KEEP:]
+
+    def dump(self, path: pathlib.Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.entries, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+    @classmethod
+    def load(cls, path: pathlib.Path) -> "Shelf":
+        if not path.exists():
+            return cls()
+        return cls(entries=json.loads(path.read_text(encoding="utf-8")))
+
+
 # 成绩单里两个 AUC 可能挂在哪 —— 真执行器写「验证集」，假成绩单写「总分」
 _SCORE_SECTIONS = ("验证集", "总分")
 
@@ -359,6 +432,7 @@ def run_round(
     prior_ledger: PriorLedger | None = None,
     tried_before: list[dict[str, Any]] | None = None,
     exclude_ids: set[str] | None = None,
+    shelf: "Shelf | None" = None,
     fidelity_override: str | None = None,
     noise_floor: float = roles.MIN_REAL_GAIN,
 ) -> RoundLog:
@@ -372,6 +446,10 @@ def run_round(
     tokens_before = llm.ledger.total_tokens
 
     def finish() -> RoundLog:
+        # 收架子放在这里而不是选完方案时：工兵实现失败会换备胎，
+        # log.chosen 到最后才定下来，那个才是真正被用掉的方案。
+        if shelf is not None and log.proposals:
+            shelf.shelve(round_id, log.proposals["proposals"], log.chosen)
         log.tokens = llm.ledger.total_tokens - tokens_before
         log.seconds = time.time() - t0
         return log
@@ -391,11 +469,12 @@ def run_round(
     severity = {f["symptom"]: f.get("severity", 1.0) for f in findings}
     candidates = cards.match(symptom_ids, exclude_ids=exclude_ids, limit=5, severity=severity)
 
-    # ② 军师
+    # ② 军师。把架子上还对症的存货一并摆给它，省得重新推导一遍
+    shelved = shelf.relevant(symptom_ids, exclude_ids) if shelf is not None else None
     log.proposals = _guard(
         log, "军师", roles.propose,
         llm, vocab, findings, candidates,
-        tried_before=tried_before,
+        tried_before=tried_before, shelved=shelved,
         budget_left=budget_left, pipeline_state=current_config,
     )
     if log.proposals is None:
@@ -620,6 +699,7 @@ def run_session(
     logs_dir = logs_dir or (ROOT / "logs")
     time_ledger = TimeLedger.load(logs_dir / "time_ledger.json")
     prior_ledger = PriorLedger.load(logs_dir / "prior_ledger.json")
+    shelf = Shelf.load(logs_dir / "shelf.json")
 
     if start_fidelity not in FIDELITY_LADDER:
         raise ValueError(f"没有「{start_fidelity}」这一档，只能是 {FIDELITY_LADDER}")
@@ -697,6 +777,7 @@ def run_session(
             prior_ledger=prior_ledger,
             tried_before=tried,
             exclude_ids=blacklist | applied,
+            shelf=shelf,
             fidelity_override=FIDELITY_LADDER[rung] if rung else None,
             noise_floor=noise_floor,
         )
@@ -705,6 +786,7 @@ def run_session(
         log.dump(logs_dir / "rounds.jsonl")
         time_ledger.dump(logs_dir / "time_ledger.json")
         prior_ledger.dump(logs_dir / "prior_ledger.json")
+        shelf.dump(logs_dir / "shelf.json")
 
         summary.rounds_run = rid
         summary.total_tokens = llm.ledger.total_tokens

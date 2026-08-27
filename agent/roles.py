@@ -115,6 +115,7 @@ def propose(
     findings: list[dict[str, Any]],
     candidates: list[Card],
     tried_before: list[dict[str, Any]] | None = None,
+    shelved: list[dict[str, Any]] | None = None,
     budget_left: str = "一般",
     pipeline_state: str = "",
 ) -> dict[str, Any]:
@@ -151,10 +152,18 @@ def propose(
         if candidates
         else "（没有对症的卡片。你需要自己想一个方案。）"
     )
+    shelf_block = (
+        f"## 你以前提过、但还没轮到的方案\n\n{_dump(shelved)}\n\n"
+        f"这些是前几轮你自己提的，当时因为性价比排在后面没被执行，现在还对症。\n"
+        f"**仍然合适就直接复用**（理由可以写得短，不必把当时的推理再走一遍）；\n"
+        f"条件已经变了就别提，也不用解释为什么放弃。\n\n"
+        if shelved else ""
+    )
     user = (
         f"## 医生诊断\n\n{_dump(findings)}\n\n"
         f"## 对症的药方卡（已按病名筛选过）\n\n{cards_block}\n\n"
         f"## 本轮已经试过的\n\n{_dump(tried_before or [])}\n\n"
+        f"{shelf_block}"
         f"## 当前流水线\n\n{pipeline_state or '（初始配置）'}\n\n"
         f"## 剩余预算\n\n{budget_left}"
     )

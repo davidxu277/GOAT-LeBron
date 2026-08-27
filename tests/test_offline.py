@@ -17,7 +17,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from agent.knowledge import Card, CardLibrary, SymptomVocab
 from agent.llm import Ledger, SchemaViolation
-from agent.loop import CostAwareScheduler, PriorLedger, TimeLedger, _with_bands, run_session
+from agent.loop import (SHELF_KEEP, CostAwareScheduler, PriorLedger, Shelf,
+                        TimeLedger, _with_bands, run_round, run_session)
 from agent.offline import DriftingExecutor, ScriptedLLM
 from agent import noise, roles, schemas
 
@@ -959,3 +960,118 @@ def test_一整场_起步档位写错当场报错(tmp_path):
             example_module="", current_config="", start_fidelity="超大份",
             logs_dir=tmp_path,
         )
+
+
+# ────────────────── 待议架：军师提过但没轮到的方案 ──────────────────
+
+
+def _prop(card_id, targets, rank=1):
+    return {"rank": rank, "card_id": card_id, "targets": targets,
+            "rationale": "冷门桶 0.552 比热门桶 0.638 低 0.086，" * 5,
+            "expected": {"点击AUC": 0.0, "购买AUC": 0.003},
+            "cost": {"代码难度": "简单", "训练时间倍数": 1.0},
+            "risk": "", "novel": not card_id, "how_to": ""}
+
+
+def test_待议架_只收没被挑中的():
+    shelf = Shelf()
+    a, b, c = _prop("类目兜底", ["冷门商品学不动"]), _prop("ESMM", ["转化样本偏差"]), _prop("AITM", ["转化样本偏差"])
+    shelf.shelve(1, [a, b, c], chosen=a)
+    assert {e["card_id"] for e in shelf.entries} == {"ESMM", "AITM"}
+
+
+def test_待议架_理由只留个引子():
+    """存整段推理没意义 —— 军师需要的是"我想过这个"，不是把当时的话再读一遍。"""
+    shelf = Shelf()
+    long = _prop("ESMM", ["转化样本偏差"])
+    shelf.shelve(1, [long], chosen=None)
+    assert len(shelf.entries[0]["当时的理由"]) <= 120
+    assert len(long["rationale"]) > 120
+
+
+def test_待议架_试过的卡不再摆出来():
+    shelf = Shelf()
+    shelf.shelve(1, [_prop("ESMM", ["转化样本偏差"]), _prop("AITM", ["转化样本偏差"])], chosen=None)
+    活着的 = shelf.relevant(["转化样本偏差"], exclude_ids={"ESMM"})
+    assert [e["card_id"] for e in 活着的] == ["AITM"]
+
+
+def test_待议架_病没了药也不留():
+    """最重要的过期规则：陈旧方案会把军师往回带，让它照着三轮前的诊断开药。"""
+    shelf = Shelf()
+    shelf.shelve(1, [_prop("ESMM", ["转化样本偏差"])], chosen=None)
+    assert shelf.relevant(["转化样本偏差"])            # 这轮还在报这个病 → 留
+    assert shelf.relevant(["在背题"]) == []            # 这轮不报了 → 丢
+
+
+def test_待议架_同一张卡只留最近一次():
+    shelf = Shelf()
+    shelf.shelve(1, [_prop("ESMM", ["转化样本偏差"])], chosen=None)
+    shelf.shelve(5, [_prop("ESMM", ["转化样本偏差"])], chosen=None)
+    assert len(shelf.entries) == 1
+    assert shelf.entries[0]["提出于第几轮"] == 5
+
+
+def test_待议架_有上限():
+    """喂给军师的上下文不能越滚越大，否则省下的 token 还不够多花的。"""
+    shelf = Shelf()
+    for i in range(20):
+        shelf.shelve(i, [_prop(f"卡{i}", ["转化样本偏差"])], chosen=None)
+    assert len(shelf.relevant(["转化样本偏差"])) == SHELF_KEEP
+
+
+def test_待议架_落盘再读回(tmp_path):
+    shelf = Shelf()
+    shelf.shelve(1, [_prop("ESMM", ["转化样本偏差"])], chosen=None)
+    path = tmp_path / "shelf.json"
+    shelf.dump(path)
+    assert Shelf.load(path).entries == shelf.entries
+    assert Shelf.load(tmp_path / "没有.json").entries == []
+
+
+def test_待议架_真的摆到军师面前了(tmp_path):
+    """跑两轮，第二轮军师收到的材料里必须出现第一轮没被挑中的方案。"""
+    看到的 = []
+
+    class _记录军师(ScriptedLLM):
+        def _医生(self, schema):
+            # 每轮报同一个病 —— 病变了架子本来就该清空（见「病没了药也不留」）
+            self._last_findings = [{
+                "symptom": "转化样本偏差", "severity": 0.8, "confidence": "高",
+                "evidence": "购买模型只用了 click=1 的样本，占比 3.4%", "affects": ["购买AUC"],
+            }]
+            return {"findings": [dict(self._last_findings[0])],
+                    "no_finding": False, "reason_if_none": ""}
+
+        def call(self, **kw):
+            if kw["role"] == "军师":
+                看到的.append(kw["user"])
+            return super().call(**kw)
+
+    llm, ex = _记录军师(promote_on=()), DriftingExecutor()
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, logs_dir=tmp_path,
+    )
+    assert "你以前提过、但还没轮到的方案" not in 看到的[0]     # 第一轮架子是空的
+    assert "你以前提过、但还没轮到的方案" in 看到的[1]         # 第二轮摆出来了
+    assert (tmp_path / "shelf.json").exists()
+
+
+def test_待议架_工兵换了备胎就不算没轮到(tmp_path):
+    """工兵第一个方案写失败、换备胎成功 —— 那个备胎是被用掉的，不该留在架子上。"""
+    llm = ScriptedLLM(faults={"工兵": [1]})       # 第一次实现失败，逼它换备胎
+    ex, shelf = DriftingExecutor(), Shelf()
+    vocab = SymptomVocab.load()
+    log = run_round(
+        round_id=1, llm=llm, vocab=vocab, cards=CardLibrary.load(vocab),
+        health_report=ex.report("小份"), parent_result=ex.report("小份"),
+        executor=ex, scheduler=CostAwareScheduler(),
+        module_interface="", example_module="", current_config="",
+        shelf=shelf,
+    )
+    assert log.recoveries                                    # 确实换了备胎
+    用掉的 = log.chosen["card_id"]
+    assert 用掉的 not in {e["card_id"] for e in shelf.entries}

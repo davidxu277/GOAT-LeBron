@@ -91,18 +91,27 @@ class ScriptedLLM:
         card_ids = [c for c in self._enum(
             schema, "properties", "proposals", "items", "properties", "card_id") if c]
         targets = [f["symptom"] for f in self._last_findings] or ["冷门商品学不动"]
-        novel = not card_ids
-        return {"proposals": [{
-            "rank": 1,
-            "card_id": card_ids[0] if card_ids else "",
-            "targets": targets,
-            "rationale": "冷门桶 0.552 比热门桶 0.638 低 0.086，是曝光次数不足导致的欠拟合",
-            "expected": {"点击AUC": 0.001, "购买AUC": 0.004},
-            "cost": {"代码难度": "简单", "训练时间倍数": 1.0},
-            "risk": "热门桶可能被稀释",
-            "novel": novel,
-            "how_to": "按类目做兜底编码" if novel else "",
-        }]}
+        def _one(rank: int, card_id: str, gain: float, 难度: str) -> dict[str, Any]:
+            return {
+                "rank": rank,
+                "card_id": card_id,
+                "targets": targets,
+                "rationale": f"冷门桶 0.552 比热门桶 0.638 低 0.086（方案 {rank}）",
+                "expected": {"点击AUC": 0.001, "购买AUC": gain},
+                "cost": {"代码难度": 难度, "训练时间倍数": 1.0},
+                "risk": "热门桶可能被稀释",
+                "novel": not card_id,
+                "how_to": "按类目做兜底编码" if not card_id else "",
+            }
+
+        if not card_ids:
+            return {"proposals": [_one(1, "", 0.004, "简单")]}
+        # 多提几个，调度器才有得挑，没挑中的才会进待议架
+        picks = card_ids[:3]
+        return {"proposals": [
+            _one(i + 1, cid, 0.004 - i * 0.001, "简单" if i == 0 else "中等")
+            for i, cid in enumerate(picks)
+        ]}
 
     def _工兵(self, schema: dict) -> dict[str, Any]:
         return {
