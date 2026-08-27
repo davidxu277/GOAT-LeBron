@@ -91,15 +91,17 @@ def _make_executor(args, fallback_report: dict):
                         seed=args.seed), True
 
 
-def _initial_report(executor, real: bool, fallback: dict) -> tuple[dict, float]:
+def _initial_report(executor, real: bool, fallback: dict,
+                    fidelity: str = "小份") -> tuple[dict, float]:
     """第 0 轮体检：真执行器就原样跑一次拿真成绩单，假的就用假成绩单。
 
     医生必须看着真数字做诊断 —— 拿假成绩单配真训练是最容易骗到自己的组合。
+    体检必须跑在起步档位上，否则第 1 轮的分数没法跟它比。
     """
     if not real:
         return fallback, 0.0
-    print("体检中（原样跑一次当前流水线，拿第 0 轮成绩单）……")
-    first = executor.run({"new_files": [], "config_patch": ""}, "小份")
+    print(f"体检中（在{fidelity}数据上原样跑一次，拿第 0 轮成绩单）……")
+    first = executor.run({"new_files": [], "config_patch": ""}, fidelity)
     if not first.ok:
         raise SystemExit(f"❌ 第 0 轮就没跑起来：{first.error}")
     print(f"第 0 轮：{read_scores(first.health_report)}  用时 {first.seconds:.0f}s\n")
@@ -273,7 +275,8 @@ def cmd_run(args) -> int:
         else:
             print(f"假执行器 + 假成绩单「{args.name}」——"
                   f"要跑真数据请给 --train / --val-features\n")
-        initial, first_seconds = _initial_report(executor, real, fallback)
+        initial, first_seconds = _initial_report(
+            executor, real, fallback, fidelity=args.start_fidelity)
 
     baseline = {}
     if args.baseline_ctr is not None:
@@ -304,6 +307,7 @@ def cmd_run(args) -> int:
         example_module=example_for,      # 按方案环节选范文
         current_config=PIPELINE_CONFIG,
         rounds=args.rounds,
+        start_fidelity=args.start_fidelity,
         token_budget=args.token_budget,
         epsilon=args.epsilon,
         patience=args.patience,
@@ -357,6 +361,8 @@ def main() -> int:
     p.add_argument("name", nargs="?", default="正常起步", help="没给真数据时用哪份假成绩单")
     _add_data_args(p)
     p.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
+    p.add_argument("--start-fidelity", default="小份",
+                   help="从哪一档数据起步：小份 / 中份 / 大份 / 全量")
     p.add_argument("--epsilon", type=float, default=DEFAULT_EPSILON,
                    help="提升小于它不算提升。Starter Kit 给了官方 ε 就换成官方的")
     p.add_argument("--patience", type=int, default=DEFAULT_PATIENCE,

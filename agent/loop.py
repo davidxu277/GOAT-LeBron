@@ -179,6 +179,79 @@ class PriorLedger:
         return cls(values=json.loads(path.read_text(encoding="utf-8")))
 
 
+SHELF_KEEP = 5          # 待议架最多留几条 —— 喂给军师的上下文不能越滚越大
+
+
+class Shelf:
+    """待议架 —— 军师提过、但调度器没挑中的方案。
+
+    军师每轮想 3 个，只有 1 个会被执行。剩下两个以前除了当"实现失败的备胎"
+    就直接扔了，下一轮它又从头把同样的推理做一遍 —— 那部分思维链是要花钱的。
+
+    存下来，下一轮把它们摆回军师面前：还对症就直接复用，条件变了就明确放弃。
+
+    三条过期规则（都在 relevant 里）：
+      · 这张卡已经试过（失败拉黑，或已生效并入流水线）→ 丢
+      · 目标毛病这一轮医生没再报 → 丢（病都没了，药自然不用留）
+      · 同一张卡只留最近一次，最多留 SHELF_KEEP 条
+
+    过期规则比"存下来"这件事本身更重要：陈旧的方案会把军师往回带，
+    让它照着三轮前的诊断开药。
+    """
+
+    def __init__(self, entries: list[dict[str, Any]] | None = None):
+        self.entries: list[dict[str, Any]] = entries or []
+
+    @staticmethod
+    def _key(entry: dict[str, Any]) -> tuple:
+        # 自创方案没有 card_id，用目标病组合区分
+        return (entry.get("card_id") or "", tuple(entry.get("targets") or []))
+
+    def shelve(self, round_id: int, proposals: list[dict[str, Any]],
+               chosen: dict[str, Any] | None) -> None:
+        """把这一轮没被挑中的方案收进架子。"""
+        chosen_key = self._key(chosen or {})
+        for p in proposals:
+            if self._key(p) == chosen_key:
+                continue
+            entry = {
+                "提出于第几轮": round_id,
+                "card_id": p.get("card_id", ""),
+                "targets": list(p.get("targets") or []),
+                "expected": p.get("expected", {}),
+                "cost": p.get("cost", {}),
+                # 只留个引子。军师需要的是"我想过这个"，不是把整段推理再读一遍
+                "当时的理由": (p.get("rationale") or "")[:120],
+            }
+            self.entries = [e for e in self.entries if self._key(e) != self._key(entry)]
+            self.entries.append(entry)
+        self.entries = self.entries[-(SHELF_KEEP * 3):]     # 粗剪，精剪在 relevant
+
+    def relevant(self, symptom_ids: list[str],
+                 exclude_ids: set[str] | None = None) -> list[dict[str, Any]]:
+        """挑出这一轮还说得通的存货。"""
+        wanted = set(symptom_ids)
+        exclude = exclude_ids or set()
+        alive = [
+            e for e in self.entries
+            if (not e["card_id"] or e["card_id"] not in exclude)
+            and wanted & set(e["targets"])
+        ]
+        return alive[-SHELF_KEEP:]
+
+    def dump(self, path: pathlib.Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.entries, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+    @classmethod
+    def load(cls, path: pathlib.Path) -> "Shelf":
+        if not path.exists():
+            return cls()
+        return cls(entries=json.loads(path.read_text(encoding="utf-8")))
+
+
 # 成绩单里两个 AUC 可能挂在哪 —— 真执行器写「验证集」，假成绩单写「总分」
 _SCORE_SECTIONS = ("验证集", "总分")
 
@@ -324,10 +397,11 @@ def _crashed_reflection(chosen: dict[str, Any] | None, error: str) -> dict[str, 
         "verdict": "没跑起来",
         "actual": {"点击AUC": 0.0, "购买AUC": 0.0},
         "vs_expected": f"代码没跑通，拿不到结果：{error}",
-        "symptom_resolved": {
-            "symptom": targets[0] if targets else "",
-            "before": 0.0, "after": 0.0, "resolved": "否",
-        },
+        # 方案声称要治的病，逐个记「否」—— 跑都没跑起来，一个都没治
+        "symptom_resolved": [
+            {"symptom": t, "before": 0.0, "after": 0.0, "resolved": "否"}
+            for t in targets
+        ] or [{"symptom": "", "before": 0.0, "after": 0.0, "resolved": "否"}],
         "card_update": {
             "card_id": chosen.get("card_id", ""),
             "prior_delta": PriorLedger.CRASHED,
@@ -358,6 +432,7 @@ def run_round(
     prior_ledger: PriorLedger | None = None,
     tried_before: list[dict[str, Any]] | None = None,
     exclude_ids: set[str] | None = None,
+    shelf: "Shelf | None" = None,
     fidelity_override: str | None = None,
     noise_floor: float = roles.MIN_REAL_GAIN,
 ) -> RoundLog:
@@ -371,6 +446,10 @@ def run_round(
     tokens_before = llm.ledger.total_tokens
 
     def finish() -> RoundLog:
+        # 收架子放在这里而不是选完方案时：工兵实现失败会换备胎，
+        # log.chosen 到最后才定下来，那个才是真正被用掉的方案。
+        if shelf is not None and log.proposals:
+            shelf.shelve(round_id, log.proposals["proposals"], log.chosen)
         log.tokens = llm.ledger.total_tokens - tokens_before
         log.seconds = time.time() - t0
         return log
@@ -386,13 +465,16 @@ def run_round(
 
     # ── 筛卡片：纯代码，不花钱。试过且失败的卡在这里就被排除 ──
     symptom_ids = [f["symptom"] for f in findings]
-    candidates = cards.match(symptom_ids, exclude_ids=exclude_ids, limit=5)
+    # 医生给的严重度直接进筛卡权重：治一个重病的卡，排在治两个轻病的卡前面
+    severity = {f["symptom"]: f.get("severity", 1.0) for f in findings}
+    candidates = cards.match(symptom_ids, exclude_ids=exclude_ids, limit=5, severity=severity)
 
-    # ② 军师
+    # ② 军师。把架子上还对症的存货一并摆给它，省得重新推导一遍
+    shelved = shelf.relevant(symptom_ids, exclude_ids) if shelf is not None else None
     log.proposals = _guard(
         log, "军师", roles.propose,
         llm, vocab, findings, candidates,
-        tried_before=tried_before,
+        tried_before=tried_before, shelved=shelved,
         budget_left=budget_left, pipeline_state=current_config,
     )
     if log.proposals is None:
@@ -474,7 +556,9 @@ def run_round(
         gains = log.reflection["actual"].values()
         prior_ledger.apply(
             card.id, log.reflection["verdict"], card.prior,
-            symptom_improved=log.reflection["symptom_resolved"]["resolved"] in ("是", "部分"),
+            # 多个目标里只要有一个真的好转，这张卡就该加分
+            symptom_improved=any(item["resolved"] in ("是", "部分")
+                                 for item in log.reflection["symptom_resolved"]),
             beat_noise=max((abs(v) for v in gains), default=0.0) >= noise_floor,
         )
     return finish()
@@ -591,6 +675,7 @@ def run_session(
     example_module: str | Callable[[str], str],   # 字符串，或按环节取范文的函数
     current_config: str,
     rounds: int = DEFAULT_ROUNDS,
+    start_fidelity: str = FIDELITY_LADDER[0],   # 从哪一档数据起步
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     epsilon: float = DEFAULT_EPSILON,
     patience: int = DEFAULT_PATIENCE,
@@ -614,13 +699,17 @@ def run_session(
     logs_dir = logs_dir or (ROOT / "logs")
     time_ledger = TimeLedger.load(logs_dir / "time_ledger.json")
     prior_ledger = PriorLedger.load(logs_dir / "prior_ledger.json")
+    shelf = Shelf.load(logs_dir / "shelf.json")
+
+    if start_fidelity not in FIDELITY_LADDER:
+        raise ValueError(f"没有「{start_fidelity}」这一档，只能是 {FIDELITY_LADDER}")
 
     cur = parent = initial_report
     history: list[dict[str, Any]] = []
     blacklist: set[str] = set()          # 试过且失败的卡 —— 调度器硬性跳过
     applied: set[str] = set()            # 已经生效、并入流水线的卡 —— 再上一次没意义
     tried: list[dict[str, Any]] = []     # 喂给军师看的「已经试过的」（含结论）
-    rung = 0                             # 当前数据档位，见 FIDELITY_LADDER
+    rung = FIDELITY_LADDER.index(start_fidelity)   # 当前数据档位
     no_finding_streak = 0
     stale = 0                            # 连续多少轮没有超过 epsilon 的提升
 
@@ -688,6 +777,7 @@ def run_session(
             prior_ledger=prior_ledger,
             tried_before=tried,
             exclude_ids=blacklist | applied,
+            shelf=shelf,
             fidelity_override=FIDELITY_LADDER[rung] if rung else None,
             noise_floor=noise_floor,
         )
@@ -696,6 +786,7 @@ def run_session(
         log.dump(logs_dir / "rounds.jsonl")
         time_ledger.dump(logs_dir / "time_ledger.json")
         prior_ledger.dump(logs_dir / "prior_ledger.json")
+        shelf.dump(logs_dir / "shelf.json")
 
         summary.rounds_run = rid
         summary.total_tokens = llm.ledger.total_tokens

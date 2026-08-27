@@ -164,20 +164,31 @@ class CardLibrary:
         symptom_ids: list[str],
         exclude_ids: set[str] | None = None,
         limit: int = 5,
+        severity: dict[str, float] | None = None,
     ) -> list[Card]:
         """按病名对暗号，找出对症的卡。
 
-        这是整条链路上最省钱的一步：一次集合求交，不调用任何模型。
-        排序按 (命中几个病, 历史靠谱度) 降序。
+        这是整条链路上最省钱的一步：一次加权求和，不调用任何模型。
+
+        severity：医生给每个病打的严重度（0~1）。给了就按它加权 ——
+        治一个重病的卡，排在治两个轻病的卡前面。不给则一律按 1.0，
+        退化成"命中几个病"，跟以前完全一致。
+
+        为什么要加权：医生本来就输出了 severity，但以前这一步只做集合求交，
+        一个 0.9 的重病和一个 0.2 的轻病权重完全一样 —— 医生的判断被扔掉了。
+        排序按 (对症总分, 历史靠谱度) 降序。
         """
         exclude_ids = exclude_ids or set()
+        severity = severity or {}
         wanted = set(symptom_ids)
         hits = []
         for card in self.cards:
             if card.id in exclude_ids:
                 continue
-            overlap = len(wanted & set(card.treats))
-            if overlap:
-                hits.append((overlap, card.prior, card))
+            hit_ids = wanted & set(card.treats)
+            if not hit_ids:
+                continue
+            score = sum(float(severity.get(sid, 1.0)) for sid in hit_ids)
+            hits.append((score, card.prior, card))
         hits.sort(key=lambda t: (t[0], t[1]), reverse=True)
         return [c for _, _, c in hits[:limit]]
