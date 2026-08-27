@@ -17,6 +17,7 @@ import yaml
 
 from .knowledge import CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
+from .llm_deepseek import make_llm
 from .loop import CostAwareScheduler, FakeExecutor, TimeLedger, run_round
 from . import roles
 
@@ -98,7 +99,7 @@ def cmd_doctor(args) -> int:
     vocab = SymptomVocab.load()
     fixtures = _load_fixtures()
     names = list(fixtures) if args.all else [args.name]
-    llm = LLM()
+    llm = make_llm()
 
     for name in names:
         if name not in fixtures:
@@ -132,7 +133,7 @@ def cmd_round(args) -> int:
         return 2
 
     report = fixtures[args.name]["report"]
-    llm = LLM()
+    llm = make_llm()
     # 耗时账本：实测倍数覆盖卡上拍的「训练时间倍数」（假执行器耗时为 0，不会记账）
     ledger_path = ROOT / "logs" / "time_ledger.json"
     time_ledger = TimeLedger.load(ledger_path)

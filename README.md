@@ -76,6 +76,7 @@ logs/                   ← 逐轮运行日志（内容不入库）
 | 文件 | 讲什么 | 谁必读 |
 |---|---|---|
 | [CLAUDE.md](CLAUDE.md) | **12 条红线 + 5 个危险信号 + 自查清单** | **全员，动手前** |
+| [docs/开发日志.md](docs/开发日志.md) | 一行一条，谁改了什么。**每次提交顺手加一行** | 全员 |
 | [docs/baseline笔记.md](docs/baseline笔记.md) | **baseline 长什么样、洞在哪、两个待确认的问题** | **全员，动手前** |
 | [knowledge/symptoms.yaml](knowledge/symptoms.yaml) | 12 个病名及判定规则 | 成员1、2、3 |
 | [knowledge/卡片格式.md](knowledge/卡片格式.md) | 药方卡的六个栏目 + 两张样例卡 | 成员2 |
