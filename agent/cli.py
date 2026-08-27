@@ -300,9 +300,9 @@ def cmd_run(args) -> int:
         llm=llm, vocab=vocab, cards=cards, executor=executor,
         initial_report=initial,
         initial_train_seconds=first_seconds,
-        module_interface=STUB_INTERFACE,
-        example_module=STUB_EXAMPLE,
-        current_config=STUB_CONFIG,
+        module_interface=INTERFACE_SPEC,
+        example_module=example_for,      # 按方案环节选范文
+        current_config=PIPELINE_CONFIG,
         rounds=args.rounds,
         token_budget=args.token_budget,
         epsilon=args.epsilon,

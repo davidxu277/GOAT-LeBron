@@ -14,7 +14,7 @@ import pathlib
 import statistics
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from .events import emit
 from .knowledge import Card, CardLibrary, SymptomVocab
@@ -350,7 +350,7 @@ def run_round(
     executor: Executor,
     scheduler: Scheduler,
     module_interface: str,
-    example_module: str,
+    example_module: str | Callable[[str], str],
     current_config: str,
     history_brief: list[dict[str, Any]] | None = None,
     budget_left: str = "一般",
@@ -588,7 +588,7 @@ def run_session(
     initial_report: dict[str, Any],
     initial_train_seconds: float = 0.0,   # 第 0 轮体检也烧了算力，要计进 GPU 小时
     module_interface: str,
-    example_module: str,
+    example_module: str | Callable[[str], str],   # 字符串，或按环节取范文的函数
     current_config: str,
     rounds: int = DEFAULT_ROUNDS,
     token_budget: int = DEFAULT_TOKEN_BUDGET,

@@ -748,3 +748,25 @@ def test_一整场_最大数据上还查不出病就算收敛(tmp_path):
     assert summary.rounds_run <= 10
     assert "收敛" in summary.stopped_because
     assert llm.calls.get("军师") is None          # 一次都没查出病，后面三个角色一次没调
+
+
+def test_一整场_范文可以是按环节取的函数(tmp_path):
+    """成员2 的 example_for：改训练过程的看训练类范文，加特征的看特征类范文。
+
+    外层循环必须把这个函数原样传下去，不能在半路被当成字符串。
+    """
+    看到的环节 = []
+
+    def 取范文(stage: str) -> str:
+        看到的环节.append(stage)
+        return "# 范文\n"
+
+    llm, ex = ScriptedLLM(), DriftingExecutor()
+    run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module=取范文, current_config="",
+        rounds=2, logs_dir=tmp_path,
+    )
+    assert 看到的环节                      # 真的被调用了
+    assert all(isinstance(s, str) for s in 看到的环节)
