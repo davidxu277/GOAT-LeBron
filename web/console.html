@@ -28,6 +28,9 @@ input,select{width:100%; font:inherit; font-size:.8rem; padding:.4rem .6rem;
   border:1px solid var(--line); border-radius:7px; background:#FCFBF9; color:var(--ink)}
 input:focus,select:focus{outline:2px solid var(--accent-soft); border-color:var(--accent)}
 .row{display:flex; gap:.5rem}
+.picker{display:flex; gap:.35rem}
+.picker input{flex:1; min-width:0; direction:rtl; text-align:left}
+.pick{flex:none; padding:.4rem .6rem; font-size:.75rem; white-space:nowrap}
 .btns{display:flex; gap:.5rem; margin-top:.9rem}
 button{font:inherit; font-size:.8rem; padding:.45rem .9rem; border-radius:8px; cursor:pointer;
   border:1px solid var(--line); background:#FCFBF9; color:var(--ink); transition:.15s}
@@ -78,11 +81,14 @@ button:disabled{opacity:.45; cursor:not-allowed}
       <h2>数据与运行设置</h2>
       <div class="scroll">
         <label>训练集（含标签）</label>
-        <input id="train" placeholder="/path/to/train.csv">
+        <div class="picker"><input id="train" placeholder="点右侧选择，或直接粘贴路径">
+          <button class="pick" data-for="train" data-title="选择训练集">选择…</button></div>
         <label>验证集特征（不含标签）</label>
-        <input id="valx" placeholder="/path/to/val_features.csv">
+        <div class="picker"><input id="valx" placeholder="点右侧选择，或直接粘贴路径">
+          <button class="pick" data-for="valx" data-title="选择验证集特征">选择…</button></div>
         <label>验证集标签（评分用，不给模型）</label>
-        <input id="valy" placeholder="/path/to/val_labels.csv">
+        <div class="picker"><input id="valy" placeholder="点右侧选择，或直接粘贴路径">
+          <button class="pick" data-for="valy" data-title="选择验证集标签">选择…</button></div>
         <div class="row">
           <div style="flex:1"><label>数据规模</label>
             <select id="fidelity">
@@ -122,6 +128,22 @@ function paths(){
           val_labels:$('valy').value.trim(), fidelity:$('fidelity').value,
           seed:$('seed').value};
 }
+
+// 「选择…」调服务器弹出 Finder —— 浏览器拿不到真实路径，但服务器在本机上
+document.querySelectorAll('.pick').forEach(btn => {
+  btn.onclick = async () => {
+    const target = $(btn.dataset.for);
+    btn.disabled = true; btn.textContent = '选择中…';
+    try{
+      const r = await fetch('/api/pick', {method:'POST',
+        body: JSON.stringify({title: btn.dataset.title})});
+      const d = await r.json();
+      if(d.path) target.value = d.path;
+    } finally {
+      btn.disabled = false; btn.textContent = '选择…';
+    }
+  };
+});
 
 $('btnCheck').onclick = async () => {
   const p = paths();

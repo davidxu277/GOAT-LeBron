@@ -4,7 +4,8 @@
 
 只绑 127.0.0.1，不对外。用标准库 http.server，零依赖。
 
-三个接口：
+四个接口：
+    POST /api/pick        弹出系统文件选择器（Finder），返回选中文件的真实路径
     POST /api/preflight   读数据、报规模与质量、亮红绿灯（不训练）
     POST /api/run         真的跑一轮：训练 → 预测 → 评分 → 成绩单
     GET  /api/events      读 logs/live_events.jsonl 的增量（轮询）
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 import sys
 import threading
 import traceback
@@ -72,7 +74,10 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length) or "{}")
 
-        if self.path == "/api/preflight":
+        if self.path == "/api/pick":
+            _json(self, 200, {"path": _pick_file(payload.get("title", "选择数据文件"))})
+
+        elif self.path == "/api/preflight":
             try:
                 from harness.data import preflight
                 report = preflight(payload["train"], payload["val_features"],
@@ -93,6 +98,25 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, 202, {"started": True})
         else:
             _json(self, 404, {"error": "not found"})
+
+
+def _pick_file(title: str) -> str:
+    """弹出 macOS 原生文件选择器，返回选中文件的真实路径。
+
+    浏览器出于安全拿不到本地文件的真实路径，但服务器就跑在本机上，
+    直接调系统的选择器即可。用户点取消返回空串。
+    """
+    script = (
+        f'set f to choose file with prompt "{title}" '
+        f'of type {{"csv", "parquet", "txt"}}\n'
+        f'POSIX path of f'
+    )
+    try:
+        out = subprocess.run(["osascript", "-e", script],
+                             capture_output=True, text=True, timeout=300)
+        return out.stdout.strip()          # 取消时 osascript 报错，stdout 为空
+    except Exception:
+        return ""
 
 
 def _run_job(payload: dict) -> None:
