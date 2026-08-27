@@ -48,7 +48,9 @@ class DeepSeekLLM:
         schema: dict[str, Any],
         big: bool = True,          # 接受但忽略：DeepSeek 侧不分大小模型
         effort: str = "high",      # 接受但忽略：无对应参数
-        max_tokens: int = 16000,
+        # 默认值给医生/军师/复盘官用：输出的 JSON 不长，但带思维链的模型
+        # 推理过程也计入输出预算，所以留足余量。工兵单独设更大值（见 roles.py）。
+        max_tokens: int = 32000,
         validate=None,
     ) -> dict[str, Any]:
         # json_object 模式不认识 schema，把 schema 原文拼进 system 靠提示词遵守，
@@ -66,7 +68,19 @@ class DeepSeekLLM:
         last_error = ""
 
         for attempt in range(2):
-            text, reasoning, inp, out = self._stream_once(role, messages, max_tokens)
+            text, reasoning, inp, out, truncated = self._stream_once(
+                role, messages, max_tokens)
+
+            # 被 max_tokens 掐断时 JSON 必然不完整，报错会是「Unterminated string」
+            # 这种看起来像模型不听话的信息 —— 说清楚真实原因，别让人和模型都误判。
+            if truncated:
+                self.ledger.add(role, DEEPSEEK_MODEL, inp, out, retries=1)
+                emit("recovery", role=role,
+                     text=f"{role}输出被 max_tokens={max_tokens} 截断（已输出 {out} token），"
+                          f"JSON 不完整。这是预算不够，不是模型不听话。")
+                raise SchemaViolation(
+                    f"{role}：输出超过 max_tokens={max_tokens} 被截断。"
+                    f"调大限制，或让方案产出更短的代码。")
 
             try:
                 data = json.loads(text)
@@ -94,7 +108,8 @@ class DeepSeekLLM:
 
     def _stream_once(
         self, role: str, messages: list[dict[str, str]], max_tokens: int
-    ) -> tuple[str, str, int, int]:
+    ) -> tuple[str, str, int, int, bool]:
+        """返回 (正式输出, 推理过程, 输入token, 输出token, 是否被截断)。"""
         emit("llm_start", role=role, model=DEEPSEEK_MODEL)
         print(f"\n┌─[{role}]{'─' * 40}", file=sys.stderr)
 
@@ -111,6 +126,7 @@ class DeepSeekLLM:
         reasoning_parts: list[str] = []
         inp = out = 0
         in_reasoning = False
+        finish_reason = None
 
         for chunk in stream:
             if chunk.usage is not None:           # 最后一个 chunk 带用量
@@ -118,6 +134,8 @@ class DeepSeekLLM:
                 out = chunk.usage.completion_tokens
             if not chunk.choices:
                 continue
+            if chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
             delta = chunk.choices[0].delta
 
             # 思维链（模型不一定提供；有就单独收、单独标）
@@ -139,7 +157,9 @@ class DeepSeekLLM:
                 emit("llm_delta", role=role, text=delta.content, kind="answer")
 
         print(f"\n└{'─' * 46}", file=sys.stderr)
-        return "".join(answer_parts), "".join(reasoning_parts), inp, out
+        # finish_reason="length" 就是撞上 max_tokens 上限的信号
+        return ("".join(answer_parts), "".join(reasoning_parts), inp, out,
+                finish_reason == "length")
 
 
 def make_llm(ledger: Ledger | None = None):

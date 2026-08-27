@@ -53,7 +53,7 @@ sample_id   common_id   click   conversion   ctcvr
 
 ### R6 · 零件必须实现约定接口
 
-不许自己发明接口。接口定义见 `docs/接口约定.md`。
+不许自己发明接口。接口定义见 `modules/base.py`（三种零件的接口规范）。
 
 ### R7 · 所有参数从配置读，不许硬编
 
@@ -74,7 +74,7 @@ sample_id   common_id   click   conversion   ctcvr
 
 ### R10 · 每次运行必须产出日志
 
-格式见 `docs/接口约定.md`。缺日志的运行视为无效运行。
+格式见 `docs/四个角色接口.md`。缺日志的运行视为无效运行。
 
 ### R11 · 提升小于 0.0005 不算提升
 

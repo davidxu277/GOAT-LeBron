@@ -24,35 +24,23 @@ from . import roles
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "agent" / "fixtures" / "health_reports.yaml"
 
-# 工兵的范文与接口。成员2 接手后换成真的。
-STUB_INTERFACE = """\
-class FeatureOp:
-    def fit(self, train_df) -> None:
-        \"\"\"只在训练集上统计。绝不许读验证集。\"\"\"
-    def transform(self, df):
-        \"\"\"返回加工后的 DataFrame。\"\"\"
-"""
-STUB_EXAMPLE = """\
-from modules.base import FeatureOp
+# 工兵看到的三份材料，全部读自真实文件 —— 它照着真接口、真范文、真配置写代码。
+# 按方案所属环节选范文：改训练过程的看训练类范文，加特征的看特征类范文。
+INTERFACE_SPEC = (ROOT / "modules" / "base.py").read_text(encoding="utf-8")
+PIPELINE_CONFIG = (ROOT / "config" / "pipeline.yaml").read_text(encoding="utf-8")
+
+_EXAMPLES = {
+    "训练": ROOT / "modules" / "train" / "early_stopping.py",
+    "特征": ROOT / "modules" / "features" / "frequency_bucket.py",
+}
 
 
-class FrequencyBucket(FeatureOp):
-    \"\"\"把商品出现次数分桶，作为一个新的类别特征。\"\"\"
-
-    def __init__(self, config):
-        self.field = config["field"]
-        self.edges = config["edges"]
-        self.counts = None
-
-    def fit(self, train_df):
-        self.counts = train_df[self.field].value_counts()
-
-    def transform(self, df):
-        freq = df[self.field].map(self.counts).fillna(0)
-        df[f"{self.field}_freq_bucket"] = freq.searchsorted(self.edges)
-        return df
-"""
-STUB_CONFIG = "features:\n  frequency_bucket:\n    enabled: false\nmodel:\n  name: mlp\n"
+def example_for(stage: str) -> str:
+    """按环节挑范文。找不到对应的就用训练类那份（注释最全）。"""
+    for key, path in _EXAMPLES.items():
+        if key in (stage or "") and path.exists():
+            return path.read_text(encoding="utf-8")
+    return _EXAMPLES["训练"].read_text(encoding="utf-8")
 
 
 def _load_fixtures() -> dict:
@@ -147,9 +135,9 @@ def cmd_round(args) -> int:
         # 假执行器直接回放同一份成绩单：链路能跑通即可，分数无意义
         executor=FakeExecutor(next_report=report),
         scheduler=CostAwareScheduler(time_ledger=time_ledger),
-        module_interface=STUB_INTERFACE,
-        example_module=STUB_EXAMPLE,
-        current_config=STUB_CONFIG,
+        module_interface=INTERFACE_SPEC,
+        example_module=example_for,      # 按方案环节选范文
+        current_config=PIPELINE_CONFIG,
         time_ledger=time_ledger,
     )
     time_ledger.dump(ledger_path)

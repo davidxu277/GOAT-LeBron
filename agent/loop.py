@@ -245,9 +245,13 @@ def run_round(
     last_error = ""
     for candidate in queue:
         card = cards.get(candidate["card_id"]) if candidate["card_id"] else None
+        # example_module 可以是字符串，也可以是「按环节取范文」的函数 ——
+        # 改训练过程的方案看训练类范文，加特征的看特征类范文，产出质量差很多
+        example = (example_module(card.stage if card else "")
+                   if callable(example_module) else example_module)
         try:
             patch = roles.implement(
-                llm, candidate, card, module_interface, example_module,
+                llm, candidate, card, module_interface, example,
                 current_config, last_error=last_error,
             )
             log.chosen = candidate

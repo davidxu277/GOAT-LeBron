@@ -115,7 +115,9 @@ class LLM:
         schema: dict[str, Any],
         big: bool = True,
         effort: str = "high",
-        max_tokens: int = 16000,
+        # 默认值给医生/军师/复盘官用：输出的 JSON 不长，但带思维链的模型
+        # 推理过程也计入输出预算，所以留足余量。工兵单独设更大值（见 roles.py）。
+        max_tokens: int = 32000,
         validate=None,
     ) -> dict[str, Any]:
         """跑一次结构化调用。

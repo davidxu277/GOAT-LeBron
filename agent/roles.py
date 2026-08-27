@@ -179,7 +179,10 @@ def implement(
         user=user,
         schema=schemas.implementer_schema(),
         big=False,          # 照着范文写代码，小模型足够
-        max_tokens=16000,
+        # 工兵要在 JSON 字符串里塞下一整个代码文件，而带思维链的模型
+        # 推理过程也算在输出预算里 —— 给窄了 JSON 会被截断，
+        # 表现为「Unterminated string」这种解析失败，白白烧掉整次调用。
+        max_tokens=64000,
         validate=validate,
     )
 

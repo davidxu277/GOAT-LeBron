@@ -1,0 +1,84 @@
+# 流水线配置 —— Agent 通过改这里做实验（CLAUDE.md R5、R7）
+#
+# 工兵只能做两件事：在 modules/ 下新建零件文件、改这个文件。
+# 所有参数必须从这里读，代码里出现写死的数字一律打回（R7）。
+#
+# 键名约定（工兵的 config_patch 只允许这三个前缀）：
+#   features.*   加特征类零件的开关与参数
+#   model.*      模型结构与超参
+#   train.*      训练过程（早停、学习率、损失权重…）
+
+# ── 数据 ──────────────────────────────────────────────
+data:
+  # 路径由执行器在运行时注入，这里不写死（R7）
+  # 多值字段：109_14/110_14/127_14/150_14/210 需要专门的编码零件才能用，
+  # 目前未启用 —— 这正是 baseline 身上那个洞（见 docs/baseline笔记.md 洞1）
+  base_features: ["101", "121", "122", "124", "125", "126", "127", "128", "129",
+                  "205", "206", "207", "216", "301"]
+
+# ── 特征零件 ──────────────────────────────────────────
+# 每个零件一个开关；工兵新建零件后在这里加一段并置 enabled: true
+features:
+  多值字段接回来:
+    enabled: false
+    pooling: weighted_mean        # weighted_mean / mean / max
+    fields: ["109_14", "110_14", "127_14", "150_14"]
+    cross_fields: ["508", "509", "702", "853"]
+
+  类目兜底:
+    enabled: false
+    category_field: "206"
+    K: 20                          # 出现次数低于 K 的商品借用类目 embedding
+
+  目标编码:
+    enabled: false
+    fields: ["101", "205", "206"]
+    smoothing: 20                  # 平滑强度，越大越靠近全局先验
+    n_folds: 5                     # 折外计算，防泄漏（R2）
+
+# ── 模型 ──────────────────────────────────────────────
+model:
+  name: lightgbm                   # lightgbm / mlp / deepfm / dcnv2 / esmm …
+  embed_dim: 16                    # 深度模型的 embedding 维度
+  lightgbm:
+    n_estimators: 120
+    num_leaves: 31
+    learning_rate: 0.05
+    min_data_in_leaf: 20
+    feature_fraction: 1.0
+  # 购买塔通常要比点击塔小 —— 转化正样本太少，容量大必然过拟合
+  cvr_overrides:
+    n_estimators: 60
+    num_leaves: 15
+
+# ── 训练过程 ──────────────────────────────────────────
+train:
+  seed: 20260827                   # 必须固定并记录（R8）
+  fidelity: 小份                   # 小份 / 中份 / 大份 / 全量
+
+  early_stopping:
+    enabled: true
+    monitor: mean_auc              # mean_auc / ctr_auc / cvr_auc
+    patience: 3
+    min_delta: 0.0005              # 与 R11 的门槛对齐
+    mode: max
+
+  swa:
+    enabled: false
+    start_epoch_ratio: 0.75        # 总轮数的后 25% 开始累积权重平均
+
+  negative_sampling:
+    enabled: false
+    keep_ratio: 0.3                # 负样本保留比例；正样本永远全留
+    recalibrate: true              # 预测后把概率还原回真实尺度
+
+  loss_weight:
+    strategy: fixed                # fixed / uncertainty / dwa / dtp
+    ctr: 1.0
+    cvr: 1.0
+
+# ── 评估（口径固定，不许改，见 CLAUDE.md 第五节）──────
+eval:
+  ctr_scope: all_impressions       # 点击 AUC：全部曝光
+  cvr_scope: clicked_only          # 购买 AUC：仅 click=1 子集
+  also_report_cvr_on_all: true     # Q1 未定，全曝光口径也算也记
