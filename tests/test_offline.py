@@ -1111,3 +1111,42 @@ def test_待议架_工兵换了备胎就不算没轮到(tmp_path):
     assert log.recoveries                                    # 确实换了备胎
     用掉的 = log.chosen["card_id"]
     assert 用掉的 not in {e["card_id"] for e in shelf.entries}
+
+
+# ────────────────── 锁定集（R3）──────────────────
+
+
+def test_锁定集只许读一次(tmp_path):
+    """读第二次它就跟开发集一样被污染了 —— 一旦拿它的分数做过决策，
+    它就不再是干净的裁判。这条靠代码硬拦，不靠自觉。"""
+    from harness.executor import RealExecutor
+
+    ex = RealExecutor.__new__(RealExecutor)      # 不碰真数据，只测守卫
+    ex.holdout_path = tmp_path / "holdout"
+    ex.holdout_reads = 1                          # 假装已经读过
+    with pytest.raises(RuntimeError, match="只许读一次"):
+        ex.final_judge("小份")
+
+
+def test_没配锁定集不算错(tmp_path):
+    """没有裁判只是少一份证据，不该让整场跑挂。"""
+    from harness.executor import RealExecutor
+
+    ex = RealExecutor.__new__(RealExecutor)
+    ex.holdout_path = None
+    r = ex.final_judge("小份")
+    assert not r.ok and "没有配锁定集" in r.error
+
+
+def test_泛化落差算的是开发集减锁定集():
+    """落差为正 = 开发集分虚高，那部分是反复筛选筛出来的迎合。"""
+    from agent.loop import SessionSummary
+
+    s = SessionSummary()
+    s.best_scores = {"点击AUC": 0.60, "购买AUC": 0.55}
+    s.holdout_scores = {"点击AUC": 0.56, "购买AUC": 0.55}
+    assert s.generalization_gap["点击AUC"] == pytest.approx(0.04)
+    assert s.generalization_gap["购买AUC"] == pytest.approx(0.0)
+
+    # 没做裁决时不该编一个落差出来
+    assert SessionSummary().generalization_gap == {}

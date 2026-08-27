@@ -103,11 +103,17 @@ class RealExecutor:
 
     def __init__(self, train_path: str, val_features_path: str,
                  val_labels_path: str | None = None,
-                 seed: int = 20260827, config: dict[str, Any] | None = None):
+                 seed: int = 20260827, config: dict[str, Any] | None = None,
+                 holdout_path: str | None = None):
         self.train_path = pathlib.Path(train_path)
         self.val_features_path = pathlib.Path(val_features_path)
         # 验证集自带标签时可以不给这个 —— 见 _train_and_score
         self.val_labels_path = pathlib.Path(val_labels_path) if val_labels_path else None
+        # 锁定集（CLAUDE.md R3）：全程锁死，只在选定最终版本时读一次。
+        # 开发集被反复看几十轮会挑出「恰好迎合它」的改动，
+        # 这份没被任何决策看过的数据是唯一能说清"涨的是不是真本事"的裁判。
+        self.holdout_path = pathlib.Path(holdout_path) if holdout_path else None
+        self.holdout_reads = 0          # 读过几次 —— 超过 1 次就是违反 R3
         self.seed = seed
         # 不给 config 就读 config/pipeline.yaml —— 工兵改的就是这份，
         # 执行器不读它的话，改配置类的方案永远等于没改。
@@ -137,6 +143,36 @@ class RealExecutor:
             return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}",
                              seconds=time.time() - t0, fidelity=fidelity)
 
+    def final_judge(self, fidelity: str = "全量") -> RunResult:
+        """在锁定集上评一次 —— 整场只许调用一次（CLAUDE.md R3）。
+
+        用当前配置重训一遍，在这份从没被任何决策看过的数据上评分。
+        它回答的问题是：开发集上涨的那些分，有多少是真本事、
+        有多少只是反复筛选筛出来的迎合。
+
+        没配锁定集就返回 ok=False 的空结果，不算错 —— 只是没有裁判。
+        """
+        if self.holdout_path is None:
+            return RunResult(ok=False, error="没有配锁定集", fidelity=fidelity)
+        if self.holdout_reads:
+            # 读第二次就失去意义了：一旦拿它的分数做过任何决策，
+            # 它就跟开发集一样被污染了。这里硬拦，不靠自觉。
+            raise RuntimeError(
+                f"锁定集已经读过 {self.holdout_reads} 次。R3：全程只许读一次，"
+                f"读第二次它就不再是干净的裁判了。"
+            )
+        t0 = time.time()
+        self.holdout_reads += 1
+        emit("phase", name="锁定集裁决", detail=f"{self.holdout_path.name} · 整场唯一一次")
+        try:
+            report = self._train_and_score(fidelity, eval_path=self.holdout_path)
+            return RunResult(ok=True, health_report=report,
+                             seconds=time.time() - t0, fidelity=fidelity)
+        except Exception as exc:
+            emit("recovery", text=f"锁定集裁决失败：{type(exc).__name__}: {exc}")
+            return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}",
+                             seconds=time.time() - t0, fidelity=fidelity)
+
     def _apply_patch(self, patch: dict[str, Any]) -> None:
         """把工兵的产出落地。只允许写 modules/ 下的文件（R5）。"""
         for f in patch.get("new_files", []):
@@ -160,7 +196,10 @@ class RealExecutor:
             _deep_set(self.config, str(key).split("."), value)
             emit("phase", name="改配置", detail=str(key))
 
-    def _train_and_score(self, fidelity: str) -> dict[str, Any]:
+    def _train_and_score(self, fidelity: str,
+                         eval_path: pathlib.Path | None = None) -> dict[str, Any]:
+        """训练并评分。eval_path 不给就用开发集；给了就在那份数据上评
+        （锁定集用这条路 —— 训练逻辑完全一样，只换被评的数据）。"""
         from lightgbm import LGBMClassifier
 
         train = self._read(self.train_path)
@@ -171,9 +210,14 @@ class RealExecutor:
             neg = train[train["click"] == 0].sample(frac=frac, random_state=self.seed)
             train = pd.concat([pos, neg]).sample(frac=1.0, random_state=self.seed)
 
-        val_x = self._read(self.val_features_path)
+        val_x = self._read(eval_path or self.val_features_path)
         # 标签来源二选一：单独的私藏文件，或验证集自带（分片数据集常见）
-        if self.val_labels_path is not None:
+        if eval_path is not None:
+            # 锁定集自带标签（跟开发集同源同格式），不走那份私藏文件
+            if not {"click", "conversion"} <= set(val_x.columns):
+                raise ValueError(f"锁定集 {eval_path} 里没有标签，无法当裁判")
+            val_y = val_x[["sample_id", "click", "conversion"]].copy()
+        elif self.val_labels_path is not None:
             val_y = self._read(self.val_labels_path)
         elif {"click", "conversion"} <= set(val_x.columns):
             val_y = val_x[["sample_id", "click", "conversion"]].copy()

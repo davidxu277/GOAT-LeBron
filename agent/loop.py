@@ -622,11 +622,26 @@ class SessionSummary:
     best_round: int = 0
     best_fidelity: str = ""
     best_scores: dict[str, float] = field(default_factory=dict)
+    # 锁定集上的分数（R3：整场只评一次）。空 = 没配锁定集，或裁决失败。
+    holdout_scores: dict[str, float] = field(default_factory=dict)
     baseline: dict[str, float] = field(default_factory=dict)
     total_tokens: int = 0
     total_train_seconds: float = 0.0
     interventions: int = 0
     recoveries: int = 0
+
+    @property
+    def generalization_gap(self) -> dict[str, float]:
+        """开发集分 − 锁定集分。正数越大，说明「涨的分」里迎合开发集的成分越多。
+
+        这个数字本身就是交付材料 —— 诚实报告泛化落差，比藏着一个虚高的
+        开发集分数有说服力得多。
+        """
+        if not self.holdout_scores or not self.best_scores:
+            return {}
+        return {m: v - self.holdout_scores.get(m, 0.0)
+                for m, v in self.best_scores.items()
+                if m in self.holdout_scores}
 
     @property
     def deltas(self) -> dict[str, float]:
@@ -647,6 +662,14 @@ class SessionSummary:
             lines.append(f"  {metric} 相对基线  {delta:+.4f}")
         if not self.baseline:
             lines.append("  ⚠️ 官方基线分未填，delta 算不出来（--baseline-ctr / --baseline-cvr）")
+        if self.holdout_scores:
+            lines.append("锁定集裁决      （整场只读一次，从未参与任何决策）")
+            for metric, value in self.holdout_scores.items():
+                gap = self.generalization_gap.get(metric)
+                tail = f"   泛化落差 {gap:+.4f}" if gap is not None else ""
+                lines.append(f"  {metric:<12} {value:.4f}{tail}")
+        else:
+            lines.append("锁定集裁决      未做（没配锁定集）—— 开发集分数可能偏乐观")
         lines += [
             f"LLM token 总量  {self.total_tokens:,}",
             f"训练总时长      {self.total_train_seconds / 3600:.3f} GPU-小时"
@@ -851,6 +874,22 @@ def run_session(
     summary.best_round = best["round"]
     summary.best_fidelity = best["fidelity"]
     summary.best_scores = read_scores(best["report"])
+
+    # ── 锁定集裁决（R3）：整场唯一一次，就在这里 ──
+    # 开发集被反复看了几十轮，挑出来的改动里混着「恰好迎合它」的部分。
+    # 这份从没被任何决策看过的数据，是唯一能说清泛化落差有多大的裁判。
+    judge = getattr(executor, "final_judge", None)
+    if callable(judge):
+        verdict = judge(summary.best_fidelity or "全量")
+        if verdict.ok:
+            summary.holdout_scores = read_scores(verdict.health_report)
+            summary.total_train_seconds += verdict.seconds
+            (logs_dir / "holdout_report.json").write_text(
+                json.dumps(verdict.health_report, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+        elif verdict.error and "没有配锁定集" not in verdict.error:
+            summary.recoveries += 1
+
     summary.dump(logs_dir / "session_summary.json")
     (logs_dir / "best_report.json").write_text(
         json.dumps(best["report"], ensure_ascii=False, indent=1), encoding="utf-8"
