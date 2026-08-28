@@ -56,6 +56,40 @@ class Preflight:
         }
 
 
+# 空数组映射成这个类别。跟 harness.executor._flatten_array 保持一致 ——
+# 空的含义是「这一行在这个字段上没有交集」，本身就是有用的信号，不是缺失。
+EMPTY_TOKEN = -1
+
+
+def flatten_single_valued_lists(table):
+    """把「每行最多一个元素」的多值列，在 Arrow 层就压成标量列。
+
+    为什么必须在 Arrow 层做，而不是读进 pandas 再 map：
+    pandas 里一个多值列是「每行一个 Python 对象」，**光对象头就约 110 字节/行**，
+    跟里面装几个元素无关 —— 一个 85% 都是空数组的列，代价跟装满的一样。
+    实测全量数据上三个这样的列要吃十几 G，而压成 int64 之后不到 1 G。
+
+    只处理最大长度 ≤ 1 的列。真多值（用户历史序列那种）动不了，
+    那需要专门的编码零件把它压成统计量。
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    for i, field in enumerate(table.schema):
+        if not (pa.types.is_list(field.type) or pa.types.is_large_list(field.type)):
+            continue
+        col = table.column(i)
+        lens = pc.list_value_length(col)
+        if (pc.max(lens).as_py() or 0) > 1:
+            continue                      # 真多值，留给编码零件
+        # 先把空数组填成 [EMPTY_TOKEN] 再整体展平 —— 这样每行都恰好一个元素，
+        # 展平后与原表行数对齐。直接 list_element 会在空数组上越界报错。
+        填好 = pc.if_else(pc.greater(lens, 0), col,
+                        pa.scalar([EMPTY_TOKEN], type=field.type))
+        table = table.set_column(i, field.name, pc.list_flatten(填好))
+    return table
+
+
 def read_any(path: str | pathlib.Path, columns: list[str] | None = None) -> pd.DataFrame:
     """读数据。路径可以是单个文件，也可以是装着分片的目录。
 
@@ -68,13 +102,25 @@ def read_any(path: str | pathlib.Path, columns: list[str] | None = None) -> pd.D
         if not shards:
             raise FileNotFoundError(f"目录里没有 parquet/csv 分片：{p}")
         if shards[0].suffix == ".parquet":
-            frames = [pd.read_parquet(f, columns=columns) for f in shards]
+            frames = [_read_parquet_flat(f, columns) for f in shards]
         else:
             frames = [pd.read_csv(f, usecols=columns) for f in shards]
         return pd.concat(frames, ignore_index=True)
     if p.suffix == ".parquet":
-        return pd.read_parquet(p, columns=columns)
+        return _read_parquet_flat(p, columns)
     return pd.read_csv(p, usecols=columns)
+
+
+def _read_parquet_flat(f: pathlib.Path, columns: list[str] | None) -> pd.DataFrame:
+    """读一个 parquet 文件，顺手把单值的多值列在 Arrow 层压成标量。
+
+    走 pq.read_table 而不是 pd.read_parquet，就是为了在**转 pandas 之前**
+    把那些列压掉 —— 一旦进了 pandas，每行一个 Python 对象的代价就已经付了。
+    """
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(f, columns=columns)
+    return flatten_single_valued_lists(table).to_pandas()
 
 
 def count_rows(path: str | pathlib.Path) -> int:

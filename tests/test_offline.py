@@ -2988,3 +2988,85 @@ def test_没历史时不塞空块(vocab, cards):
     roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门商品学不动"}],
                   [cards.get("类目兜底")])
     assert "最近几轮发生了什么" not in 看到的["user"]
+
+
+# ── 单值的多值列，在 Arrow 层就压成标量 ──────────────────────────
+#
+# pandas 里一个多值列是「每行一个 Python 对象」，光对象头就约 110 字节/行，
+# 跟里面装几个元素无关 —— 一个 85% 都是空数组的列，代价跟装满的一样。
+# 真数据上三个这样的列要吃十几 G，压成 int64 之后不到 1 G。
+
+
+def _造带多值列的分片(tmp_path, 片数=2, 每片=50):
+    pd = pytest.importorskip("pandas")
+    import numpy as np
+    rng = np.random.default_rng(0)
+    d = tmp_path / "shards"
+    d.mkdir()
+    for i in range(片数):
+        pd.DataFrame({
+            "sample_id": range(i * 每片, (i + 1) * 每片),
+            "101": rng.integers(0, 5, 每片),
+            # 单值：有的行是空数组 —— 空的含义是「没有交集」，不是缺失
+            "508": [[int(v)] if v % 3 else [] for v in rng.integers(0, 9, 每片)],
+            # 真多值：长度不定，动不了
+            "109_14": [list(range(int(k))) for k in rng.integers(0, 6, 每片)],
+            "click": rng.integers(0, 2, 每片),
+        }).to_parquet(d / f"part-{i:03d}.parquet")
+    return d
+
+
+def test_单值多值列被压成标量(tmp_path):
+    need("pandas")
+    from harness.data import EMPTY_TOKEN, read_any
+
+    df = read_any(_造带多值列的分片(tmp_path))
+    assert df["508"].map(lambda v: hasattr(v, "__len__")).sum() == 0, "508 应该已经是标量"
+    assert EMPTY_TOKEN in set(df["508"]), "空数组要映射成专门的类别，不是丢掉"
+    # 真多值不能动 —— 硬压成单值会丢信息，那是编码零件的活
+    assert df["109_14"].map(lambda v: hasattr(v, "__len__")).all()
+
+
+def test_压平之后行数和对齐都不变(tmp_path):
+    """空数组那些行必须留在原位，不能被 list_flatten 悄悄挤掉。"""
+    need("pandas")
+    import pandas as pd
+    from harness.data import read_any
+
+    d = _造带多值列的分片(tmp_path)
+    df = read_any(d)
+    原 = pd.concat([pd.read_parquet(f) for f in sorted(d.glob("*.parquet"))],
+                   ignore_index=True)
+    assert len(df) == len(原)
+    assert list(df["sample_id"]) == list(原["sample_id"])
+    非空 = 原["508"].map(len) > 0
+    assert (df.loc[非空, "508"].to_numpy()
+            == 原.loc[非空, "508"].map(lambda v: v[0]).to_numpy()).all()
+
+
+def test_压平省下的内存是数量级的(tmp_path):
+    need("pandas")
+    import pandas as pd
+    from harness.data import read_any
+
+    d = _造带多值列的分片(tmp_path, 片数=4, 每片=2000)
+    压过 = read_any(d, columns=["sample_id", "101", "508", "click"])
+    原样 = pd.concat([pd.read_parquet(f, columns=["sample_id", "101", "508", "click"])
+                     for f in sorted(d.glob("*.parquet"))], ignore_index=True)
+    省 = 原样["508"].memory_usage(deep=True) / 压过["508"].memory_usage(deep=True)
+    assert 省 > 5, f"只省了 {省:.1f} 倍，压平大概没生效"
+
+
+def test_内存守卫也护验证集(tmp_path, monkeypatch):
+    """以前只护训练集。但验证集可能比训练集还大（小训练集 + 大验证集
+    是完全合理的配法），护一边等于没护。"""
+    need("pandas")
+    from harness import executor as ex_mod
+
+    d = _造带多值列的分片(tmp_path, 片数=3, 每片=100)
+    ex = ex_mod.RealExecutor(str(d), str(d), seed=1,
+                             config={"features": {"base_fields": ["101"]},
+                                     "model": {"name": "lightgbm"}, "train": {}})
+    monkeypatch.setattr(ex_mod, "available_memory_bytes", lambda: 1024)
+    with pytest.raises(ex_mod.UnsupportedByExecutor):
+        ex._guard_memory(d, ["sample_id", "101", "109_14"])

@@ -207,7 +207,11 @@ def estimate_read_bytes(path: pathlib.Path, columns: list[str] | None = None
     总行数 = sum(pq.ParquetFile(f).metadata.num_rows for f in files)
     有的 = set(columns_of(path))
     want = [c for c in (columns or []) if c in 有的] or None
-    头 = pd.read_parquet(files[0], columns=want)
+    # 必须跟真正读的那条路一致：展平之后单值的多值列已经是标量，
+    # 按展平前估会高估十几倍，把本来跑得动的配置挡在门外
+    from .data import flatten_single_valued_lists
+    头 = flatten_single_valued_lists(
+        pq.read_table(files[0], columns=want)).to_pandas()
     if not len(头):
         return 0, 0
     每行 = 头.memory_usage(deep=True).sum() / len(头)
@@ -262,8 +266,16 @@ def read_in_batches(path: pathlib.Path, budget_bytes: int,
     batch: list[pd.DataFrame] = []
     batch_bytes = 0
     for f in files:
-        df = (pd.read_parquet(f, columns=columns) if f.suffix == ".parquet"
-              else pd.read_csv(f, usecols=columns))
+        if f.suffix == ".parquet":
+            # 跟 read_any 同一条路：单值的多值列在 Arrow 层就压成标量，
+            # 别等进了 pandas 才发现每行一个对象的代价已经付掉了
+            import pyarrow.parquet as pq
+
+            from .data import flatten_single_valued_lists
+            df = flatten_single_valued_lists(
+                pq.read_table(f, columns=columns)).to_pandas()
+        else:
+            df = pd.read_csv(f, usecols=columns)
         if per_shard_bytes is None:
             per_shard_bytes = max(1, int(df.memory_usage(deep=True).sum()))
         if batch and batch_bytes + per_shard_bytes > budget_bytes:
@@ -462,7 +474,8 @@ class RealExecutor:
         # 不给 config 就读 config/pipeline.yaml —— 工兵改的就是这份，
         # 执行器不读它的话，改配置类的方案永远等于没改。
         self.config = config if config is not None else _load_pipeline_config()
-        self._cache: dict[tuple, pd.DataFrame] = {}
+        # 路径 → (读的是哪几列, 数据)。一条路径只留一份，见 _read
+        self._cache: dict[str, tuple] = {}
         self._cols_cache: dict[str, list[str]] = {}
 
     # ── 数据 ──
@@ -476,17 +489,23 @@ class RealExecutor:
         单列开销能比标量列高一两个数量级。宽表整份读很容易直接 OOM，
         只读用得上的那几列往往能小一到两个数量级。
         """
-        key = (str(path), tuple(columns) if columns else None)
-        if key not in self._cache:
-            if columns is not None:
-                # 求交集 —— 请求数据里没有的列，pandas 会当场抛
-                有的 = set(self._available_columns(path))
-                columns = [c for c in columns if c in 有的]
-                if not columns:
-                    raise ValueError(
-                        f"{path} 里一个想要的列都没有。有的是：{sorted(有的)[:8]}")
-            self._cache[key] = read_any(path, columns=columns)
-        return self._cache[key]
+        if columns is not None:
+            # 求交集 —— 请求数据里没有的列，pandas 会当场抛
+            有的 = set(self._available_columns(path))
+            columns = [c for c in columns if c in 有的]
+            if not columns:
+                raise ValueError(
+                    f"{path} 里一个想要的列都没有。有的是：{sorted(有的)[:8]}")
+        want = tuple(columns) if columns else None
+        # 一条路径只留**一份**缓存。以列集合当键会在多轮迭代里悄悄堆积：
+        # Agent 每启用一个新零件，needs() 就换一套列 → 换一个键 → 再读一份，
+        # 而上一份还挂在字典里。几轮下来同一份训练数据在内存里存好几副本。
+        旧列, 旧帧 = self._cache.get(str(path), (object(), None))
+        if 旧列 != want or 旧帧 is None:
+            self._cache.pop(str(path), None)      # 先扔掉旧的再读，别让两份同时在内存里
+            旧帧 = read_any(path, columns=columns)
+            self._cache[str(path)] = (want, 旧帧)
+        return 旧帧
 
     def _available_columns(self, path: pathlib.Path) -> list[str]:
         """这份数据里到底有哪些列（只读元数据）。缓存一次，反复用。"""
@@ -627,8 +646,12 @@ class RealExecutor:
 
         # 按训练时定下的**同一份**列清单读目标数据 —— 两边列不一致，
         # 就等于拿另一套输入去喂同一个模型
-        val_x = self._read(eval_path or self.val_features_path,
-                           self._needed_columns(bundle["ops"]))
+        目标 = eval_path or self.val_features_path
+        需要的列 = self._needed_columns(bundle["ops"])
+        # 这道守卫以前只护了训练集。但验证集**可能比训练集还大**
+        # （小训练集 + 大验证集是完全合理的配法），护一边等于没护。
+        self._guard_memory(目标, 需要的列)
+        val_x = self._read(目标, 需要的列)
         # 标签来源二选一：单独的私藏文件，或验证集自带（分片数据集常见）
         有标签 = {"click", "conversion"} <= set(val_x.columns)
         if eval_path is not None:
