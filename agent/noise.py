@@ -78,6 +78,38 @@ def _collect_buckets(reports: list[dict[str, Any]], group_key: str) -> dict[str,
     return result
 
 
+def _effective_bands(ctr: dict, cvr: dict,
+                     reports: list[dict[str, Any]]) -> dict[str, float]:
+    """每个指标各自的判定门槛。
+
+    换种子测出来的抖动是首选 —— 它直接回答「同一份配置重跑一次，这个数会飘多少」。
+
+    但它有个盲区，实测撞上过：保真度抽样只抽负样本（正样本全留），
+    所以 click=1 子集在每个种子下**完全相同**，购买塔训的是同一批数据，
+    换种子根本扰动不到它 —— 测出来的购买分噪声带是干干净净的 0.0000。
+    照单全收的话，购买分**任何**抖动都能越过门槛被判「猜对了」，
+    比不分指标那会儿还糟。
+
+    所以：测出 0 意味着"这个测法扰动不到它"，不是"它很稳"。
+    这时退回 Hanley-McNeil 理论带（只需要正负样本数）。
+    对 38 个转化正样本来说那是 ±0.09 —— 一个诚实的"现在测不出来"。
+    """
+    out = {"点击AUC": ctr["噪声带"], "购买AUC": cvr["噪声带"]}
+    val = (reports[0].get("验证集") or {}) if reports else {}
+    总行数, 点击数 = val.get("总行数"), val.get("点击数")
+    转化数 = val.get("转化数")
+    理论 = {
+        "点击AUC": (hanley_mcneil_se(ctr["均值"], 点击数, 总行数 - 点击数)
+                  if 总行数 and 点击数 and 总行数 > 点击数 else None),
+        "购买AUC": (hanley_mcneil_se(cvr["均值"], 转化数, 点击数 - 转化数)
+                  if 点击数 and 转化数 and 点击数 > 转化数 else None),
+    }
+    for key, se in 理论.items():
+        if not out[key] and se is not None:      # 测出 0 = 扰动不到，退回理论值
+            out[key] = round(BAND_SIGMAS * se, 5)
+    return out
+
+
 def summarize(reports: list[dict[str, Any]], seeds: list[int]) -> dict[str, Any]:
     """把 N 次运行汇总成一份噪声带报告。纯计算，方便离线测试。"""
     ctr = _band([r.get("验证集", {}).get("点击分") for r in reports])
@@ -93,7 +125,15 @@ def summarize(reports: list[dict[str, Any]], seeds: list[int]) -> dict[str, Any]
         "保真度": reports[0].get("保真度", "") if reports else "",
         "点击分": ctr,
         "购买分": cvr,
-        # 复盘官拿它当"这次的提升是不是真的"的门槛：单项变化小于它就是噪声
+        # ⚠️ 门槛必须**分指标**：两个指标的抖动差一个数量级。
+        # 实测验证集里点击正样本 8,950 个、转化正样本只有 38 个 ——
+        # 一个转化换个排位，购买分就能动 1/38 ≈ 0.026，
+        # 而点击分要动一下得 8,950 个样本一起使劲。
+        # 从前这里取 max(两者) 当唯一门槛，被购买带主导，两头都错：
+        # 真实的点击提升（实测 +0.0075 那种）被当噪声抹掉，
+        # 购买分的纯抖动反而越过门槛被记成「猜对了」，白送 +0.15 信任分。
+        "分指标噪声带": _effective_bands(ctr, cvr, reports),
+        # 保留旧字段，别把已经在读它的地方弄挂
         "单指标噪声带": round(max(ctr["噪声带"], cvr["噪声带"]), 5),
         "分组": buckets,
         "说明": ("同一配置只换随机种子跑出来的抖动。任何小于噪声带的差距都是噪声，"

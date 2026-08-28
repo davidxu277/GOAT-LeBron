@@ -306,6 +306,28 @@ class Shelf:
 _SCORE_SECTIONS = ("验证集", "总分")
 
 
+def beats_noise(gains: dict[str, float],
+                floors: dict[str, float] | float | None) -> bool:
+    """这次的变化里，有没有哪一项真的越过了**它自己**的噪声带。
+
+    为什么必须分指标：点击分和购买分的抖动差一个数量级（实测验证集里
+    点击正样本 8,950 个、转化正样本只有 38 个）。用一个标量门槛管两个指标，
+    两头都会错 —— 真实的点击提升被购买分的抖动淹掉判成「说不清」，
+    购买分自己抖一下又越过门槛被记成「猜对了」，白送 +0.15 信任分。
+
+    floors 给 None 或标量时退回旧行为（R11 的 0.0005 兜底）。
+    """
+    if not gains:
+        return False
+    if not isinstance(floors, dict):
+        floor = max(roles.MIN_REAL_GAIN, float(floors or 0.0))
+        return max((abs(v) for v in gains.values()), default=0.0) >= floor
+    return any(
+        abs(v) >= max(roles.MIN_REAL_GAIN, float(floors.get(k, 0.0) or 0.0))
+        for k, v in gains.items()
+    )
+
+
 def read_scores(report: dict[str, Any]) -> dict[str, float]:
     """从成绩单里取出两个 AUC。取不到的返回空 dict。
 
@@ -488,6 +510,9 @@ def run_round(
     shelf: "Shelf | None" = None,
     fidelity_override: str | None = None,
     noise_floor: float = roles.MIN_REAL_GAIN,
+    # 分指标噪声带 {指标名: 门槛}。给了就按指标各判各的；
+    # 不给就退回上面那个标量（旧行为）。
+    noise_bands_by_metric: dict[str, float] | None = None,
 ) -> RoundLog:
     """跑完整的一轮：诊断 → 筛卡 → 提案 → 调度 → 实现 → 执行 → 复盘。
 
@@ -609,15 +634,18 @@ def run_round(
         log, "复盘官", roles.reflect,
         llm, vocab, log.chosen, result.health_report, parent_result, card,
         noise_floor=noise_floor,
+        noise_bands_by_metric=noise_bands_by_metric,
     )
     if log.reflection is not None and prior_ledger is not None and card is not None:
-        gains = log.reflection["actual"].values()
         prior_ledger.apply(
             card.id, log.reflection["verdict"], card.prior,
             # 多个目标里只要有一个真的好转，这张卡就该加分
             symptom_improved=any(item["resolved"] in ("是", "部分")
                                  for item in log.reflection["symptom_resolved"]),
-            beat_noise=max((abs(v) for v in gains), default=0.0) >= noise_floor,
+            # 分指标判定：点击和购买的抖动差一个数量级，一个标量门槛管两个，
+            # 真实的点击提升会被购买分的抖动淹掉，购买分自己抖一下又白拿 +0.15
+            beat_noise=beats_noise(log.reflection["actual"],
+                                   noise_bands_by_metric or noise_floor),
         )
     return finish()
 
@@ -998,6 +1026,9 @@ def run_session(
             shelf=shelf,
             fidelity_override=FIDELITY_LADDER[rung] if rung else None,
             noise_floor=noise_floor,
+            # 分指标门槛：点击和购买的抖动差一个数量级，用一个标量管两个，
+            # 真实的点击提升会被购买分的抖动淹掉，购买分自己抖一下又白拿 +0.15
+            noise_bands_by_metric=(noise_bands or {}).get("分指标噪声带"),
         )
 
         # 这一轮有人插手了吗 —— 跑之前就有的那些属于准备工作，不算。

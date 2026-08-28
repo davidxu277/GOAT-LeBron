@@ -251,13 +251,31 @@ def reflect(
     parent_result: dict[str, Any],
     card: Card | None,
     noise_floor: float = MIN_REAL_GAIN,
+    noise_bands_by_metric: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """复盘一轮。
 
     noise_floor：同配置换种子的实测抖动（agent/noise.py 测出来的）。
     小于它的"提升"是噪声，不许当成假设成立。没测过就退回 R11 的 0.0005。
+
+    noise_bands_by_metric：每个指标各自的门槛。必须分指标 —— 点击分和购买分的
+    抖动差一个数量级（实测验证集里点击正样本 8,950 个、转化正样本只有 38 个）。
+    用一个标量管两个，真实的点击提升会被购买分的抖动淹掉判成「说不清」，
+    购买分自己抖一下又能越过门槛白拿 +0.15 信任分。
     """
     floor = max(MIN_REAL_GAIN, float(noise_floor))
+
+    def 够不够(gains: dict[str, float]) -> bool:
+        """有没有哪一项越过了**它自己**的噪声带。"""
+        if not gains:
+            return False
+        if not noise_bands_by_metric:
+            return max(abs(v) for v in gains.values()) >= floor
+        return any(
+            abs(v) >= max(MIN_REAL_GAIN,
+                          float(noise_bands_by_metric.get(k, 0.0) or 0.0))
+            for k, v in gains.items()
+        )
 
     targets = list(hypothesis.get("targets") or [])
 
@@ -265,10 +283,12 @@ def reflect(
         verdict = data["verdict"]
         gains = data["actual"]
         best = max(abs(v) for v in gains.values()) if gains else 0.0
-        # CLAUDE.md R11：提升小于门槛（或小于实测噪声带）一律判「说不清」
-        if best < floor and verdict == "猜对了":
+        # CLAUDE.md R11：提升小于门槛（或小于该指标自己的实测噪声带）判「说不清」
+        if verdict == "猜对了" and not 够不够(gains):
+            带 = noise_bands_by_metric or {"（统一门槛）": floor}
             raise SchemaViolation(
-                f"最大变化只有 {best:.6f}，低于 {floor:.6f} 的门槛，不能判「猜对了」"
+                f"没有任何一项越过它自己的噪声带（最大变化 {best:.6f}，"
+                f"各指标门槛 {带}），不能判「猜对了」"
             )
 
         items = data["symptom_resolved"]

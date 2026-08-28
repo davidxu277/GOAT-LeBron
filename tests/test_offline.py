@@ -255,7 +255,7 @@ def test_毛病治好了才可以判猜对了(vocab):
 
 
 def test_提升低于门槛不许判猜对了(vocab):
-    with pytest.raises(SchemaViolation, match="低于 0.0005"):
+    with pytest.raises(SchemaViolation, match="0.0005"):
         _reflect_validate(vocab, _reflection("猜对了", "是", 0.0002))
 
 
@@ -415,7 +415,7 @@ def test_噪声带顶掉默认门槛(vocab):
             return {}
 
     roles.reflect(_FakeLLM(), vocab, {}, {}, {}, None, noise_floor=0.006)
-    with pytest.raises(SchemaViolation, match="低于 0.006"):
+    with pytest.raises(SchemaViolation, match="0.006"):
         captured["validate"](_reflection("猜对了", "是", 0.004))
 
 
@@ -1854,3 +1854,81 @@ def test_整条路_训练崩了不算unsupported(tmp_path):
         {"new_files": [], "config_patch": {}}, "全量")
     assert not r.ok
     assert r.unsupported is False
+
+
+# ── 噪声门槛必须分指标，不能一个标量管两个 ────────────────────────
+#
+# 实测：验证集里点击正样本 8,950 个，转化正样本只有 38 个。
+# 购买 AUC 的抖动比点击大一个数量级 —— 一个转化样本换个排位，
+# 购买分就能动 1/38 ≈ 0.026，而点击分动一下要 8,950 个样本一起使劲。
+#
+# 以前 summarize() 取 max(点击带, 购买带) 当唯一门槛，被购买带主导，
+# 于是两头都错：真实的点击提升（+0.008 这种，已实测到过）被当噪声抹掉，
+# 购买分的纯抖动（±0.05）反而越过门槛被记成"猜对了"，白送 +0.15 信任分。
+
+
+def test_噪声带_分指标各给各的():
+    from agent import noise
+
+    reports = [{"验证集": {"点击分": 0.550 + i * 0.0005,
+                          "购买分": 0.45 + i * 0.03}} for i in range(3)]
+    bands = noise.summarize(reports, seeds=[1, 2, 3])
+    分 = bands["分指标噪声带"]
+    assert 分["点击AUC"] < 分["购买AUC"]          # 购买抖得多，门槛就该高
+    assert 分["点击AUC"] == bands["点击分"]["噪声带"]
+    assert 分["购买AUC"] == bands["购买分"]["噪声带"]
+
+
+def test_噪声带_老的单指标字段还在():
+    """别把已经在用它的地方弄挂了。"""
+    from agent import noise
+
+    reports = [{"验证集": {"点击分": 0.55, "购买分": 0.45}} for _ in range(3)]
+    assert "单指标噪声带" in noise.summarize(reports, seeds=[1, 2, 3])
+
+
+def test_越过噪声_点击涨了就该算数():
+    """+0.008 的点击提升是真的（实测加 3 个交叉特征就有 +0.0075），
+    不该因为购买分抖得凶而被一起否掉。"""
+    from agent.loop import beats_noise
+
+    assert beats_noise({"点击AUC": 0.008, "购买AUC": 0.0},
+                       {"点击AUC": 0.001, "购买AUC": 0.05}) is True
+
+
+def test_越过噪声_购买分的抖动不该算数():
+    """38 个正样本上下抖 0.05 是常态，不是本事。"""
+    from agent.loop import beats_noise
+
+    assert beats_noise({"点击AUC": 0.0001, "购买AUC": 0.05},
+                       {"点击AUC": 0.001, "购买AUC": 0.09}) is False
+
+
+def test_越过噪声_没量过噪声就退回R11门槛():
+    from agent.loop import beats_noise
+
+    assert beats_noise({"点击AUC": 0.01}, None) is True
+    assert beats_noise({"点击AUC": 0.0001}, None) is False
+
+
+def test_噪声带_测出0要退回理论值():
+    """保真度抽样只抽负样本，click=1 子集在每个种子下完全一样 ——
+    换种子扰动不到购买塔，测出来的噪声带是 0.0000。
+    照单全收的话购买分任何抖动都能越过门槛，比不分指标还糟。"""
+    from agent import noise
+
+    reports = [{"验证集": {"总行数": 217974, "点击数": 8950, "转化数": 38,
+                          "点击分": 0.5507, "购买分": 0.4462}} for _ in range(3)]
+    分 = noise.summarize(reports, seeds=[1, 2, 3])["分指标噪声带"]
+    assert 分["购买AUC"] > 0.05, "38 个正样本的理论带该在 ±0.09 量级"
+
+
+def test_噪声带_测得出来就用实测的():
+    """理论带是兜底，不该盖掉真正测出来的抖动。"""
+    from agent import noise
+
+    reports = [{"验证集": {"总行数": 217974, "点击数": 8950, "转化数": 38,
+                          "点击分": 0.55 + i * 0.001, "购买分": 0.45 + i * 0.002}}
+               for i in range(3)]
+    分 = noise.summarize(reports, seeds=[1, 2, 3])["分指标噪声带"]
+    assert 分["购买AUC"] < 0.05          # 实测出了抖动，就不该退回 0.09 的理论带
