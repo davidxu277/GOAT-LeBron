@@ -526,10 +526,13 @@ def cmd_finalize(args) -> int:
     print(f"  一起带过去    {', '.join(带过去) or '—'}（佐证材料，不是提交物）")
     print(f"  最佳版本配方  {restored}")
     print(f"\n⚠️ 交付物 #4（模型本身）这一步产不出来 —— 上面给的是**配方**。")
-    print(f"   照着 best_pipeline/ 重跑一次，导出预测结果或 checkpoint，那个才是要交的。")
+    print(f"   照着配方重跑一次、导出预测结果，那个才是要交的：\n")
+    print(f"   .venv/bin/python -m agent.cli predict --train <训练集> --test <测试集> \\")
+    print(f"       --config {out / 'best_pipeline' / 'config' / 'pipeline.yaml'} \\")
+    print(f"       --out {out / 'prediction.parquet'}")
     print(f"\n还要人做的：")
-    print(f"  · 把 best_pipeline/ 重跑一次并导出提交文件（等 Starter Kit 的输出 Schema）")
-    print(f"  · README 的「局限性与改进方向」（交付物 #2 明确要求）")
+    print(f"  · 跑上面那条 predict 命令，产出交付物 #4")
+    print(f"  · 官方提交格式（列名/CSV 还是 parquet）定了之后，给 predict 加 --columns")
     return 0
 
 

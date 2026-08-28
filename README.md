@@ -298,8 +298,22 @@ best_pipeline/ 的配方  →  照着重跑一次  →  预测结果 / checkpoin
 `best_pipeline/` 之所以关键：工兵的改动是**叠加**在同一份配置上的，跑到第 20 轮时
 磁盘上只剩最后那个叠加态 —— **第 5 轮的样子早被盖掉了，没有它就永远交不出来**。
 
-> ⏳ 「导出预测结果」那段代码还没写：提交格式要等主办方的 Starter Kit，
-> 列名、CSV 还是 parquet，现在写就是猜。拿到 Schema 后补上。
+导出预测已经能做：
+
+```bash
+.venv/bin/python -m agent.cli predict \
+    --train data/train --test data/public_test \
+    --config deliverables/best_pipeline/config/pipeline.yaml \
+    --out submissions/prediction.parquet
+```
+
+跟评分走**同一条训练路径**，不是另外复制一份——避免"两条路慢慢走岔，
+交上去的预测跟验证时评的不是同一个模型"这种极难发现的错误。
+输出 `sample_id / ctr / cvr / ctcvr` 四列（`cvr` 是 P(购买|点击) 条件概率，
+`ctcvr = ctr × cvr` 才是 P(点击且购买)）。
+
+> ⏳ 官方提交格式（列名、CSV 还是 parquet）还没定，等 Starter Kit 的 Schema。
+> 到时候用 `--columns` 选列即可，不用再改代码。
 
 ### 什么算「人工干预」
 
