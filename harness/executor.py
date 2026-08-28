@@ -472,10 +472,9 @@ class RealExecutor:
         """读单个文件或整个分片目录（见 harness.data.read_any）。
 
         `columns` 给了就只读那几列。这不是微优化，是**能不能跑起来**的问题：
-        这份数据每个特征都配一个 `D*` 权重列，一共 50 列，其中 18 列是
-        `list<int64>`。实测 medium 一档（191 万行）整份读进程 RSS 20.21 G，
-        只读用得上的 17 列是 0.77 G —— 差 26 倍。
-        large 一档（953 万行）整份读约 100 G，任何一台机器都会 OOM。
+        数据可能很宽，而多值（数组）列在 pandas 里是「每行一个小 numpy 数组」，
+        单列开销能比标量列高一两个数量级。宽表整份读很容易直接 OOM，
+        只读用得上的那几列往往能小一到两个数量级。
         """
         key = (str(path), tuple(columns) if columns else None)
         if key not in self._cache:
@@ -504,10 +503,8 @@ class RealExecutor:
           ① 读到一半炸掉，前面几分钟的盘白读了；
           ② **账会记错**。OOM 走的是「没跑起来」那条路：卡片扣 0.15 信任分、
              进黑名单，等于把「我们读不下这么多列」记成「这个方法不行」。
-             真撞过：第 1 轮军师挑了「多值字段接回来」，工兵写的零件诚实声明
-             它要 12 个多值列，953 万行 × 12 列约 60G，机器只剩 20G ——
-             一张治两个病的好卡就这么被判了死刑，而它一点错没有。
-             这正是 UnsupportedByExecutor 存在的理由（见它的 docstring）。
+             一张零件写得完全正确、只是需要的列太多的卡，就这么被判了死刑，
+             而它一点错没有。这正是 UnsupportedByExecutor 存在的理由。
         """
         需要, 行数 = estimate_read_bytes(path, columns)
         if not 需要:

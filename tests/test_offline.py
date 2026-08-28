@@ -1221,8 +1221,11 @@ def test_快照_每轮都留一份(tmp_path):
         rounds=3, run_id="测试场", logs_dir=tmp_path,
     )
     snaps = sorted((tmp_path / "snapshots" / "测试场").glob("round_*.json"))
-    assert len(snaps) == 3
-    snap = json.loads(snaps[0].read_text(encoding="utf-8"))
+    # 第 0 轮（起点）也留一份 —— 第 1 轮就走差的话得退得回去
+    assert [p_.stem for p_ in snaps] == ["round_000", "round_001", "round_002", "round_003"]
+    起点 = json.loads(snaps[0].read_text(encoding="utf-8"))
+    assert 起点["配置"] and 起点["零件"] == {}      # 起点还没有任何零件
+    snap = json.loads(snaps[1].read_text(encoding="utf-8"))
     assert snap["配置"] and snap["零件"]           # 配置文本 + 哪个文件哪轮写的
     assert snap["分数"]["点击AUC"] > 0
 
@@ -2774,3 +2777,100 @@ def test_兑现不了的不扣卡片信任分():
     账 = PriorLedger()
     账.apply("多值字段接回来", "没跑起来", 0.6) if not r.unsupported else None
     assert 账.values == {}                  # 兑现不了 → 一分不扣
+
+
+# ── 爬山：走差了要退回去 ──────────────────────────────────────
+#
+# 不退的后果不是"少涨一点"，是整条搜索轨迹一去不回头：工兵的改动是深度合并
+# 进配置的，判「猜错了」只把卡片拉黑、扣信任分，**改动本身留在流水线上**。
+# 之后每一轮都建立在更差的基础上，`cur` 跟着退化，医生看到的是退化后的
+# 指标，可能去诊断我们自己造成的病。
+
+
+class _会变差的执行器(DriftingExecutor):
+    """第 1 轮涨，第 2 轮开始一路掉 —— 用来看退不退得回去。"""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.config = {"model": {"name": "起点"}}
+
+    def run(self, patch, fidelity):
+        self.runs += 1
+        self.config = {**self.config, f"第{self.runs}轮加的": True}
+        self.ctr += 0.01 if self.runs == 1 else -0.05      # 第 2 轮起断崖
+        return RunResult(ok=True, seconds=1.0, fidelity=fidelity,
+                         health_report=self.report(fidelity))
+
+
+def _爬山跑一场(tmp_path, **kw):
+    ex = _会变差的执行器()
+    summary = run_session(
+        llm=ScriptedLLM(promote_on=()), vocab=SymptomVocab.load(),
+        cards=CardLibrary.load(SymptomVocab.load()), executor=ex,
+        initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, run_id="爬山场", logs_dir=tmp_path, **kw)
+    return ex, summary
+
+
+def test_爬山_走差了退回最好那一版(tmp_path):
+    ex, summary = _爬山跑一场(tmp_path, rollback_margin=0.0)
+    assert summary.best_round == 1
+    # 第 2、3 轮加进去的东西必须已经被退掉
+    assert "第1轮加的" in ex.config
+    assert "第2轮加的" not in ex.config and "第3轮加的" not in ex.config
+
+
+def test_爬山_关掉就是老行为_只累加不回头(tmp_path):
+    ex, summary = _爬山跑一场(tmp_path, rollback=False)
+    assert summary.best_round == 1
+    # 坏改动全留在流水线上 —— 这正是不加回滚时的样子
+    assert all(f"第{i}轮加的" in ex.config for i in (1, 2, 3))
+
+
+def test_爬山_退回之后比较基准也跟着回去(tmp_path):
+    """只把配置退回去、`cur` 不退，下一轮医生看的还是退化后的成绩单，
+    复盘官的「改动之前那一版」也还停在坏的那一版。"""
+    ex, summary = _爬山跑一场(tmp_path, rollback_margin=0.0)
+    最好 = summary.best_scores["点击AUC"]
+    行 = [json.loads(l) for l in
+          (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    第一轮 = next(r for r in 行 if r["round_id"] == 1)
+    assert 第一轮["metrics"]["验证集"]["点击分"] == pytest.approx(最好)
+
+
+def test_爬山_门槛比噪声小的下降不值得退(tmp_path):
+    """比噪声还小的下降分不清是真变差还是抖动，为它回滚只会来回颠簸。"""
+    ex = _带配置的执行器(gain=0.0, decay=1.0)      # 分数基本不动
+    summary = run_session(
+        llm=ScriptedLLM(promote_on=()), vocab=SymptomVocab.load(),
+        cards=CardLibrary.load(SymptomVocab.load()), executor=ex,
+        initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, run_id="平场", logs_dir=tmp_path, rollback_margin=0.5)
+    assert summary.recoveries == 0            # 门槛给得足够宽 → 一次都不该退
+
+
+def test_爬山_第0轮有快照所以第1轮就变差也退得回去(tmp_path):
+    """best 一开始指向第 0 轮。没有第 0 轮快照的话，第 1 轮走差就无处可退。"""
+    class _一上来就变差(DriftingExecutor):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.config = {"model": {"name": "起点"}}
+
+        def run(self, patch, fidelity):
+            self.runs += 1
+            self.config = {**self.config, f"第{self.runs}轮加的": True}
+            self.ctr -= 0.05
+            return RunResult(ok=True, seconds=1.0, fidelity=fidelity,
+                             health_report=self.report(fidelity))
+
+    ex = _一上来就变差()
+    summary = run_session(
+        llm=ScriptedLLM(promote_on=()), vocab=SymptomVocab.load(),
+        cards=CardLibrary.load(SymptomVocab.load()), executor=ex,
+        initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=2, run_id="开局就差", logs_dir=tmp_path, rollback_margin=0.0)
+    assert summary.best_round == 0
+    assert "第1轮加的" not in ex.config        # 退回了起点

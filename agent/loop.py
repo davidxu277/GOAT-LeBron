@@ -736,6 +736,19 @@ def read_snapshot(logs_dir: pathlib.Path, run_id: str, round_id: int
     return config, files
 
 
+def snapshot_modules(logs_dir: pathlib.Path, run_id: str, round_id: int
+                     ) -> dict[str, int]:
+    """某一轮的快照里记着「哪个零件是哪一轮写的」。回滚时账本要跟着拨回去，
+    否则后面几轮的快照会继续claim 已经被退掉的那些文件。"""
+    p = logs_dir / "snapshots" / (run_id or "unknown") / f"round_{round_id:03d}.json"
+    if not p.exists():
+        return {}
+    try:
+        return dict(json.loads(p.read_text(encoding="utf-8")).get("零件") or {})
+    except Exception:                        # noqa: BLE001
+        return {}
+
+
 def install_pipeline(logs_dir: pathlib.Path, run_id: str, round_id: int,
                      executor: Any) -> bool:
     """把某一轮的流水线装回执行器，供最终裁决使用。
@@ -933,6 +946,16 @@ def run_session(
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     epsilon: float = DEFAULT_EPSILON,
     patience: int = DEFAULT_PATIENCE,
+    # ── 爬山 ──
+    # 走差了要不要退回当前最好的那一版。关掉 = 老行为（只累加、从不回头）：
+    # 一次坏改动会永久留在流水线上，之后每一轮都建立在更差的基础上，
+    # 而且医生看到的是退化后的指标，可能去治我们自己造成的病。
+    rollback: bool = True,
+    # 分数比历史最佳低多少才算「走差了」。
+    #   None  → 用实测噪声带（比它小的下降分不清是真变差还是抖动）
+    #   0     → 严格爬山：只要没超过历史最佳就退
+    # 具体调多少是实验口径问题，留给跑实验的人定。
+    rollback_margin: float | None = None,
     noise_floor: float = roles.MIN_REAL_GAIN,
     noise_bands: dict[str, Any] | None = None,
     baseline: dict[str, float] | None = None,
@@ -977,10 +1000,10 @@ def run_session(
 
     # ── 开跑前先对一次尺子 ──
     #
-    # 噪声带是在**某一个档位**上量出来的，只对那个档位有效。拿小份量的带子
-    # （购买 ≈0.09）去卡全量跑出来的结果（真实抖动可能只有 ≈0.02），是一把
-    # 过松的尺子：0.03 的真实提升会被判成「说不清」；反过来又会把噪声奖励成
-    # 「猜对了」白送 +0.15 信任分。
+    # 噪声带是在**某一个档位**上量出来的，只对那个档位有效。正样本一多抖动就小，
+    # 拿小档位量的带子去卡大档位的结果，是一把过松的尺子：真实提升会被判成
+    # 「说不清」；反过来拿窄带子卡小档位，又会把纯抖动奖励成「猜对了」，
+    # 白送信任分。
     #
     # 最坑的地方是它**不会报错**，只会让结论慢慢错，然后顺着信任分、黑名单、
     # 升档决策一路传染。所以这里要么按样本量缩过去，要么把「没对上」写进
@@ -998,7 +1021,7 @@ def run_session(
     else:
         summary.noise_note = (
             f"没测过噪声带，全程用 R11 的兜底门槛 {max(noise_floor, roles.MIN_REAL_GAIN):.4f}"
-            f"，而实测购买 AUC 的抖动能到 0.09（差 180 倍）"
+            f"（一个拍出来的数，不是这份数据上量的）"
             f" —— 正式跑之前应该先 `agent.cli noise --seeds 3 "
             f"--fidelity {FIDELITY_LADDER[rung]}`，否则「算不算真提升」没有依据")
         print(f"⚠️ {summary.noise_note}\n")
@@ -1057,6 +1080,16 @@ def run_session(
         stale = 0
         no_finding_streak = 0
         return True
+
+    # 第 0 轮也留一份快照：best 一开始指向第 0 轮，第 1 轮就走差的话
+    # 得退得回去，而循环里的 snapshot_round 只覆盖第 1 轮起。
+    try:
+        snapshot_round(logs_dir,
+                       RoundLog(round_id=0, run_id=run_id, fidelity=FIDELITY_LADDER[rung],
+                                started_at=time.strftime("%Y-%m-%dT%H:%M:%S"), metrics=cur),
+                       effective_config(executor, current_config), {})
+    except Exception as exc:                 # noqa: BLE001
+        emit("recovery", text=f"第 0 轮快照写失败：{exc}")
 
     for rid in range(1, rounds + 1):
         used = llm.ledger.total_tokens
@@ -1172,6 +1205,35 @@ def run_session(
             stale = 0
         else:
             stale += 1
+
+        # ── 爬山：这一步走差了就退回当前最好的那一版 ──
+        #
+        # 不退的后果不是"少涨一点"，是**整条搜索轨迹一去不回头**：
+        # 工兵的改动是深度合并进配置的，判「猜错了」只会把卡片拉黑、
+        # 扣信任分，**改动本身留在流水线上**。于是后面每一轮都建立在更差的
+        # 基础上；`cur` 跟着退化，医生看到的是退化后的指标，可能去诊断
+        # 我们自己造成的病，复盘官的「改动之前那一版」也一路往下漂。
+        #
+        # 门槛用噪声带而不是 0：比噪声还小的下降分不清是真变差还是抖动，
+        # 为它回滚只会来回颠簸。要严格爬山就把 rollback_margin 设成 0。
+        门槛 = (max(0.0, float(rollback_margin)) if rollback_margin is not None
+              else max(noise_floor, roles.MIN_REAL_GAIN))
+        if rollback and best["round"] != rid and score < best_score - 门槛:
+            退回 = best["round"]
+            if install_pipeline(logs_dir, run_id, 退回, executor):
+                cur = best["report"]                 # 比较基准也要跟着回去
+                module_owner = snapshot_modules(logs_dir, run_id, 退回)
+                说明 = (f"第 {rid} 轮分数 {score:.4f} 比最好的第 {退回} 轮 "
+                       f"{best_score:.4f} 低了超过 {门槛:.4f}，已退回第 {退回} 轮的流水线")
+                print(f"  ↩ {说明}")
+                emit("recovery", text=说明)
+                summary.recoveries += 1
+                if history:
+                    history[-1]["备注"] = (history[-1].get("备注") or "") + f"；{说明}"
+            else:
+                # 装不回去就别硬来：宁可带着这个坏改动往下跑，
+                # 也不要让流水线停在一个说不清是哪一版的状态。
+                emit("recovery", text=f"想退回第 {退回} 轮但快照装不回来，只能带着这一版继续")
 
         if ref.get("promote") and escalate(
                 rid, f"第 {rid} 轮复盘官判「猜对了」，值得在更大数据上复查"):

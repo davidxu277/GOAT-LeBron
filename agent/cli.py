@@ -341,6 +341,8 @@ def cmd_run(args) -> int:
         token_budget=args.token_budget,
         epsilon=args.epsilon,
         patience=args.patience,
+        rollback=not args.no_rollback,
+        rollback_margin=args.rollback_margin,
         noise_floor=_noise_floor(bands),
         noise_bands=bands,
         baseline=baseline,
@@ -605,6 +607,11 @@ def main() -> int:
                    help="提升小于它不算提升。Starter Kit 给了官方 ε 就换成官方的")
     p.add_argument("--patience", type=int, default=DEFAULT_PATIENCE,
                    help="连续几轮没有真提升算收敛")
+    p.add_argument("--rollback-margin", type=float, default=None,
+                   help="爬山：分数比历史最佳低多少就退回那一版。"
+                        "不给就用实测噪声带；给 0 = 严格爬山（没超过最好就退）")
+    p.add_argument("--no-rollback", action="store_true",
+                   help="关掉爬山回滚，只累加不回头（坏改动会永久留在流水线上）")
     p.add_argument("--token-budget", type=int, default=DEFAULT_TOKEN_BUDGET)
     p.add_argument("--baseline-ctr", type=float, help="官方基线的点击 AUC，用来算 delta")
     p.add_argument("--baseline-cvr", type=float, help="官方基线的购买 AUC，用来算 delta")
