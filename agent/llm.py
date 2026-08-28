@@ -43,6 +43,27 @@ _EFFORT_CAPABLE = ("claude-opus-", "claude-sonnet-5", "claude-fable-")
 # （"Streaming is required for operations that may take longer than 10 minutes"）
 _STREAM_THRESHOLD = 20000
 
+# 每个模型的输出上限。要超了不是被截断，是整个请求 400 ——
+# 真撞过：工兵按 roles.py 给的 96000 去调 Haiku 4.5（上限 64000），
+# 主方案和两个备胎连着三次全挂，整轮作废，而 token 一个没花、
+# 报错也只说"96000 > 64000"，不看这张表根本不知道该填多少。
+_MAX_OUTPUT = {
+    "claude-haiku-4-5": 64_000,
+    "claude-opus-5": 128_000,
+    "claude-sonnet-5": 128_000,
+    "claude-fable-5": 128_000,
+}
+_MAX_OUTPUT_DEFAULT = 64_000       # 不认识的模型按保守值来，宁可短也不要 400
+
+
+def cap_max_tokens(model: str, want: int) -> int:
+    """把请求的输出预算夹到这个模型真能给的上限内。
+
+    夹住而不是报错：调用方给 96000 的本意是"给我尽量多"，
+    而不是"少于 96000 就别跑"。真被截断了另有 stop_reason 会说。
+    """
+    return min(want, _MAX_OUTPUT.get(model, _MAX_OUTPUT_DEFAULT))
+
 
 @dataclass
 class Usage:
@@ -130,6 +151,7 @@ class LLM:
                   不合格时抛 SchemaViolation 并附带说明，我们会把说明喂回去重试一次。
         """
         model = BIG_MODEL if big else SMALL_MODEL
+        max_tokens = cap_max_tokens(model, max_tokens)
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,

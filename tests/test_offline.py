@@ -470,10 +470,19 @@ def test_合法的配置补丁放行():
 # ────────────────── 军师预计提升限幅 ──────────────────
 
 
-def test_预计提升在schema层就限幅(vocab):
+def test_预计提升限幅不在schema层_因为接口不支持(vocab):
+    """这条测试原本断言限幅写在 schema 的 maximum 里 —— 而结构化输出接口
+    **根本不支持数值约束**，写了整个请求 400。也就是说那道闸门从来没生效过，
+    而测试是绿的（它只检查了字典里有没有那个键，没检查接口认不认）。
+
+    限幅现在由 roles.propose 的 validate 强制，见
+    test_军师_预计提升超过上限会被打回。这里只钉住"别再写回 schema 里"。
+    """
     prop = schemas.strategist_schema(vocab, ["ESMM"])["properties"]["proposals"]["items"]
     for m in ("点击AUC", "购买AUC"):
-        assert prop["properties"]["expected"]["properties"][m]["maximum"] == schemas.EXPECTED_CAP
+        字段 = prop["properties"]["expected"]["properties"][m]
+        assert "maximum" not in 字段 and "minimum" not in 字段
+        assert str(schemas.EXPECTED_CAP) in 字段["description"]   # 但要告诉模型上限是多少
 
 
 # ────────────────── 靠谱度账本 ──────────────────
@@ -2579,3 +2588,189 @@ def test_噪声带_升档重测失败要留下已过期的记录(tmp_path):
         module_interface="", example_module="", current_config="",
         rounds=2, logs_dir=tmp_path, start_fidelity="小份", noise_bands=bands)
     assert "仍停在" in summary.noise_note and "偏松" in summary.noise_note
+
+
+# ── schema 必须落在结构化输出接口吃得下的那个子集里 ──────────────────
+#
+# 真跑那天撞出来的：medium 那次「真实 API 端到端跑通」走的是 DeepSeek
+# （OpenAI 兼容的 json_object 模式，根本不校验 schema），Anthropic 这条
+# 结构化输出的路第一次被调用就 400 了：
+#   output_config.format.schema: For 'array' type, property 'maxItems' is not supported
+# 而且报错只点名**第一个**违规项，得一个一个撞。本地跑一遍就能全揪出来。
+
+
+def test_schema_只用接口吃得下的关键字(vocab, cards):
+    """maxItems / minimum / maximum / oneOf 这些写了会让整个请求 400。"""
+    for 名字, s in (
+        ("医生", schemas.doctor_schema(vocab)),
+        ("军师", schemas.strategist_schema(vocab, ["类目兜底", "ESMM"])),
+        ("工兵", schemas.implementer_schema()),
+        ("复盘官", schemas.reflector_schema(vocab)),
+    ):
+        try:
+            schemas.assert_api_compatible(s)
+        except ValueError as exc:
+            pytest.fail(f"{名字} 的 schema 接口吃不下：{exc}")
+
+
+def test_schema守卫_认得出越界的关键字():
+    """守卫本身要真的会拦，否则它只是一句安慰。"""
+    with pytest.raises(ValueError, match="maxItems"):
+        schemas.assert_api_compatible(
+            {"type": "array", "items": {"type": "string"}, "maxItems": 3})
+    with pytest.raises(ValueError, match="minimum"):
+        schemas.assert_api_compatible({"type": "number", "minimum": 0})
+    with pytest.raises(ValueError, match="minItems"):
+        schemas.assert_api_compatible(
+            {"type": "array", "items": {"type": "string"}, "minItems": 3})
+    # 嵌套在深处也要抓得到
+    with pytest.raises(ValueError, match="maxItems"):
+        schemas.assert_api_compatible(
+            {"type": "object", "additionalProperties": False,
+             "properties": {"a": {"type": "array", "maxItems": 2}}})
+
+
+# ── schema 卡不住的，validate 必须接住 ────────────────────────────
+
+
+def _医生校验(vocab, data):
+    captured = {}
+
+    class _FakeLLM:
+        ledger = Ledger()
+
+        def call(self, **kw):
+            captured["validate"] = kw["validate"]
+            return data
+
+    roles.diagnose(_FakeLLM(), vocab, {"验证集": {"点击分": 0.56}})
+    captured["validate"](data)
+
+
+def _一条诊断(**改):
+    f = {"symptom": "在背题", "severity": 0.8, "confidence": "高",
+         "evidence": "训练 0.8867 对验证 0.6135，差 0.2732", "affects": ["购买AUC"]}
+    f.update(改)
+    return f
+
+
+def test_军师_预计提升超过上限会被打回(vocab, cards):
+    """这道闸门以前写在 schema 的 minimum/maximum 里 —— 接口根本不支持数值约束，
+    等于从来没生效过。报个 +0.3 会把调度器的性价比公式整个带偏。"""
+    p = _提案()
+    p["expected"] = {"点击AUC": 0.3, "购买AUC": 0.0}
+    with pytest.raises(SchemaViolation, match="0.05"):
+        _军师校验(vocab, cards, {"proposals": [p]})
+
+
+def test_军师_训练时间倍数不能小于下限(vocab, cards):
+    """倍数是性价比公式的分母，报个 0 会让这个方案的性价比变成无穷大。"""
+    p = _提案()
+    p["cost"] = {"代码难度": "简单", "训练时间倍数": 0.0}
+    with pytest.raises(SchemaViolation, match="训练时间倍数"):
+        _军师校验(vocab, cards, {"proposals": [p]})
+
+
+def test_医生_严重度超出0到1会被打回(vocab):
+    """severity 直接进筛卡的加权求和，超范围会把排序带歪。"""
+    with pytest.raises(SchemaViolation, match="severity"):
+        _医生校验(vocab, {"findings": [_一条诊断(severity=1.7)],
+                       "no_finding": False, "reason_if_none": ""})
+
+
+def test_医生_报太多条会被打回(vocab):
+    with pytest.raises(SchemaViolation, match="最多"):
+        _医生校验(vocab, {"findings": [_一条诊断()] * 4,
+                       "no_finding": False, "reason_if_none": ""})
+
+
+# ── 内存不够 = 我们兑现不了，不是这个方法不行 ────────────────────
+#
+# 第 1 轮真撞过：军师挑了「多值字段接回来」，工兵写的零件诚实声明它要
+# 12 个多值列，953 万行 × 12 列约 60G，机器只剩 20G —— 读到一半 ArrowMemoryError。
+# 崩本身不算意外，**记账错了才是**：那一轮走的是「没跑起来」，卡片被扣
+# 0.15 信任分并拉黑，等于把「我们读不下」记成「这个方法不行」，
+# 而那张卡治的是医生排第 2、第 3 的两个病。
+
+
+def _造分片数据(tmp_path, 片数=3, 每片=40):
+    """造一个多分片目录 —— 估算函数要靠"抽一片再外推"，单文件它会主动弃权。"""
+    pd = pytest.importorskip("pandas")
+    import numpy as np
+    rng = np.random.default_rng(0)
+    d = tmp_path / "train"
+    d.mkdir()
+    for i in range(片数):
+        pd.DataFrame({
+            "sample_id": range(i * 每片, (i + 1) * 每片),
+            "101": rng.integers(0, 7, 每片),
+            "205": rng.integers(0, 5, 每片),
+            "click": rng.integers(0, 2, 每片),
+            "conversion": np.zeros(每片, dtype=int),
+        }).to_parquet(d / f"part-{i:03d}.parquet")
+    return d
+
+
+def test_内存不够时报的是兑现不了而不是跑崩了(tmp_path, monkeypatch):
+    need("pandas")
+    from harness import executor as ex_mod
+
+    d = _造分片数据(tmp_path)
+    ex = ex_mod.RealExecutor(str(d), str(d), seed=1,
+                             config={"features": {"base_fields": ["101", "205"]},
+                                     "model": {"name": "lightgbm"}, "train": {}})
+    # 假装这台机器只剩 1KB —— 任何数据都装不下
+    monkeypatch.setattr(ex_mod, "available_memory_bytes", lambda: 1024)
+    with pytest.raises(ex_mod.UnsupportedByExecutor) as e:
+        ex._guard_memory(d, ["sample_id", "101", "205", "click", "conversion"])
+    说明 = str(e.value)
+    assert "不是方法不行" in 说明          # 军师和复盘官都要读得懂这句
+    assert "G" in 说明                      # 要给出具体数字，别只说"内存不够"
+
+
+def test_内存够就放行(tmp_path, monkeypatch):
+    need("pandas")
+    from harness import executor as ex_mod
+
+    d = _造分片数据(tmp_path)
+    ex = ex_mod.RealExecutor(str(d), str(d), seed=1, config={})
+    monkeypatch.setattr(ex_mod, "available_memory_bytes", lambda: 8 * 1024 ** 3)
+    ex._guard_memory(d, ["sample_id", "101", "click"])      # 不该抛
+
+
+def test_估不出来就不拦(tmp_path, monkeypatch):
+    """单个文件没法便宜地抽样。不确定的时候放行，别把能跑的挡在门外。"""
+    need("pandas")
+    import pandas as pd
+    from harness import executor as ex_mod
+
+    f = tmp_path / "train.parquet"
+    pd.DataFrame({"sample_id": [1, 2], "101": [3, 4], "click": [0, 1]}).to_parquet(f)
+    assert ex_mod.estimate_read_bytes(f, ["101"]) == (0, 0)
+    ex = ex_mod.RealExecutor(str(f), str(f), seed=1, config={})
+    monkeypatch.setattr(ex_mod, "available_memory_bytes", lambda: 1)
+    ex._guard_memory(f, ["101"])                            # 估不出来 → 放行
+
+
+def test_多值列认得出来(tmp_path):
+    """内存大头就是它们，报错信息要点名，否则看的人不知道该砍哪几列。"""
+    need("pandas")
+    import pandas as pd
+    from harness import executor as ex_mod
+
+    d = tmp_path / "shards"
+    d.mkdir()
+    pd.DataFrame({"101": [1, 2], "109_14": [[1, 2], [3]], "click": [0, 1]}
+                 ).to_parquet(d / "part-000.parquet")
+    assert ex_mod.list_columns_of(d) == {"109_14"}
+
+
+def test_兑现不了的不扣卡片信任分():
+    """这条已经有测试盖着记账逻辑，这里钉住「内存不够」也走同一条路。"""
+    from agent.loop import PriorLedger, RunResult
+
+    r = RunResult(ok=False, error="内存不够", unsupported=True)
+    assert r.unsupported is True
+    账 = PriorLedger()
+    账.apply("多值字段接回来", "没跑起来", 0.6) if not r.unsupported else None
+    assert 账.values == {}                  # 兑现不了 → 一分不扣

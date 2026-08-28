@@ -81,7 +81,18 @@ def diagnose(
     history_brief: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     def validate(data: dict[str, Any]) -> None:
+        # 数量上限和数值范围以前写在 schema 里，但结构化输出接口不支持
+        # maxItems / minimum / maximum（写了整个请求 400），所以搬到这里。
+        # 详见 agent/schemas.py 顶部那段说明。
+        if len(data["findings"]) > schemas.MAX_FINDINGS:
+            raise SchemaViolation(
+                f"报了 {len(data['findings'])} 条毛病，最多 {schemas.MAX_FINDINGS} 条。"
+                f"只留最严重的几条。")
+        低, 高 = schemas.SEVERITY_RANGE
         for f in data["findings"]:
+            if not 低 <= f["severity"] <= 高:
+                raise SchemaViolation(
+                    f"病名「{f['symptom']}」的 severity={f['severity']} 超出 {低}~{高}。")
             if not _HAS_DIGIT.search(f["evidence"]):
                 raise SchemaViolation(
                     f"病名「{f['symptom']}」的证据里没有任何数字。"
@@ -122,7 +133,26 @@ def propose(
     card_ids = [c.id for c in candidates]
 
     def validate(data: dict[str, Any]) -> None:
+        # 以下三条以前靠 schema 的 maxItems / minimum / maximum，
+        # 但结构化输出接口不支持数值约束 —— 也就是说 expected 那个 ±0.05 的
+        # 闸门**从来没生效过**。搬到这里才真的拦得住。
+        if len(data["proposals"]) > schemas.MAX_PROPOSALS:
+            raise SchemaViolation(
+                f"提了 {len(data['proposals'])} 个方案，最多 {schemas.MAX_PROPOSALS} 个。")
         for p in data["proposals"]:
+            低, 高 = schemas.RANK_RANGE
+            if not 低 <= p["rank"] <= 高:
+                raise SchemaViolation(f"rank={p['rank']} 超出 {低}~{高}。")
+            for m, v in p["expected"].items():
+                if abs(v) > schemas.EXPECTED_CAP:
+                    raise SchemaViolation(
+                        f"方案 {p['rank']} 预计 {m} 变动 {v}，超过 ±{schemas.EXPECTED_CAP}。"
+                        f"AUC 上一次改动能挪的量级就在千分位到百分位之间，"
+                        f"报大了会把调度器的性价比算歪。")
+            if p["cost"]["训练时间倍数"] < schemas.MIN_TIME_MULTIPLIER:
+                raise SchemaViolation(
+                    f"方案 {p['rank']} 的训练时间倍数 {p['cost']['训练时间倍数']} "
+                    f"小于 {schemas.MIN_TIME_MULTIPLIER}。")
             for word in _HEDGE_WORDS:
                 if word in p["rationale"]:
                     raise SchemaViolation(
@@ -218,6 +248,11 @@ def implement(
                         f"这五个字段永远不许进入模型输入。"
                     )
         _check_config_patch(data.get("config_patch") or "")
+        # 接口的 minItems 只认 0 和 1，所以"至少 3 条"只能在这里卡
+        if len(data["self_check"]) < schemas.MIN_SELF_CHECKS:
+            raise SchemaViolation(
+                f"self_check 只写了 {len(data['self_check'])} 条，"
+                f"至少要 {schemas.MIN_SELF_CHECKS} 条。")
         blob = " ".join(data["self_check"])
         if not any(x in blob for x in FORBIDDEN_FIELDS) and "禁用" not in blob:
             raise SchemaViolation("self_check 里必须有一条确认没有使用禁用字段")
@@ -301,6 +336,15 @@ def reflect(
     targets = list(hypothesis.get("targets") or [])
 
     def validate(data: dict[str, Any]) -> None:
+        # 数量上限与限幅：接口不支持 maxItems / minimum / maximum，只能在这里卡
+        if len(data["symptom_resolved"]) > schemas.MAX_RESOLVED:
+            raise SchemaViolation(
+                f"交代了 {len(data['symptom_resolved'])} 个病，"
+                f"最多 {schemas.MAX_RESOLVED} 个。")
+        if abs(data["card_update"]["prior_delta"]) > schemas.PRIOR_DELTA_CAP:
+            raise SchemaViolation(
+                f"prior_delta={data['card_update']['prior_delta']}，"
+                f"超过 ±{schemas.PRIOR_DELTA_CAP}。一次实验不足以把一张卡捧上天或打死。")
         verdict = data["verdict"]
         gains = data["actual"]
         best = max(abs(v) for v in gains.values()) if gains else 0.0

@@ -171,6 +171,49 @@ def available_memory_bytes() -> int:
         return 2 * 1024 ** 3
 
 
+# 读一份数据的峰值内存比最终那个 DataFrame 还要高一截 —— arrow 的解码缓冲和
+# 转 pandas 那一步会同时在内存里。1.6 是撞过 OOM 之后拍的保守系数：
+# 宁可提前判「跑不了」，也不要读到一半被系统杀掉。
+READ_PEAK_FACTOR = 1.6
+
+
+def list_columns_of(path: pathlib.Path) -> set[str]:
+    """哪些列是多值（list）类型。内存大头就是它们 —— 在 pandas 里一个多值列
+    是「每行一个小 numpy 数组」，光对象头就能吃掉几十 G。"""
+    files = _list_shards(pathlib.Path(path))
+    if not files or files[0].suffix != ".parquet":
+        return set()
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    return {f.name for f in pq.ParquetFile(files[0]).schema_arrow
+            if pa.types.is_list(f.type) or pa.types.is_large_list(f.type)}
+
+
+def estimate_read_bytes(path: pathlib.Path, columns: list[str] | None = None
+                        ) -> tuple[int, int]:
+    """按给定列读这份数据大概要多少内存。返回 (预计字节数, 总行数)。
+
+    做法跟 read_in_batches 一致：拿**第一个分片**实测
+    `memory_usage(deep=True)`（多值那种 object/数组列必须深算，浅算会大幅低估），
+    再按总行数外推。成本是多读一个分片，几百分之一的数据量。
+
+    只有一个文件时没法便宜地抽样（读它就等于读全部），返回 (0, 0) 表示
+    "估不出来"，调用方跳过这道闸 —— 不确定的时候不拦，别把能跑的挡在门外。
+    """
+    files = _list_shards(pathlib.Path(path))
+    if len(files) < 2 or files[0].suffix != ".parquet":
+        return 0, 0
+    import pyarrow.parquet as pq
+    总行数 = sum(pq.ParquetFile(f).metadata.num_rows for f in files)
+    有的 = set(columns_of(path))
+    want = [c for c in (columns or []) if c in 有的] or None
+    头 = pd.read_parquet(files[0], columns=want)
+    if not len(头):
+        return 0, 0
+    每行 = 头.memory_usage(deep=True).sum() / len(头)
+    return int(每行 * 总行数), 总行数
+
+
 def _list_shards(path: pathlib.Path) -> list[pathlib.Path]:
     """跟 harness.data.read_any 用同一套"怎么找分片"的规则。"""
     if path.is_dir():
@@ -453,6 +496,35 @@ class RealExecutor:
             self._cols_cache[key] = columns_of(path)
         return self._cols_cache[key]
 
+    def _guard_memory(self, path: pathlib.Path, columns: list[str] | None) -> None:
+        """读之前先算一下装不装得下。装不下就当场判「执行器兑现不了」。
+
+        为什么不等它自己 OOM —— 两个理由，第二个才是重点：
+
+          ① 读到一半炸掉，前面几分钟的盘白读了；
+          ② **账会记错**。OOM 走的是「没跑起来」那条路：卡片扣 0.15 信任分、
+             进黑名单，等于把「我们读不下这么多列」记成「这个方法不行」。
+             真撞过：第 1 轮军师挑了「多值字段接回来」，工兵写的零件诚实声明
+             它要 12 个多值列，953 万行 × 12 列约 60G，机器只剩 20G ——
+             一张治两个病的好卡就这么被判了死刑，而它一点错没有。
+             这正是 UnsupportedByExecutor 存在的理由（见它的 docstring）。
+        """
+        需要, 行数 = estimate_read_bytes(path, columns)
+        if not 需要:
+            return                      # 估不出来就不拦：不确定时别把能跑的挡在门外
+        可用 = available_memory_bytes()
+        if 需要 * READ_PEAK_FACTOR <= 可用:
+            return
+        多值 = sorted(set(columns or []) & list_columns_of(path))
+        raise UnsupportedByExecutor(
+            f"这份配置要读 {len(columns or [])} 列 × {行数:,} 行，"
+            f"预计 {需要 / 2**30:.1f}G（峰值约 {需要 * READ_PEAK_FACTOR / 2**30:.1f}G），"
+            f"而这台机器只剩 {可用 / 2**30:.1f}G。"
+            + (f"吃内存的是那 {len(多值)} 个多值列 {多值[:6]}：它们在 pandas 里是"
+               f"「每行一个小数组」，一列就要约 1G/百万行。" if 多值 else "")
+            + "这不是方法不行，是这条流水线还没有「按分片流式把多值字段压成标量」"
+              "的能力，只会把原始列整份拉进内存。换小一档的训练数据可以绕过。")
+
     def _needed_columns(self, ops: list[tuple[str, Any]]) -> list[str] | None:
         """这次训练真正会碰到的列。返回 None = 说不准，只能整份读。
 
@@ -607,7 +679,18 @@ class RealExecutor:
         # 零件提前实例化：它只读配置、不碰数据，而**该读哪些列要靠它算**。
         # 顺带好处是「启用了却没写 impl」这类配置错误在读几个 G 之前就炸掉。
         ops = load_feature_ops(self.config)
-        train = self._read(self.train_path, self._needed_columns(ops))
+        需要的列 = self._needed_columns(ops)
+        self._guard_memory(self.train_path, 需要的列)
+        try:
+            train = self._read(self.train_path, 需要的列)
+        except MemoryError as exc:
+            # 估算终究只是估算。真撞上了也要归到「兑现不了」那一类，
+            # 别让卡片替我们的内存上限背锅。（ArrowMemoryError 是 MemoryError 的子类）
+            raise UnsupportedByExecutor(
+                f"读训练数据时内存不够：{type(exc).__name__}: {exc}。"
+                f"这不是方法不行，是这条流水线读不下这么多列 —— "
+                f"换小一档的训练数据，或者让零件按分片把多值字段压成标量。"
+            ) from exc
         frac = FIDELITY_FRAC.get(fidelity, 1.0)
         if frac < 1.0:
             # 分层抽样：正样本全留，负样本按比例抽，保证小份数据也有正样本可学
@@ -750,6 +833,8 @@ class RealExecutor:
         emit("phase", name="超参数", detail=f"点击塔 {ctr_kw}")
 
         ctr_model = LGBMClassifier(random_state=self.seed, verbosity=-1, **ctr_kw)
+        # eval_X / eval_y 是 LightGBM 4.x 的当前写法；老式的 eval_set=[(X, y)]
+        # 在 4.7 上会打 LGBMDeprecationWarning，别"顺手改回去"。
         ctr_model.fit(train[features], train["click"], categorical_feature=features,
                       **({**fit_extra, "eval_X": inner[features],
                           "eval_y": inner["click"]}
