@@ -134,9 +134,20 @@ def propose(
                     f"方案 {p['rank']} 的理由里没有引用任何数字。"
                     f"必须从成绩单的具体数值推出病根。"
                 )
-            if p["novel"] and not p["how_to"].strip():
+            if not p["how_to"].strip():
                 raise SchemaViolation(
-                    f"方案 {p['rank']} 标为自创，但没有写实现草图。写不清楚就不要提。"
+                    f"方案 {p['rank']} 没写 how_to。用现成卡片时也要写 —— "
+                    f"写这张卡怎么落到**当前**这条流水线上（动哪几个配置键、"
+                    f"用哪些字段、新零件叫什么），不是重述卡片。写不清楚就不要提。"
+                )
+            # 照抄卡片等于没写：卡片工兵本来就看得到，重复一遍只是烧 token
+            抄了 = next((c for c in candidates
+                        if c.id == p["card_id"] and c.how_to
+                        and p["how_to"].strip()[:40] in c.how_to), None)
+            if 抄了 is not None:
+                raise SchemaViolation(
+                    f"方案 {p['rank']} 的 how_to 是照抄卡片 {抄了.id} 的原文。"
+                    f"工兵本来就会看到那张卡 —— 这里要写的是它在当前流水线上怎么落地。"
                 )
             if not p["novel"] and p["card_id"] not in card_ids:
                 raise SchemaViolation(
@@ -213,10 +224,20 @@ def implement(
         if "训练集" not in blob:
             raise SchemaViolation("self_check 里必须有一条确认统计量只用了训练集")
 
-    how_to = proposal.get("how_to") or (card.how_to if card else "")
+    # 两份草图都给，各有各的用处，别互相顶掉：
+    #   卡片的  —— 从论文来的通用做法，讲的是"这招本来该怎么做"
+    #   军师的  —— 针对当前配置和当前诊断的适配，讲的是"在我们这儿怎么落"
+    # 以前是 `军师的 or 卡片的`，等于二选一，无论丢哪份都少了一半信息。
+    通用 = card.how_to if card else ""
+    落地 = (proposal.get("how_to") or "").strip()
+    草图 = "\n\n".join(part for part in (
+        f"### 这招通用的做法（来自药方卡 {card.id}）\n\n{通用}" if 通用 else "",
+        f"### 军师要求在当前流水线上这样落地\n\n{落地}" if 落地 else "",
+    ) if part) or "（无，按方案描述自行设计）"
+
     user = (
         f"## 要实现的方案\n\n{_dump(proposal)}\n\n"
-        f"## 实现草图\n\n{how_to or '（无，按方案描述自行设计）'}\n\n"
+        f"## 实现草图\n\n{草图}\n\n"
         f"## 零件接口（必须严格实现）\n\n{module_interface}\n\n"
         f"## 范文：一个现成的零件\n\n```python\n{example_module}\n```\n\n"
         f"## 当前配置\n\n```yaml\n{current_config}\n```"

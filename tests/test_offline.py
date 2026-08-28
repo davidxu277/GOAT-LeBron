@@ -2382,3 +2382,66 @@ def test_深度路径_epoch类训练策略不再被拒():
 
     with pytest.raises(ValueError, match="没有 epoch 循环"):
         check_supported({"model": {"name": "lightgbm"}, "train": {"swa": {"enabled": True}}})
+
+
+# ────────────────── 军师自己写落地草图 ──────────────────
+
+
+def _提案(card_id="类目兜底", how_to="在 features 下新开一块，206 做兜底键"):
+    return {"rank": 1, "card_id": card_id, "targets": ["冷门商品学不动"],
+            "rationale": "冷门桶 0.552 比热门桶 0.638 低 0.086",
+            "expected": {"点击AUC": 0.0, "购买AUC": 0.003},
+            "cost": {"代码难度": "简单", "训练时间倍数": 1.0},
+            "risk": "", "novel": not card_id, "how_to": how_to}
+
+
+def _军师校验(vocab, cards, data):
+    captured = {}
+
+    class _FakeLLM:
+        ledger = Ledger()
+
+        def call(self, **kw):
+            captured["validate"] = kw["validate"]
+            return data
+
+    候选 = [cards.get("类目兜底")]
+    roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门商品学不动"}], 候选)
+    captured["validate"](data)
+
+
+def test_军师_用现成卡片也要写落地草图(vocab, cards):
+    """卡片的 how_to 是从论文来的通用知识；这里要的是 Agent 针对当前流水线的适配 ——
+    那正是评分标准里「识别出什么值得尝试的、以及为什么」要看的东西。"""
+    with pytest.raises(SchemaViolation, match="没写 how_to"):
+        _军师校验(vocab, cards, {"proposals": [_提案(how_to="  ")]})
+
+    _军师校验(vocab, cards, {"proposals": [_提案()]})       # 写了就放行
+
+
+def test_军师_照抄卡片原文会被打回(vocab, cards):
+    """工兵本来就会看到那张卡，重复一遍只是白烧 token。"""
+    原文 = cards.get("类目兜底").how_to
+    with pytest.raises(SchemaViolation, match="照抄卡片"):
+        _军师校验(vocab, cards, {"proposals": [_提案(how_to=原文[:60])]})
+
+
+def test_工兵_两份草图都拿得到(cards):
+    """以前是「军师的 or 卡片的」，二选一 —— 无论丢哪份都少了一半信息。"""
+    看到的 = {}
+
+    class _FakeLLM:
+        ledger = Ledger()
+
+        def call(self, **kw):
+            看到的["user"] = kw["user"]
+            return {"change_type": "只改配置", "config_patch": "",
+                    "new_files": [], "self_check": BASE_CHECK}
+
+    卡 = cards.get("类目兜底")
+    roles.implement(_FakeLLM(), _提案(how_to="用 206 当兜底键，K 取 20"),
+                    卡, "", "", "")
+    材料 = 看到的["user"]
+    assert "这招通用的做法" in 材料 and 卡.how_to[:20] in 材料      # 卡片那份
+    assert "军师要求在当前流水线上这样落地" in 材料                  # 军师那份
+    assert "K 取 20" in 材料

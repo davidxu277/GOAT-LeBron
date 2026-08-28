@@ -95,9 +95,17 @@ def strategist_schema(vocab: SymptomVocab, card_ids: list[str]) -> dict[str, Any
                 "type": "boolean",
                 "description": "true = 卡片库里没有，是自己想的招。此时 card_id 留空字符串。",
             },
+            # 一律要写，但两种情况写的东西不一样：
+            #   自创方案 —— 从零写实现草图
+            #   用现成卡片 —— **不要重述卡片**，写这张卡怎么落到当前这条流水线上：
+            #                 动哪几个配置键、用哪些字段、新零件叫什么名字
+            # 卡片上的「怎么实现」是从论文来的通用知识（人整理的），
+            # 这里要的是 Agent 自己针对当前配置和当前诊断做的适配 ——
+            # 那正是评分标准里「识别出什么值得尝试的、以及为什么」要看的东西。
             "how_to": {
                 "type": "string",
-                "description": "自创方案必须自己写实现草图；用现成卡片时可留空",
+                "description": ("怎么落地。自创方案写完整草图；用现成卡片时写"
+                                "「这张卡怎么套到当前流水线上」，别重述卡片内容"),
             },
         },
         ["rank", "card_id", "targets", "rationale", "expected", "cost", "risk", "novel", "how_to"],

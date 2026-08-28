@@ -101,7 +101,10 @@ class ScriptedLLM:
                 "cost": {"代码难度": 难度, "训练时间倍数": 1.0},
                 "risk": "热门桶可能被稀释",
                 "novel": not card_id,
-                "how_to": "按类目做兜底编码" if not card_id else "",
+                # 用现成卡片时也要写 —— 写的是"在当前流水线上怎么落"，不是重述卡片
+                "how_to": (f"在 features 下新开一块，用 206 做兜底键、K 取 20；"
+                           f"新零件写 modules/features/fallback_{rank}.py，"
+                           f"base_fields 不用动（新列自动进特征表）"),
             }
 
         if not card_ids:
