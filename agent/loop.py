@@ -43,6 +43,9 @@ class RunResult:
     error: str = ""
     seconds: float = 0.0
     fidelity: str = "小份"
+    # 「执行器兑现不了」和「代码写错了/训练崩了」要分开记账：
+    # 前者是我们的流水线缺能力，不该扣这张卡的信任分（见 PriorLedger）。
+    unsupported: bool = False
 
 
 @runtime_checkable
@@ -593,7 +596,11 @@ def run_round(
     if not result.ok:
         log.recoveries.append(f"执行失败：{result.error}")
         log.reflection = _crashed_reflection(log.chosen, result.error)
-        if prior_ledger is not None and card is not None:
+        # 执行器兑现不了 ≠ 这张卡不靠谱 —— 前者是我们的流水线缺能力。
+        # 照扣的话，一场跑下来会把 ESMM、DeepFM 这些好方法全扣成低信任分，
+        # 下一场军师就再也不提它们了，一个自己造成的错误结论被固化进账本。
+        # （仍然进黑名单：这一场里它确实跑不了，再提就是空转烧钱。）
+        if prior_ledger is not None and card is not None and not result.unsupported:
             prior_ledger.apply(card.id, "没跑起来", card.prior)
         return finish()
 

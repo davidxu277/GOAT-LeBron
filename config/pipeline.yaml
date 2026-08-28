@@ -71,24 +71,39 @@ train:
   # 数据规模（小份/中份/大份/全量）不在这里 —— 它由调度器按升降级规则决定。
   # 放进来会被工兵改，那样各轮的分数就不可比了。
 
+  # ⚠️ 下面每一块，执行器要么真的兑现，要么**启用时当场报错**。
+  #    绝不接受了却无视 —— 那会让工兵白改一轮、分数纹丝不动，
+  #    复盘官据此判「猜错了」，把一张好卡片拉黑。见 harness/executor.py:check_supported
+
+  # ✅ 生效：LightGBM 原生早停
   early_stopping:
-    enabled: true
-    monitor: mean_auc              # mean_auc / ctr_auc / cvr_auc
+    enabled: false
     patience: 3
+    inner_holdout_frac: 0.1        # 从**训练集内部**再切一小块当早停的裁判
+    # 为什么不用开发集当裁判：final_judge 走同一条训练路径只换被评的数据，
+    # 早停若盯着"当前在评的那份"，锁定集大考时就会拿锁定集决定停在哪 ——
+    # 既违反 R3，也让大考评的模型跟当轮选中的不是同一个（R2/R9）。
+    monitor: mean_auc              # 留给深度模型路径；LightGBM 用内置早停
     min_delta: 0.0005              # 与 R11 的门槛对齐
     mode: max
 
-  swa:
-    enabled: false
-    start_epoch_ratio: 0.75        # 总轮数的后 25% 开始累积权重平均
-
+  # ✅ 生效：负样本抽样 + 概率还原
   negative_sampling:
     enabled: false
     keep_ratio: 0.3                # 负样本保留比例；正样本永远全留
     recalibrate: true              # 预测后把概率还原回真实尺度
+    # 注意：还原是单调变换，**不改变 AUC**。它修的是 logloss 和预测均值的尺度；
+    # 负采样真正的收益是训练更快、购买塔正负比更平衡。
 
+  # ⛔ 启用会当场报错：要按 epoch 累积权重平均，LightGBM 没有 epoch 循环可挂
+  swa:
+    enabled: false
+    start_epoch_ratio: 0.75
+
+  # ⛔ strategy 不是 fixed 会当场报错：动态权重是给「一个模型同时学两件事」用的，
+  #    这里点击塔和购买塔是两个独立的 LightGBM，权重无处可施
   loss_weight:
-    strategy: fixed                # fixed / uncertainty / dwa / dtp
+    strategy: fixed                # fixed（其余需要多任务模型：ESMM/MMOE 那条路）
     ctr: 1.0
     cvr: 1.0
 

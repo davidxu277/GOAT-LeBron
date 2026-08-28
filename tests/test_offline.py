@@ -1604,3 +1604,253 @@ class Demo:
     val = pd.DataFrame({"a": [9]})
     apply_feature_ops(ops, train, [val])
     assert ops[0][1].fit_rows == [3]             # 只 fit 过训练集，一次
+
+
+# ── 执行器能不能兑现配置里承诺的东西 ────────────────────────────────
+#
+# 背景：26 张卡里只有 3 张是纯特征卡，其余 23 张落在 模型/损失函数/训练策略。
+# 而执行器走的是 LightGBM 这条路 —— ModelOp / TrainOp 两类零件没有任何加载机制，
+# TrainOp 的接口（按 epoch 回调 + state_dict）跟 LightGBM 结构上也对不上。
+#
+# 如果这些配置被"接受但无视"，就会重演那个最贵的 bug：
+# 工兵改了、跑完了、分数纹丝不动，复盘官判「猜错了」，好方法被拉黑。
+# 所以：能真做的真做，做不了的**当场炸**。
+
+
+def test_能力check_默认配置跑得通():
+    """仓库里那份 config/pipeline.yaml 必须是执行器兑现得了的。"""
+    from harness.executor import check_supported
+
+    cfg = (pathlib.Path(__file__).resolve().parent.parent
+           / "config" / "pipeline.yaml")
+    check_supported(yaml.safe_load(cfg.read_text(encoding="utf-8")))
+
+
+def test_能力check_换深度模型要当场炸():
+    """model.name 换成 deepfm 但执行器还是 LightGBM —— 静默无视等于骗自己。"""
+    from harness.executor import check_supported
+
+    with pytest.raises(ValueError, match="deepfm"):
+        check_supported({"model": {"name": "deepfm"}})
+
+
+def test_能力check_报错要说清为什么和怎么办():
+    """错误信息得让人（和下一轮的军师）知道这不是"方法不行"，是"跑不了"。"""
+    from harness.executor import check_supported
+
+    with pytest.raises(ValueError) as e:
+        check_supported({"model": {"name": "esmm"}})
+    assert "LightGBM" in str(e.value)
+
+
+def test_能力check_epoch类零件要当场炸():
+    """SWA 要按 epoch 平权重，LightGBM 没有 epoch 循环可以挂。"""
+    from harness.executor import check_supported
+
+    with pytest.raises(ValueError, match="SWA|swa"):
+        check_supported({"train": {"swa": {"enabled": True}}})
+
+
+def test_能力check_关着的epoch类零件不算错():
+    """enabled: false 就是没开，不该拦。"""
+    from harness.executor import check_supported
+
+    check_supported({"train": {"swa": {"enabled": False}}})
+
+
+def test_能力check_多任务损失权重要当场炸():
+    """loss_weight 是给「一个模型同时学两件事」用的；
+    这里点击和购买是两个独立的 LightGBM，权重无处可施。"""
+    from harness.executor import check_supported
+
+    with pytest.raises(ValueError, match="uncertainty"):
+        check_supported({"train": {"loss_weight": {"strategy": "uncertainty"}}})
+
+
+def test_能力check_固定权重不算错():
+    from harness.executor import check_supported
+
+    check_supported({"train": {"loss_weight": {"strategy": "fixed",
+                                               "ctr": 1.0, "cvr": 1.0}}})
+
+
+# ── 负采样：概率要还原回真实尺度 ──────────────────────────────────
+
+
+def test_负采样_没开就原样返回():
+    from harness.executor import recalibrate
+
+    p = [0.1, 0.5, 0.9]
+    assert recalibrate(p, keep_ratio=1.0) == pytest.approx(p)
+
+
+def test_负采样_还原后概率变小():
+    """负样本被抽掉之后模型看到的正样本比例虚高，预测的概率整体偏大。
+    还原就是把它压回真实尺度。"""
+    from harness.executor import recalibrate
+
+    out = recalibrate([0.5], keep_ratio=0.1)
+    assert out[0] < 0.5
+    # w*p / (1-p+w*p) = 0.05/0.55
+    assert out[0] == pytest.approx(0.05 / 0.55)
+
+
+def test_负采样_还原不改变排序():
+    """AUC 只看排序 —— 还原是单调变换，所以 AUC 不该被它改动。
+    它影响的是 logloss 和「预测均值对不对得上真实点击率」。"""
+    from harness.executor import recalibrate
+
+    out = recalibrate([0.2, 0.4, 0.8], keep_ratio=0.3)
+    assert out == sorted(out)
+
+
+def test_负采样_边界值不炸():
+    from harness.executor import recalibrate
+
+    assert recalibrate([0.0, 1.0], keep_ratio=0.5) == pytest.approx([0.0, 1.0])
+
+
+# ── 「跑不了」和「方法不行」是两回事 ──────────────────────────────
+
+
+def test_兑现不了的配置不该扣卡片的信任分():
+    """执行器兑现不了 ≠ 这张卡不靠谱。
+
+    前者是我们的流水线缺能力，后者是方法本身没用。混为一谈的话，
+    一场跑下来会把 ESMM、DeepFM 这些真正的好方法全部扣成低信任分，
+    下一场开跑时军师就再也不会提它们了 —— 错误结论被固化进账本。
+    """
+    from harness.executor import UnsupportedByExecutor, check_supported
+
+    with pytest.raises(UnsupportedByExecutor):
+        check_supported({"model": {"name": "deepfm"}})
+
+
+def test_兑现不了也是一种跑不起来():
+    """仍然是 ValueError 的子类 —— 老代码里 except ValueError 的地方不会漏接。"""
+    from harness.executor import UnsupportedByExecutor
+
+    assert issubclass(UnsupportedByExecutor, ValueError)
+
+
+def test_跑挂了的结果会标出是不是兑现不了():
+    from agent.loop import RunResult
+
+    assert RunResult(ok=False).unsupported is False       # 默认不影响老代码
+    assert RunResult(ok=False, unsupported=True).unsupported is True
+
+
+# ── 执行器整条路跑一遍（造几百行假数据，秒级）────────────────────
+#
+# 这一组是补一个真实存在过的窟窿：_build_report 曾经引用了两个
+# 属于**另一个函数**的局部变量（ctr_kw / cvr_kw），任何一次真训练都会
+# NameError 当场崩 —— 但当时全部单元测试都是绿的，因为没有一个测试
+# 真的走过 _train_and_score。纯函数测得再细也发现不了这类断裂。
+
+
+def _造数据(tmp_path, n=400):
+    """造一份最小可训练数据：两个类别特征 + 点击 + 转化。"""
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("lightgbm")
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({
+        "sample_id": range(n),
+        "101": rng.integers(0, 7, n),
+        "205": rng.integers(0, 5, n),
+    })
+    # 让标签跟特征有点关系，否则 AUC 恒等于 0.5，测不出东西
+    df["click"] = ((df["101"] % 3 == 0) ^ (rng.random(n) < 0.25)).astype(int)
+    df["conversion"] = (df["click"] & (df["205"] % 2 == 0)
+                        & (rng.random(n) < 0.7)).astype(int)
+    train_p, val_p = tmp_path / "train.parquet", tmp_path / "val.parquet"
+    df.iloc[:300].to_parquet(train_p)
+    df.iloc[300:].to_parquet(val_p)
+    return str(train_p), str(val_p)
+
+
+def _配置(**train_over):
+    cfg = {"features": {"base_fields": ["101", "205"]},
+           "model": {"name": "lightgbm",
+                     "lightgbm": {"n_estimators": 20, "num_leaves": 7}},
+           "train": {"seed": 1}}
+    cfg["train"].update(train_over)
+    return cfg
+
+
+def test_整条路_基线跑得完并出成绩单(tmp_path):
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    r = RealExecutor(tr, va, seed=1, config=_配置()).run(
+        {"new_files": [], "config_patch": {}}, "全量")
+    assert r.ok, r.error
+    assert r.health_report["验证集"]["点击分"] is not None
+    # 这一条就是当初那个 NameError 的哨兵
+    assert r.health_report["实际超参数"]["点击塔"]["n_estimators"] == 20
+
+
+def test_整条路_改超参数真的会传到模型上(tmp_path):
+    """R7：配置里写的数必须真的进模型，不是摆设。"""
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    cfg = _配置()
+    cfg["model"]["lightgbm"]["n_estimators"] = 33
+    r = RealExecutor(tr, va, seed=1, config=cfg).run(
+        {"new_files": [], "config_patch": {}}, "全量")
+    assert r.ok, r.error
+    assert r.health_report["实际超参数"]["点击塔"]["n_estimators"] == 33
+
+
+def test_整条路_开早停跑得完(tmp_path):
+    """早停从训练集内部切裁判，不碰被评的那份数据（R2/R3）。"""
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    cfg = _配置(early_stopping={"enabled": True, "patience": 2,
+                               "inner_holdout_frac": 0.2})
+    cfg["model"]["lightgbm"]["n_estimators"] = 200
+    r = RealExecutor(tr, va, seed=1, config=cfg).run(
+        {"new_files": [], "config_patch": {}}, "全量")
+    assert r.ok, r.error
+
+
+def test_整条路_开负采样跑得完且训练集变小(tmp_path):
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    满 = RealExecutor(tr, va, seed=1, config=_配置()).run(
+        {"new_files": [], "config_patch": {}}, "全量")
+    抽 = RealExecutor(tr, va, seed=1, config=_配置(
+        negative_sampling={"enabled": True, "keep_ratio": 0.3})).run(
+        {"new_files": [], "config_patch": {}}, "全量")
+    assert 满.ok and 抽.ok, (满.error, 抽.error)
+    assert 抽.health_report["训练集"]["总行数"] < 满.health_report["训练集"]["总行数"]
+
+
+def test_整条路_兑现不了的配置标成unsupported(tmp_path):
+    """跑不了要跟跑崩了分开，否则会扣错卡片的信任分。"""
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    cfg = _配置()
+    cfg["model"]["name"] = "deepfm"
+    r = RealExecutor(tr, va, seed=1, config=cfg).run(
+        {"new_files": [], "config_patch": {}}, "全量")
+    assert not r.ok
+    assert r.unsupported is True
+
+
+def test_整条路_训练崩了不算unsupported(tmp_path):
+    """普通的崩溃仍然该扣分 —— 别把两种失败混成一种。"""
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    cfg = _配置()
+    cfg["features"]["base_fields"] = ["根本不存在的字段"]
+    r = RealExecutor(tr, va, seed=1, config=cfg).run(
+        {"new_files": [], "config_patch": {}}, "全量")
+    assert not r.ok
+    assert r.unsupported is False

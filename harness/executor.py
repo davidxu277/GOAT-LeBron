@@ -140,6 +140,86 @@ def lgbm_kwargs(base: dict[str, Any] | None,
     return out
 
 
+# 这条执行器能兑现什么、不能兑现什么。
+#
+# 26 张卡里只有 3 张是纯特征卡，其余 23 张落在 模型 / 损失函数 / 训练策略 ——
+# 而这里走的是 LightGBM：ModelOp / TrainOp 两类零件没有加载机制，
+# TrainOp 的接口（按 epoch 回调 + state_dict）跟 LightGBM 结构上也对不上
+# （它没有 epoch 循环可以挂回调）。
+#
+# 最贵的错误不是"做不了"，是"接受了却没做"：工兵改了配置、训练跑完、
+# 分数纹丝不动，复盘官据此判「猜错了」，一张好卡被拉黑、信任分被扣，
+# 错误结论还会顺着黑名单和升档决策传染下去。宁可当场炸。
+SUPPORTED_MODELS = {"lightgbm"}
+EPOCH_ONLY_BLOCKS = {
+    "swa": "SWA 要按 epoch 累积权重平均",
+    "early_stopping_by_epoch": "按 epoch 早停",
+}
+
+
+class UnsupportedByExecutor(ValueError):
+    """配置要的东西这条执行器兑现不了 —— 跟「代码写错了」「训练崩了」不是一回事。
+
+    分开是为了别扣错账：ESMM、DeepFM 这些卡跑不了，是我们的流水线还没有
+    深度模型训练路径，不是方法本身不靠谱。要是混为一谈，一场跑下来会把
+    真正的好方法全扣成低信任分，下一场军师就再也不提它们了 ——
+    一个纯属自己造成的错误结论被固化进账本。
+
+    仍然继承 ValueError：老代码里 except ValueError 的地方不会漏接。
+    """
+
+
+def check_supported(config: dict[str, Any]) -> None:
+    """配置里有执行器兑现不了的东西就当场炸，绝不静默无视。
+
+    报错信息要让人（和下一轮的军师）看得出这是「跑不了」不是「方法不行」——
+    两者对卡片的处置完全不同。
+    """
+    model_cfg = config.get("model") or {}
+    name = str(model_cfg.get("name", "lightgbm")).lower()
+    if name not in SUPPORTED_MODELS:
+        raise UnsupportedByExecutor(
+            f"配置要的模型是「{name}」，但当前执行器只会训 LightGBM。"
+            f"这不是方法不行，是这条流水线还没有深度模型训练路径 —— "
+            f"需要先补 ModelOp 的加载与训练循环（modules/base.py 里接口已定义，"
+            f"但没有任何代码去加载它）。")
+
+    train_cfg = config.get("train") or {}
+    for key, why in EPOCH_ONLY_BLOCKS.items():
+        block = train_cfg.get(key)
+        if isinstance(block, dict) and block.get("enabled"):
+            raise UnsupportedByExecutor(
+                f"train.{key} 开着，但{why}，而 LightGBM 这条路没有 epoch 循环"
+                f"可以挂回调（TrainOp 接口在 modules/base.py，同样没有加载机制）。"
+                f"这不是方法不行，是当前执行器兑现不了。")
+
+    strategy = str((train_cfg.get("loss_weight") or {}).get("strategy", "fixed")).lower()
+    if strategy != "fixed":
+        raise UnsupportedByExecutor(
+            f"train.loss_weight.strategy 是「{strategy}」，这类动态权重是给"
+            f"「一个模型同时学点击和购买」用的；这里点击塔和购买塔是两个独立的"
+            f"LightGBM，权重无处可施。要用它得先有多任务模型（ESMM/MMOE 那条路）。")
+
+
+def recalibrate(probs, keep_ratio: float):
+    """负采样之后把概率还原回真实尺度。
+
+    负样本按 w 的比例抽样后，模型看到的正样本占比虚高，预测概率整体偏大。
+    按几率（odds）换算回去：odds_真 = w · odds_采样，即
+
+        p_真 = w·p / (1 − p + w·p)
+
+    ⚠️ 这是单调变换，**不会改变 AUC**（AUC 只看排序）。它修的是 logloss
+    和「预测均值对不对得上真实点击率」—— 负采样真正的收益在于训练更快、
+    购买塔的正负比更平衡，不在于这一步。
+    """
+    w = float(keep_ratio)
+    if w >= 1.0 or w <= 0.0:
+        return [float(p) for p in probs]
+    return [float(w * p / (1.0 - p + w * p)) if (1.0 - p + w * p) else 0.0
+            for p in probs]
+
+
 def _load_pipeline_config() -> dict[str, Any]:
     """读 config/pipeline.yaml。文件不在就返回空配置，用代码里的默认值兜底。"""
     path = ROOT / "config" / "pipeline.yaml"
@@ -237,13 +317,17 @@ class RealExecutor:
         t0 = time.time()
         try:
             self._apply_patch(patch)
+            # 配置里有兑现不了的东西就当场炸 —— 静默无视会让工兵白改一轮，
+            # 分数纹丝不动，复盘官却据此判「猜错了」，把好卡片拉黑。
+            check_supported(self.config)
             report = self._train_and_score(fidelity)
             return RunResult(ok=True, health_report=report,
                              seconds=time.time() - t0, fidelity=fidelity)
         except Exception as exc:
             emit("recovery", text=f"执行失败：{type(exc).__name__}: {exc}")
             return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}",
-                             seconds=time.time() - t0, fidelity=fidelity)
+                             seconds=time.time() - t0, fidelity=fidelity,
+                             unsupported=isinstance(exc, UnsupportedByExecutor))
 
     def final_judge(self, fidelity: str = "全量") -> RunResult:
         """在锁定集上评一次 —— 整场只许调用一次（CLAUDE.md R3）。
@@ -379,6 +463,44 @@ class RealExecutor:
             train[col] = train[col].astype("category")
             val_x[col] = val_x[col].astype("category")
 
+        # 负采样：负样本按比例抽，正样本全留（R7，比例从配置读）。
+        # 收益是训练更快、购买塔正负比更平衡；预测出来的概率整体偏大，
+        # 后面用 recalibrate 还原回真实尺度。
+        train_cfg = self.config.get("train") or {}
+        ns = train_cfg.get("negative_sampling") or {}
+        keep_ratio = 1.0
+        if ns.get("enabled"):
+            keep_ratio = float(ns.get("keep_ratio", 1.0))
+            if not 0.0 < keep_ratio < 1.0:
+                raise ValueError(
+                    f"train.negative_sampling.keep_ratio 得在 0~1 之间，收到 {keep_ratio}")
+            pos_rows = train[train["click"] == 1]
+            neg_rows = train[train["click"] == 0].sample(
+                frac=keep_ratio, random_state=self.seed)
+            train = pd.concat([pos_rows, neg_rows]).sample(
+                frac=1.0, random_state=self.seed)
+            emit("phase", name="负采样",
+                 detail=f"负样本保留 {keep_ratio:.0%} · 剩 {len(train):,} 行")
+            if not ns.get("recalibrate", True):
+                keep_ratio = 1.0        # 明确不还原，那就别在预测上动手
+
+        # 早停：从**训练集内部**再切一小块当早停的裁判（R2/R3）。
+        # 为什么不用开发集：final_judge 走的是同一条训练路径，只换被评的数据；
+        # 早停若盯着"当前在评的那份数据"，锁定集大考时就会拿锁定集来决定停在哪 ——
+        # 那既违反 R3，也让大考评的模型跟当轮选中的不是同一个。
+        es = train_cfg.get("early_stopping") or {}
+        fit_extra: dict[str, Any] = {}
+        inner = None
+        if es.get("enabled"):
+            hold_frac = float(es.get("inner_holdout_frac", 0.1))
+            inner = train.sample(frac=hold_frac, random_state=self.seed)
+            train = train.drop(inner.index)
+            patience = int(es.get("patience", 3))
+            emit("phase", name="早停",
+                 detail=f"训练集内切 {hold_frac:.0%} 当裁判 · patience={patience}")
+            import lightgbm as lgb
+            fit_extra["callbacks"] = [lgb.early_stopping(patience, verbose=False)]
+
         # 点击模型：全部行
         # 超参数从配置读（R7）—— 这以前是写死的，工兵改了 model.lightgbm.* 也纹丝不动
         model_cfg = self.config.get("model") or {}
@@ -387,19 +509,34 @@ class RealExecutor:
         emit("phase", name="超参数", detail=f"点击塔 {ctr_kw}")
 
         ctr_model = LGBMClassifier(random_state=self.seed, verbosity=-1, **ctr_kw)
-        ctr_model.fit(train[features], train["click"], categorical_feature=features)
+        ctr_model.fit(train[features], train["click"], categorical_feature=features,
+                      **({**fit_extra, "eval_X": inner[features],
+                          "eval_y": inner["click"]}
+                         if inner is not None else {}))
 
         # 购买模型：只用 click=1 的行
         clicked = train[train["click"] == 1]
         cvr_model = None
         if clicked["conversion"].nunique() >= 2:
             cvr_model = LGBMClassifier(random_state=self.seed, verbosity=-1, **cvr_kw)
+            # 早停的裁判也只取点击过的行；不够两类就退回不早停，
+            # 别为了早停把购买塔训崩（转化正样本本来就少）
+            inner_clicked = (inner[inner["click"] == 1] if inner is not None
+                             else None)
+            cvr_extra = ({**fit_extra,
+                          "eval_X": inner_clicked[features],
+                          "eval_y": inner_clicked["conversion"]}
+                         if inner_clicked is not None
+                         and inner_clicked["conversion"].nunique() >= 2 else {})
             cvr_model.fit(clicked[features], clicked["conversion"],
-                          categorical_feature=features)
+                          categorical_feature=features, **cvr_extra)
 
         ctr_pred = ctr_model.predict_proba(val_x[features])[:, 1]
         cvr_pred = (cvr_model.predict_proba(val_x[features])[:, 1] if cvr_model is not None
                     else np.full(len(val_x), float(clicked["conversion"].mean() or 0.005)))
+        if keep_ratio < 1.0:
+            # 只有点击塔的负样本被抽掉了；购买塔用的是 click=1 子集，不受影响
+            ctr_pred = np.asarray(recalibrate(ctr_pred, keep_ratio))
 
         # 预测自检：宁可崩掉，也不产出格式对但内容有问题的结果
         assert len(ctr_pred) == len(val_x), "预测行数与验证集对不上"
@@ -410,10 +547,13 @@ class RealExecutor:
 
         return self._build_report(merged, ctr_pred, cvr_pred, train, features,
                                   ctr_model, cvr_model, fidelity,
+                                  ctr_kw=ctr_kw, cvr_kw=cvr_kw,
                                   op_names=[name for name, _ in ops])
 
     def _build_report(self, val, ctr_pred, cvr_pred, train, features,
                       ctr_model, cvr_model, fidelity,
+                      ctr_kw: dict[str, Any] | None = None,
+                      cvr_kw: dict[str, Any] | None = None,
                       op_names: list[str] | None = None) -> dict[str, Any]:
         """组装成绩单 —— 医生诊断需要的全部字段都在这里。"""
         clicked_mask = (val["click"] == 1).values
@@ -451,7 +591,7 @@ class RealExecutor:
             },
             "当前特征": features,
             "装上的零件": op_names or [],
-            "实际超参数": {"点击塔": ctr_kw, "购买塔": cvr_kw},
+            "实际超参数": {"点击塔": ctr_kw or {}, "购买塔": cvr_kw or {}},
             "未使用的字段": [c for c in ("109_14", "110_14", "127_14", "150_14",
                                       "508", "509", "702", "853")
                           if c in train.columns and c not in features],
