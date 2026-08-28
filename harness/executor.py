@@ -53,8 +53,12 @@ LGBM_PARAMS = {
 }
 
 
-def _load_op_class(rel_path: str) -> Any:
-    """从 modules/ 下的一个文件里取出零件类。
+def _load_op_class_by(rel_path: str, methods: tuple[str, ...],
+                      接口名: str = "") -> Any:
+    """从 modules/ 下的一个文件里取出实现了指定方法的类。
+
+    三种零件（FeatureOp / ModelOp / TrainOp）共用这一套：路径守卫一处、
+    找类的规则一处，免得三份实现各自长歪。
 
     只认 modules/ 下的路径（R5）—— 这是 Agent 唯一被允许写入的地方，
     放开一寸就等于让它 import 任意文件。
@@ -71,10 +75,15 @@ def _load_op_class(rel_path: str) -> Any:
     spec.loader.exec_module(module)
     for obj in vars(module).values():
         if (isinstance(obj, type) and obj.__module__ == module.__name__
-                and callable(getattr(obj, "fit", None))
-                and callable(getattr(obj, "transform", None))):
+                and all(callable(getattr(obj, m, None)) for m in methods)):
             return obj
-    raise TypeError(f"{rel} 里没有实现 FeatureOp 接口（fit + transform）的类")
+    raise TypeError(f"{rel} 里没有实现 {接口名 or '零件'} 接口"
+                    f"（{' + '.join(methods)}）的类")
+
+
+def _load_op_class(rel_path: str) -> Any:
+    """加特征零件（FeatureOp）。"""
+    return _load_op_class_by(rel_path, ("fit", "transform"), "FeatureOp")
 
 
 def load_feature_ops(config: dict[str, Any]) -> list[tuple[str, Any]]:
@@ -256,24 +265,33 @@ def check_supported(config: dict[str, Any]) -> None:
     """
     model_cfg = config.get("model") or {}
     name = str(model_cfg.get("name", "lightgbm")).lower()
-    if name not in SUPPORTED_MODELS:
-        raise UnsupportedByExecutor(
-            f"配置要的模型是「{name}」，但当前执行器只会训 LightGBM。"
-            f"这不是方法不行，是这条流水线还没有深度模型训练路径 —— "
-            f"需要先补 ModelOp 的加载与训练循环（modules/base.py 里接口已定义，"
-            f"但没有任何代码去加载它）。")
+    深度 = name not in SUPPORTED_MODELS
+    if 深度:
+        # 不是 LightGBM 就走深度路径（harness/deep.py）。它需要两样东西：
+        # 装了 torch，以及配置里指明模型零件在哪。
+        try:
+            import torch                                    # noqa: F401,PLC0415
+        except Exception as exc:                            # noqa: BLE001
+            raise UnsupportedByExecutor(
+                f"配置要的模型是「{name}」，走深度路径，但这台机器上 torch 用不了："
+                f"{type(exc).__name__}: {exc}。装一下：pip install torch") from exc
+        if not model_cfg.get("impl"):
+            raise UnsupportedByExecutor(
+                f"配置要的模型是「{name}」，但没写 model.impl —— 不知道该加载哪个零件。"
+                f"写这个模型的人要同时在 modules/models/ 下建文件，并在 config_patch 里"
+                f"补一行 impl: modules/models/xxx.py（零件实现 modules/base.py 的 ModelOp）。")
 
     train_cfg = config.get("train") or {}
     for key, why in EPOCH_ONLY_BLOCKS.items():
         block = train_cfg.get(key)
-        if isinstance(block, dict) and block.get("enabled"):
+        if isinstance(block, dict) and block.get("enabled") and not 深度:
             raise UnsupportedByExecutor(
                 f"train.{key} 开着，但{why}，而 LightGBM 这条路没有 epoch 循环"
-                f"可以挂回调（TrainOp 接口在 modules/base.py，同样没有加载机制）。"
-                f"这不是方法不行，是当前执行器兑现不了。")
+                f"可以挂回调。深度路径上可以用 —— 把 model.name 换成深度模型，"
+                f"并给这个训练零件写上 impl。")
 
     strategy = str((train_cfg.get("loss_weight") or {}).get("strategy", "fixed")).lower()
-    if strategy != "fixed":
+    if strategy != "fixed" and not 深度:
         raise UnsupportedByExecutor(
             f"train.loss_weight.strategy 是「{strategy}」，这类动态权重是给"
             f"「一个模型同时学点击和购买」用的；这里点击塔和购买塔是两个独立的"
@@ -496,7 +514,9 @@ class RealExecutor:
                                   bundle["train"], features,
                                   bundle["ctr_model"], bundle["cvr_model"], fidelity,
                                   ctr_kw=bundle["ctr_kw"], cvr_kw=bundle["cvr_kw"],
-                                  op_names=[name for name, _ in bundle["ops"]])
+                                  op_names=[name for name, _ in bundle["ops"]],
+                                  深度训练=bundle.get("深度训练"),
+                                  训练集预测=bundle.get("训练集预测"))
 
     def _fit(self, fidelity: str) -> dict[str, Any]:
         """只训练，不碰任何目标数据。返回一份"拟合好的家当"。
@@ -510,7 +530,6 @@ class RealExecutor:
         # 给你一份看起来完全正常的预测文件，没有任何迹象说明它没按配置跑。
         # 交付物 #4 是最终提交物，这种"看起来正常但其实不对"最要命。
         check_supported(self.config)
-        from lightgbm import LGBMClassifier
 
         train = self._read(self.train_path)
         frac = FIDELITY_FRAC.get(fidelity, 1.0)
@@ -591,6 +610,42 @@ class RealExecutor:
             if not ns.get("recalibrate", True):
                 keep_ratio = 1.0        # 明确不还原，那就别在预测上动手
 
+        model_cfg = self.config.get("model") or {}
+
+        # ── 深度路径：model.name 不是 lightgbm 就走这边（harness/deep.py）──
+        # 循环归我们管，模型长什么样归零件管 —— 考场和考生的分界（CLAUDE.md R5）
+        #
+        # 分叉放在 LightGBM 那套早停设置**之前**：那套是内切一块训练集当裁判 +
+        # 挂 lgb 回调，深度路径一样都用不上（它在 epoch 之间用开发集早停，
+        # 回调走 TrainOp）。放在后面会白切一块数据，还会 import 用不着的 lightgbm。
+        if str(model_cfg.get("name", "lightgbm")).lower() not in SUPPORTED_MODELS:
+            from .deep import predict_deep, train_deep
+
+            # 从**训练集内部**切一小块当每轮的裁判（R2/R3）——
+            # 跟 LightGBM 那条路同一个规矩：早停绝不能盯着"当前在评的那份数据"，
+            # 否则 final_judge 时会变成拿锁定集决定停在哪一轮。
+            frac = float((train_cfg.get("early_stopping") or {}).get(
+                "inner_holdout_frac", 0.1))
+            裁判 = train.sample(frac=frac, random_state=self.seed)
+            train = train.drop(裁判.index)
+            emit("phase", name="深度早停裁判",
+                 detail=f"训练集内切 {frac:.0%}（{len(裁判):,} 行）")
+
+            # 只训，不预测 —— 预测统一交给 _predict_chunk，深度模型也能分批喂
+            op, model, 训练记录 = train_deep(self.config, train, 裁判, features, self.seed)
+            vocab = 训练记录.pop("_vocab")
+            return {
+                "features": features, "flatten_cols": flatten_cols, "ops": ops,
+                "keep_ratio": keep_ratio, "train": train,
+                "ctr_model": None, "cvr_model": None, "cvr_fallback": 0.0,
+                "ctr_kw": 训练记录["超参数"], "cvr_kw": 训练记录["超参数"],
+                "深度": {"op": op, "model": model, "vocab": vocab},
+                "深度训练": 训练记录,
+                # 训练集上的预测：医生判「在背题」要拿它跟验证分比
+                "训练集预测": dict(zip(("ctr", "cvr"),
+                                   predict_deep(op, model, vocab, train))),
+            }
+
         # 早停：从**训练集内部**再切一小块当早停的裁判（R2/R3）。
         # 为什么不用开发集：final_judge 走的是同一条训练路径，只换被评的数据；
         # 早停若盯着"当前在评的那份数据"，锁定集大考时就会拿锁定集来决定停在哪 ——
@@ -609,8 +664,11 @@ class RealExecutor:
             fit_extra["callbacks"] = [lgb.early_stopping(patience, verbose=False)]
 
         # 点击模型：全部行
+        # import 放在分叉之后：深度路径根本用不到 LightGBM，
+        # 也不该因为这台机器装不上它（缺 libomp 之类）就跑不了
+        from lightgbm import LGBMClassifier
+
         # 超参数从配置读（R7）—— 这以前是写死的，工兵改了 model.lightgbm.* 也纹丝不动
-        model_cfg = self.config.get("model") or {}
         ctr_kw = lgbm_kwargs(model_cfg.get("lightgbm"))
         cvr_kw = lgbm_kwargs(model_cfg.get("lightgbm"), model_cfg.get("cvr_overrides"))
         emit("phase", name="超参数", detail=f"点击塔 {ctr_kw}")
@@ -665,10 +723,18 @@ class RealExecutor:
         for col in features:
             target[col] = target[col].astype("category")
 
-        ctr_pred = bundle["ctr_model"].predict_proba(target[features])[:, 1]
-        cvr_pred = (bundle["cvr_model"].predict_proba(target[features])[:, 1]
-                   if bundle["cvr_model"] is not None
-                   else np.full(len(target), bundle["cvr_fallback"]))
+        深度 = bundle.get("深度")
+        if 深度 is not None:
+            # 深度模型不吃 category 类型，走自己的 ID 词表（训练集上建的，R2）
+            from .deep import predict_deep
+
+            ctr_pred, cvr_pred = predict_deep(
+                深度["op"], 深度["model"], 深度["vocab"], target)
+        else:
+            ctr_pred = bundle["ctr_model"].predict_proba(target[features])[:, 1]
+            cvr_pred = (bundle["cvr_model"].predict_proba(target[features])[:, 1]
+                       if bundle["cvr_model"] is not None
+                       else np.full(len(target), bundle["cvr_fallback"]))
         if bundle["keep_ratio"] < 1.0:
             # 只有点击塔的负样本被抽掉了；购买塔用的是 click=1 子集，不受影响
             ctr_pred = np.asarray(recalibrate(ctr_pred, bundle["keep_ratio"]))
@@ -717,6 +783,8 @@ class RealExecutor:
                       ctr_model, cvr_model, fidelity,
                       ctr_kw: dict[str, Any] | None = None,
                       cvr_kw: dict[str, Any] | None = None,
+                      深度训练: dict[str, Any] | None = None,
+                      训练集预测: dict[str, Any] | None = None,
                       op_names: list[str] | None = None) -> dict[str, Any]:
         """组装成绩单 —— 医生诊断需要的全部字段都在这里。"""
         clicked_mask = (val["click"] == 1).values
@@ -726,7 +794,13 @@ class RealExecutor:
         cvr_auc_all = _auc(val["conversion"], cvr_pred)
 
         # 训练集自评，用来判断「在背题」
-        tr_ctr = _auc(train["click"], ctr_model.predict_proba(train[features])[:, 1])
+        # 训练集自评 —— 医生判「在背题」靠训练分和验证分的差。
+        # 深度路径没有 sklearn 那样的 predict_proba，预测由调用方算好传进来。
+        if ctr_model is None:
+            tr_ctr = _auc(train["click"], (训练集预测 or {}).get("ctr")) \
+                if (训练集预测 or {}).get("ctr") is not None else None
+        else:
+            tr_ctr = _auc(train["click"], ctr_model.predict_proba(train[features])[:, 1])
         tr_clicked = train[train["click"] == 1]
         tr_cvr = (_auc(tr_clicked["conversion"],
                        cvr_model.predict_proba(tr_clicked[features])[:, 1])
@@ -754,6 +828,8 @@ class RealExecutor:
             },
             "当前特征": features,
             "装上的零件": op_names or [],
+            # 深度路径的每轮曲线 —— 医生判「在背题」「学得不够」要看它
+            **({"深度训练": 深度训练} if 深度训练 else {}),
             "实际超参数": {"点击塔": ctr_kw or {}, "购买塔": cvr_kw or {}},
             "未使用的字段": [c for c in ("109_14", "110_14", "127_14", "150_14",
                                       "508", "509", "702", "853")

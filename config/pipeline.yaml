@@ -52,7 +52,16 @@ features:
 
 # ── 模型 ──────────────────────────────────────────────
 model:
-  name: lightgbm                   # lightgbm / mlp / deepfm / dcnv2 / esmm …
+  name: lightgbm                   # lightgbm 走 GBDT 那条路；
+                                   # 其他名字一律走深度路径（harness/deep.py），
+                                   # 那时必须同时给 impl 指向模型零件
+  # impl: modules/models/mlp.py    # ← 深度模型必填。零件实现 modules/base.py 的 ModelOp
+  deep:                            # 深度路径的训练超参数（只对非 lightgbm 生效）
+    epochs: 5                      # 上限 50
+    batch_size: 4096
+    learning_rate: 0.001
+    embed_dim: 16
+    weight_decay: 0.00001
   embed_dim: 16                    # 深度模型的 embedding 维度
   lightgbm:
     n_estimators: 120

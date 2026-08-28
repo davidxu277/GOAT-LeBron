@@ -1646,12 +1646,21 @@ def test_能力check_换深度模型要当场炸():
 
 
 def test_能力check_报错要说清为什么和怎么办():
-    """错误信息得让人（和下一轮的军师）知道这不是"方法不行"，是"跑不了"。"""
+    """错误信息得让人（和下一轮的军师）知道这不是"方法不行"，是"跑不了"。
+
+    深度路径接通之后，esmm 不再是「整类不支持」—— 它只是还没人指路。
+    所以报错要说清缺的是什么、怎么补，而不是笼统一句"只会 LightGBM"。
+    """
     from harness.executor import check_supported
 
     with pytest.raises(ValueError) as e:
         check_supported({"model": {"name": "esmm"}})
-    assert "LightGBM" in str(e.value)
+    报错 = str(e.value)
+    assert "impl" in 报错 and "modules/models/" in 报错      # 缺什么、放哪
+    assert "ModelOp" in 报错                                 # 照哪个接口写
+
+    # 指了路就放行 —— 剩下的错留给加载时报（文件不存在之类）
+    check_supported({"model": {"name": "esmm", "impl": "modules/models/esmm.py"}})
 
 
 def test_能力check_epoch类零件要当场炸():
@@ -2213,6 +2222,7 @@ def test_可用内存_装不上psutil就退回保守默认(monkeypatch):
 def test_预测_大数据集分批也能出完整预测(tmp_path):
     """端到端验证：目标数据分成好几个小分片，跟单个大文件相比，
     分批处理不能丢行、不能变模型——这是真正防回归的那道关卡。"""
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -2231,3 +2241,144 @@ def test_预测_大数据集分批也能出完整预测(tmp_path):
     assert len(out) == 60                               # 4 片 × 15 行，一行不丢
     assert set(out["sample_id"]) == set(range(60))
     assert out["ctr"].between(0, 1).all()
+# ────────────────── 深度模型训练路径 ──────────────────
+
+
+def _造数据(tmp_path, n_train=1500, n_val=600):
+    """带真实信号的合成数据 —— 没信号的话 AUC 恒等 0.5，测不出训练有没有起作用。"""
+    pd = pytest.importorskip("pandas")
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+
+    def 造(n):
+        u, i = rng.integers(0, 50, n), rng.integers(0, 30, n)
+        p = 1 / (1 + np.exp(-(u / 50 + i / 30 - 1)))
+        click = (rng.random(n) < p).astype(int)
+        conv = ((click == 1) & (rng.random(n) < 0.3)).astype(int)
+        return pd.DataFrame({"sample_id": np.arange(n), "101": u, "205": i,
+                             "click": click, "conversion": conv})
+
+    造(n_train).to_parquet(tmp_path / "train.parquet")
+    造(n_val).to_parquet(tmp_path / "val.parquet")
+    return str(tmp_path / "train.parquet"), str(tmp_path / "val.parquet")
+
+
+def _深度配置(**deep):
+    return {"features": {"base_fields": ["101", "205"]},
+            "model": {"name": "mlp", "impl": "modules/models/mlp.py",
+                      "mlp": {"hidden": [16], "tower": [8], "dropout": 0.0},
+                      "deep": {"epochs": 3, "batch_size": 256,
+                               "learning_rate": 0.02, **deep}}}
+
+
+def test_深度路径_训得起来并出成绩单(tmp_path):
+    """21 张卡卡在这条路上：模型类卡本身就是神经网络，
+    损失函数类卡只有在梯度下降里才存在，训练策略类卡要挂在 epoch 边界上。"""
+    need("torch")
+    from harness.executor import RealExecutor
+
+    train, val = _造数据(tmp_path)
+    ex = RealExecutor(train, val, seed=7, config=_深度配置())
+    r = ex.run({"new_files": [], "config_patch": ""}, "全量")
+    assert r.ok, r.error
+    rep = r.health_report
+    assert 0.0 < rep["验证集"]["点击分"] < 1.0
+    assert rep["训练集"]["点击分"] is not None        # 医生判「在背题」要用它
+    dt = rep["深度训练"]
+    assert dt["训练轮数"] == 3 and dt["最佳轮次"] >= 1
+    assert [e["轮"] for e in dt["每轮"]] == [1, 2, 3]  # 每轮曲线进日志
+
+
+def test_深度路径_不需要lightgbm(tmp_path, monkeypatch):
+    """深度路径用不到 LightGBM，不该因为这台机器装不上它就跑不了。"""
+    need("torch")
+    from harness.executor import RealExecutor
+
+    train, val = _造数据(tmp_path, 400, 200)
+    ex = RealExecutor(train, val, seed=7, config=_深度配置(epochs=1))
+    # 把 lightgbm 变成一 import 就炸，模拟缺 libomp 的机器
+    import builtins
+    真import = builtins.__import__
+
+    def 拦(name, *a, **kw):
+        if name.startswith("lightgbm"):
+            raise OSError("（演习）libomp 缺失")
+        return 真import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", 拦)
+    assert ex.run({"new_files": [], "config_patch": ""}, "全量").ok
+
+
+def test_深度路径_超参数从配置读(tmp_path):
+    need("torch")
+    from harness.executor import RealExecutor
+
+    train, val = _造数据(tmp_path, 400, 200)
+    ex = RealExecutor(train, val, seed=7, config=_深度配置(epochs=2))
+    r = ex.run({"new_files": [], "config_patch": ""}, "全量")
+    assert r.health_report["深度训练"]["训练轮数"] == 2
+
+
+def test_深度路径_超参数越界被夹回():
+    """epochs: 9999 能把一晚上的算力烧光，而 Agent 自己看不出是它干的。"""
+    need("torch")
+    from harness.deep import deep_kwargs
+
+    assert deep_kwargs({"epochs": 9999})["epochs"] == 50
+    assert deep_kwargs({"learning_rate": 10})["learning_rate"] == 0.1
+    assert deep_kwargs({"epochs": "很多"})["epochs"] == 5       # 写歪了退回默认
+
+
+def test_深度路径_缺impl当场炸而不是悄悄换模型(tmp_path):
+    """静默无视是最坑的形态：一切看起来都跑了，结论却是假的。"""
+    need("torch")
+    from harness.executor import RealExecutor
+
+    cfg = _深度配置()
+    cfg["model"].pop("impl")
+    train, val = _造数据(tmp_path, 300, 150)
+    r = RealExecutor(train, val, seed=7, config=cfg).run(
+        {"new_files": [], "config_patch": ""}, "全量")
+    assert not r.ok and r.unsupported             # 是「跑不了」不是「方法不行」
+    assert "impl" in r.error and "modules/models/" in r.error
+
+
+def test_深度路径_ID词表只在训练集上建():
+    """R2：验证集里没见过的 ID 落 OOV 槽，而不是给它一个新编号 ——
+    后者等于偷看了验证集里有哪些 ID。"""
+    need("torch")
+    pd = pytest.importorskip("pandas")
+    from harness.deep import OOV, Vocab
+
+    train = pd.DataFrame({"101": [1, 2, 3]})
+    val = pd.DataFrame({"101": [2, 999]})          # 999 训练集里没有
+    v = Vocab().fit(train, ["101"])
+    assert v.sizes() == {"101": 4}                 # 3 个 ID + 1 个 OOV 槽
+    assert v.encode(val)[1][0] == OOV
+
+
+def test_深度路径_导出预测走同一条路(tmp_path):
+    need("torch")
+    from harness.executor import RealExecutor
+
+    train, val = _造数据(tmp_path, 500, 250)
+    ex = RealExecutor(train, val, seed=7, config=_深度配置(epochs=1))
+    out = ex.predict_frame(val, "全量")
+    assert list(out.columns) == ["sample_id", "ctr", "cvr", "ctcvr"]
+    assert len(out) == 250
+    assert ((out.ctr >= 0) & (out.ctr <= 1)).all()
+
+
+def test_深度路径_epoch类训练策略不再被拒():
+    """早停、SWA 这些是挂在 epoch 边界的回调 —— LightGBM 那条路没有轮次，
+    深度路径有，就该放行。"""
+    need("torch")
+    from harness.executor import check_supported
+
+    深度 = {"model": {"name": "mlp", "impl": "modules/models/mlp.py"},
+           "train": {"swa": {"enabled": True}}}
+    check_supported(深度)                                   # 不该抛
+
+    with pytest.raises(ValueError, match="没有 epoch 循环"):
+        check_supported({"model": {"name": "lightgbm"}, "train": {"swa": {"enabled": True}}})

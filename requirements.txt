@@ -9,6 +9,7 @@ pyarrow>=14.0        # 读 parquet
 scikit-learn>=1.3
 lightgbm>=4.0
 psutil>=5.9          # 导出预测按可用内存分批读，装不上就退回保守的 2GB 固定预算
+torch>=2.0            # 深度模型训练路径 harness/deep.py（21 张卡靠它）
 
 # 测试
 pytest>=8.0
