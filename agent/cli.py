@@ -353,6 +353,68 @@ def cmd_intervene(args) -> int:
     return 0
 
 
+def cmd_predict(args) -> int:
+    """对测试集出预测并落盘 —— 交付物 #4 的原料。
+
+    跟评分**同一条训练路径**（`RealExecutor._fit_predict`），所以交上去的预测
+    就是验证时评的那个模型出的。自己再复制一份训练流程是最容易出的错：
+    两条路慢慢走岔，而分数看着完全正常，根本发现不了。
+
+    用哪份配置：
+      --config 指定    → 用它（比如 deliverables/best_pipeline/pipeline.yaml）
+      --round N 指定   → 先把那一轮的流水线还原回来（工兵的改动是叠加的，
+                        磁盘上只剩末态，不还原就交错版本）
+      都不给          → 用当前的 config/pipeline.yaml
+    """
+    from harness.executor import RealExecutor
+
+    config = None
+    if args.config:
+        config = yaml.safe_load(pathlib.Path(args.config).read_text(encoding="utf-8"))
+        print(f"用配置：{args.config}")
+    elif args.round is not None:
+        from .loop import read_snapshot
+        got = read_snapshot(pathlib.Path(args.logs), args.run or "", args.round)
+        if got is None:
+            raise SystemExit(
+                f"读不到第 {args.round} 轮的快照。先看看有哪些："
+                f"ls {args.logs}/snapshots/*/")
+        config, files = got
+        for rel, content in files.items():
+            target = ROOT / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            print(f"  还原零件 {rel}")
+        print(f"用第 {args.round} 轮的流水线")
+    else:
+        print("用当前的 config/pipeline.yaml")
+
+    ex = RealExecutor(args.train, args.val_features or args.test,
+                      args.val_labels, seed=args.seed, config=config)
+    print(f"训练中（{args.fidelity}数据）……")
+    out = ex.predict_frame(args.test, args.fidelity)
+
+    if args.columns:
+        want = [c.strip() for c in args.columns.split(",") if c.strip()]
+        缺 = [c for c in want if c not in out.columns]
+        if 缺:
+            raise SystemExit(f"要不到这些列：{缺}。有的是：{list(out.columns)}")
+        out = out[want]
+
+    dest = pathlib.Path(args.out)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.suffix == ".csv":
+        out.to_csv(dest, index=False)
+    else:
+        out.to_parquet(dest, index=False)
+    print(f"\n已写入 {dest}（{len(out):,} 行 · {list(out.columns)}）")
+    print(out.head(3).to_string(index=False))
+    print("\n口径提醒：cvr 是 P(购买|点击) 这个**条件概率**，"
+          "ctcvr = ctr × cvr 才是 P(点击且购买)。")
+    print("官方提交格式（列名/csv 还是 parquet）确定后，用 --columns 选列即可。")
+    return 0
+
+
 def cmd_restore(args) -> int:
     """把某一轮的流水线原样还原出来 —— 交付物 #4 靠它。
 
@@ -526,6 +588,19 @@ def main() -> int:
     p.add_argument("--fail-role-call", type=int,
                    help="演习：让医生的第几次调用抛异常")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("predict", help="对测试集出预测并落盘（交付物 #4 的原料）")
+    _add_data_args(p)
+    p.add_argument("--test", required=True, help="要预测的那份数据（可以没有标签）")
+    p.add_argument("--out", default="submissions/prediction.parquet",
+                   help="写到哪。后缀 .csv 就出 csv，否则 parquet")
+    p.add_argument("--fidelity", default="全量", help="拿多少训练数据来训")
+    p.add_argument("--config", help="用哪份配置。不给就用 config/pipeline.yaml")
+    p.add_argument("--round", type=int, help="改用第几轮的流水线（先从快照还原）")
+    p.add_argument("--run", help="哪一场（配合 --round）")
+    p.add_argument("--logs", default=str(LOGS), help="从哪份日志找快照")
+    p.add_argument("--columns", help="只保留这几列，逗号分隔（官方格式定了用它）")
+    p.set_defaults(func=cmd_predict)
 
     p = sub.add_parser("finalize", help="把一场跑的产物整理成可提交的一包")
     p.add_argument("--run", help="哪一场（run_id）。默认最后那一场")

@@ -1953,3 +1953,94 @@ def test_事件流_设成空就谁也不写(tmp_path, monkeypatch):
     events.emit("phase", name="绝对不该出现在任何文件里")
     after = events.EVENTS_PATH.stat().st_size if events.EVENTS_PATH.exists() else 0
     assert after == before
+
+
+# ── 导出预测（交付物 #4 的原料）────────────────────────────────
+
+
+def _造无标签测试集(tmp_path, n=120):
+    pd = pytest.importorskip("pandas")
+    import numpy as np
+    rng = np.random.default_rng(7)
+    df = pd.DataFrame({"sample_id": range(10000, 10000 + n),
+                       "101": rng.integers(0, 7, n),
+                       "205": rng.integers(0, 5, n)})
+    p = tmp_path / "test_nolabel.parquet"
+    df.to_parquet(p)
+    return str(p)
+
+
+def test_预测_测试集没有标签也能出预测(tmp_path):
+    """真测试集就是没标签的 —— 这条要是不通，交付物 #4 根本交不出来。"""
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    te = _造无标签测试集(tmp_path)
+    out = RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(te, "全量")
+    assert len(out) == 120
+    assert list(out.columns) == ["sample_id", "ctr", "cvr", "ctcvr"]
+
+
+def test_预测_概率都在0和1之间(tmp_path):
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    te = _造无标签测试集(tmp_path)
+    out = RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(te, "全量")
+    for col in ("ctr", "cvr", "ctcvr"):
+        assert out[col].between(0, 1).all(), f"{col} 跑到 [0,1] 外面去了"
+
+
+def test_预测_ctcvr是两者相乘(tmp_path):
+    """口径写死：cvr 是 P(购买|点击) 这个条件概率，ctcvr 才是 P(点击且购买)。
+    两者混用是这个赛题里最容易犯的错（见 ESMM 卡片）。"""
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    te = _造无标签测试集(tmp_path)
+    out = RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(te, "全量")
+    assert (out["ctcvr"] - out["ctr"] * out["cvr"]).abs().max() < 1e-12
+
+
+def test_预测_sample_id原样带出来(tmp_path):
+    """对不上行就等于没交 —— 顺序和取值都不许动。"""
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    te = _造无标签测试集(tmp_path)
+    out = RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(te, "全量")
+    assert out["sample_id"].tolist() == list(range(10000, 10120))
+
+
+def test_预测_没有sample_id要当场报错(tmp_path):
+    from harness.executor import RealExecutor
+
+    pd = pytest.importorskip("pandas")
+    tr, va = _造数据(tmp_path)
+    bad = tmp_path / "no_id.parquet"
+    pd.DataFrame({"101": [1, 2], "205": [3, 4]}).to_parquet(bad)
+    with pytest.raises(ValueError, match="sample_id"):
+        RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(str(bad), "全量")
+
+
+def test_预测_跟评分走同一条路(tmp_path):
+    """同一份数据，predict_frame 出的 ctr 必须跟评分时用的是同一个模型。
+
+    这条是防"两条路慢慢走岔" —— 导出预测要是自己复制一份训练流程，
+    加特征零件、数组拍平、负采样还原任何一步改了单边，
+    交上去的预测就跟验证时评的不是同一个模型，而且**分数完全正常**，
+    根本看不出来。
+    """
+    from harness.executor import RealExecutor
+    from sklearn.metrics import roc_auc_score
+
+    tr, va = _造数据(tmp_path)
+    ex = RealExecutor(tr, va, seed=1, config=_配置())
+    report = ex.run({"new_files": [], "config_patch": {}}, "全量").health_report
+    out = ex.predict_frame(va, "全量")          # 拿验证集当"测试集"再走一遍
+
+    import pandas as pd
+    truth = pd.read_parquet(va)[["sample_id", "click"]]
+    m = out.merge(truth, on="sample_id")
+    assert roc_auc_score(m["click"], m["ctr"]) == pytest.approx(
+        report["验证集"]["点击分"], abs=1e-9)

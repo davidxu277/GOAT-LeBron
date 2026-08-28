@@ -386,6 +386,30 @@ class RealExecutor:
                          eval_path: pathlib.Path | None = None) -> dict[str, Any]:
         """训练并评分。eval_path 不给就用开发集；给了就在那份数据上评
         （锁定集用这条路 —— 训练逻辑完全一样，只换被评的数据）。"""
+        got = self._fit_predict(fidelity, eval_path, require_labels=True)
+        val_x, val_y, features = got["target"], got["labels"], got["features"]
+
+        merged = val_x[["sample_id"] + features].merge(val_y, on="sample_id", how="inner")
+        assert len(merged) == len(val_x), "按 sample_id 关联后丢行了"
+
+        return self._build_report(merged, got["ctr_pred"], got["cvr_pred"],
+                                  got["train"], features,
+                                  got["ctr_model"], got["cvr_model"], fidelity,
+                                  ctr_kw=got["ctr_kw"], cvr_kw=got["cvr_kw"],
+                                  op_names=got["op_names"])
+
+    def _fit_predict(self, fidelity: str,
+                     eval_path: pathlib.Path | None = None,
+                     *, require_labels: bool = True) -> dict[str, Any]:
+        """训练 + 对目标数据出预测。评分和导出预测**都走这一条**。
+
+        为什么不让导出预测自己写一份：那样两条路会慢慢走岔 ——
+        加特征零件、禁用字段拦截、数组字段拍平、类别转换、负采样后的概率还原，
+        任何一步只改了一边，交上去的预测就跟验证时评的不是同一个模型。
+        这正是我们这两天一直在抓的那类 bug，不能自己再造一个。
+
+        require_labels=False 时目标数据可以没有标签（真测试集就是这样）。
+        """
         from lightgbm import LGBMClassifier
 
         train = self._read(self.train_path)
@@ -398,14 +422,19 @@ class RealExecutor:
 
         val_x = self._read(eval_path or self.val_features_path)
         # 标签来源二选一：单独的私藏文件，或验证集自带（分片数据集常见）
-        if eval_path is not None:
+        val_y = None
+        有标签 = {"click", "conversion"} <= set(val_x.columns)
+        if not require_labels:
+            # 导出预测走这条：真测试集没有标签，也不需要
+            val_y = val_x[["sample_id", "click", "conversion"]].copy() if 有标签 else None
+        elif eval_path is not None:
             # 锁定集自带标签（跟开发集同源同格式），不走那份私藏文件
-            if not {"click", "conversion"} <= set(val_x.columns):
+            if not 有标签:
                 raise ValueError(f"锁定集 {eval_path} 里没有标签，无法当裁判")
             val_y = val_x[["sample_id", "click", "conversion"]].copy()
         elif self.val_labels_path is not None:
             val_y = self._read(self.val_labels_path)
-        elif {"click", "conversion"} <= set(val_x.columns):
+        elif 有标签:
             val_y = val_x[["sample_id", "click", "conversion"]].copy()
         else:
             raise ValueError("验证集不含标签，且没有提供 val_labels 文件，无法评分")
@@ -539,16 +568,40 @@ class RealExecutor:
             ctr_pred = np.asarray(recalibrate(ctr_pred, keep_ratio))
 
         # 预测自检：宁可崩掉，也不产出格式对但内容有问题的结果
-        assert len(ctr_pred) == len(val_x), "预测行数与验证集对不上"
+        assert len(ctr_pred) == len(val_x), "预测行数与目标数据对不上"
         assert not np.isnan(ctr_pred).any() and not np.isnan(cvr_pred).any(), "预测里有 NaN"
 
-        merged = val_x[["sample_id"] + features].merge(val_y, on="sample_id", how="inner")
-        assert len(merged) == len(val_x), "按 sample_id 关联后丢行了"
+        return {"target": val_x, "labels": val_y, "features": features,
+                "ctr_pred": ctr_pred, "cvr_pred": cvr_pred, "train": train,
+                "ctr_model": ctr_model, "cvr_model": cvr_model,
+                "ctr_kw": ctr_kw, "cvr_kw": cvr_kw,
+                "op_names": [name for name, _ in ops]}
 
-        return self._build_report(merged, ctr_pred, cvr_pred, train, features,
-                                  ctr_model, cvr_model, fidelity,
-                                  ctr_kw=ctr_kw, cvr_kw=cvr_kw,
-                                  op_names=[name for name, _ in ops])
+    def predict_frame(self, test_path: str | pathlib.Path,
+                      fidelity: str = "全量") -> pd.DataFrame:
+        """对一份数据出预测，返回 DataFrame（交付物 #4 的原料）。
+
+        跟评分**完全同一条训练路径**（`_fit_predict`），只是目标数据换成测试集、
+        不要求它带标签。所以交上去的预测，就是验证时评的那个模型出的。
+
+        列的含义：
+            sample_id  原样带出来，用来跟官方的行对齐
+            ctr        P(点击)
+            cvr        P(购买 | 点击) —— 条件概率，不是 P(点击且购买)
+            ctcvr      P(点击且购买) = ctr × cvr，顺手给出，
+                       因为不同评测脚本要的口径不一样（见 docs/baseline笔记.md Q1）
+        """
+        got = self._fit_predict(fidelity, pathlib.Path(test_path),
+                                require_labels=False)
+        target, ctr, cvr = got["target"], got["ctr_pred"], got["cvr_pred"]
+        if "sample_id" not in target.columns:
+            raise ValueError(f"{test_path} 里没有 sample_id，预测没法跟官方的行对齐")
+        out = pd.DataFrame({
+            "sample_id": target["sample_id"].to_numpy(),
+            "ctr": ctr, "cvr": cvr, "ctcvr": ctr * cvr,
+        })
+        emit("phase", name="导出预测", detail=f"{len(out):,} 行 · {fidelity}训练")
+        return out
 
     def _build_report(self, val, ctr_pred, cvr_pred, train, features,
                       ctr_model, cvr_model, fidelity,
