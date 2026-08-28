@@ -33,6 +33,15 @@ class FrequencyBucket:
 
     # ── FeatureOp 接口（见 modules/base.py）──────────────────────
 
+    def needs(self) -> list[str]:
+        """除了 base_fields，这个零件还要读哪些原始列。
+
+        执行器靠它决定"这次只把哪几列读进内存"。这份数据一共 50 列、
+        其中 18 列是多值数组，整份读会吃掉几十 G —— 所以每个零件都得报数。
+        不实现这个方法不会出错，但执行器只能退回整份读。
+        """
+        return [self.field]
+
     def fit(self, train_df: pd.DataFrame) -> None:
         """只在训练集上统计出现次数。绝不许读验证集（R2）。"""
         self.counts = train_df[self.field].value_counts()

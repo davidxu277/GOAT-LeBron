@@ -181,7 +181,24 @@ def _list_shards(path: pathlib.Path) -> list[pathlib.Path]:
     return [path]
 
 
-def read_in_batches(path: pathlib.Path, budget_bytes: int):
+def columns_of(path: pathlib.Path) -> list[str]:
+    """这份数据有哪些列。只读 parquet 元数据，几百个分片也是毫秒级。
+
+    存在的意义是让"只读用得上的列"这件事可行：请求的列里有数据里没有的
+    （比如测试集不带标签），pandas 会当场抛，必须先求交集。
+    """
+    files = _list_shards(pathlib.Path(path))
+    if not files:
+        return []
+    f = files[0]
+    if f.suffix == ".parquet":
+        import pyarrow.parquet as pq
+        return [x.name for x in pq.ParquetFile(f).schema_arrow]
+    return list(pd.read_csv(f, nrows=0).columns)
+
+
+def read_in_batches(path: pathlib.Path, budget_bytes: int,
+                    columns: list[str] | None = None):
     """按内存预算把一份分片数据分批读出来，每批尽量多装但不超预算。
 
     分片粒度：一批 = 若干个完整分片拼起来，不做分片内部的行级切分——
@@ -194,11 +211,16 @@ def read_in_batches(path: pathlib.Path, budget_bytes: int):
     ——不是精确值，但比瞎猜靠谱，而且只多读一个分片的成本，可以接受。
     """
     files = _list_shards(path)
+    if columns is not None:
+        # 求交集：测试集不带标签这种情况很常见，直接请求会当场抛
+        有的 = set(columns_of(path))
+        columns = [c for c in columns if c in 有的] or None
     per_shard_bytes: int | None = None
     batch: list[pd.DataFrame] = []
     batch_bytes = 0
     for f in files:
-        df = pd.read_parquet(f) if f.suffix == ".parquet" else pd.read_csv(f)
+        df = (pd.read_parquet(f, columns=columns) if f.suffix == ".parquet"
+              else pd.read_csv(f, usecols=columns))
         if per_shard_bytes is None:
             per_shard_bytes = max(1, int(df.memory_usage(deep=True).sum()))
         if batch and batch_bytes + per_shard_bytes > budget_bytes:
@@ -397,16 +419,64 @@ class RealExecutor:
         # 不给 config 就读 config/pipeline.yaml —— 工兵改的就是这份，
         # 执行器不读它的话，改配置类的方案永远等于没改。
         self.config = config if config is not None else _load_pipeline_config()
-        self._cache: dict[str, pd.DataFrame] = {}
+        self._cache: dict[tuple, pd.DataFrame] = {}
+        self._cols_cache: dict[str, list[str]] = {}
 
     # ── 数据 ──
 
-    def _read(self, path: pathlib.Path) -> pd.DataFrame:
-        """读单个文件或整个分片目录（见 harness.data.read_any）。"""
-        key = str(path)
+    def _read(self, path: pathlib.Path,
+              columns: list[str] | None = None) -> pd.DataFrame:
+        """读单个文件或整个分片目录（见 harness.data.read_any）。
+
+        `columns` 给了就只读那几列。这不是微优化，是**能不能跑起来**的问题：
+        这份数据每个特征都配一个 `D*` 权重列，一共 50 列，其中 18 列是
+        `list<int64>`。实测 medium 一档（191 万行）整份读进程 RSS 20.21 G，
+        只读用得上的 17 列是 0.77 G —— 差 26 倍。
+        large 一档（953 万行）整份读约 100 G，任何一台机器都会 OOM。
+        """
+        key = (str(path), tuple(columns) if columns else None)
         if key not in self._cache:
-            self._cache[key] = read_any(path)
+            if columns is not None:
+                # 求交集 —— 请求数据里没有的列，pandas 会当场抛
+                有的 = set(self._available_columns(path))
+                columns = [c for c in columns if c in 有的]
+                if not columns:
+                    raise ValueError(
+                        f"{path} 里一个想要的列都没有。有的是：{sorted(有的)[:8]}")
+            self._cache[key] = read_any(path, columns=columns)
         return self._cache[key]
+
+    def _available_columns(self, path: pathlib.Path) -> list[str]:
+        """这份数据里到底有哪些列（只读元数据）。缓存一次，反复用。"""
+        key = str(path)
+        if key not in self._cols_cache:
+            self._cols_cache[key] = columns_of(path)
+        return self._cols_cache[key]
+
+    def _needed_columns(self, ops: list[tuple[str, Any]]) -> list[str] | None:
+        """这次训练真正会碰到的列。返回 None = 说不准，只能整份读。
+
+        为什么零件要自己声明：`base_fields` 只覆盖直接进模型的字段，
+        零件可能要读别的原始列（「多值字段接回来」要 109_14 那几个 list 列，
+        「类目兜底」要 206）。少读一列的后果不是报错，是**零件静默失效** ——
+        训练结果纹丝不动，却被复盘官记成「猜错了」，一张好卡被拉黑。
+        那是这个项目最贵的一类错误，所以宁可整份读也不猜。
+        """
+        cols = {"sample_id", "click", "conversion"}
+        cols |= {str(c) for c in ((self.config.get("features") or {}).get("base_fields")
+                                  or BASE_FEATURES)}
+        # 成绩单里的分桶指标硬依赖这两列（商品出现次数分桶、用户见没见过），
+        # 而它们正是「冷门商品学不动」「新用户不会做」两个病的判据。
+        # 工兵要是把它们从 base_fields 里删了，裁列会让这两块诊断**悄悄消失**。
+        cols |= {"205", "101"}
+        for name, op in ops:
+            needs = getattr(op, "needs", None)
+            if not callable(needs):
+                emit("phase", name="整份读",
+                     detail=f"零件「{name}」没声明 needs()，只能读全部列（内存会很大）")
+                return None
+            cols |= {str(c) for c in (needs() or [])}
+        return sorted(cols)
 
     # ── Executor 协议 ──
 
@@ -486,7 +556,10 @@ class RealExecutor:
         bundle = self._fit(fidelity)
         features = bundle["features"]
 
-        val_x = self._read(eval_path or self.val_features_path)
+        # 按训练时定下的**同一份**列清单读目标数据 —— 两边列不一致，
+        # 就等于拿另一套输入去喂同一个模型
+        val_x = self._read(eval_path or self.val_features_path,
+                           self._needed_columns(bundle["ops"]))
         # 标签来源二选一：单独的私藏文件，或验证集自带（分片数据集常见）
         有标签 = {"click", "conversion"} <= set(val_x.columns)
         if eval_path is not None:
@@ -531,7 +604,10 @@ class RealExecutor:
         # 交付物 #4 是最终提交物，这种"看起来正常但其实不对"最要命。
         check_supported(self.config)
 
-        train = self._read(self.train_path)
+        # 零件提前实例化：它只读配置、不碰数据，而**该读哪些列要靠它算**。
+        # 顺带好处是「启用了却没写 impl」这类配置错误在读几个 G 之前就炸掉。
+        ops = load_feature_ops(self.config)
+        train = self._read(self.train_path, self._needed_columns(ops))
         frac = FIDELITY_FRAC.get(fidelity, 1.0)
         if frac < 1.0:
             # 分层抽样：正样本全留，负样本按比例抽，保证小份数据也有正样本可学
@@ -544,7 +620,7 @@ class RealExecutor:
         wanted = (self.config.get("features") or {}).get("base_fields") or BASE_FEATURES
         # 装上配置里启用的加特征零件 —— 以前工兵写的零件文件躺在 modules/ 下
         # 从来没有被 import 过，训练结果纹丝不动却被记成"这个方案没用"
-        ops = load_feature_ops(self.config)
+        # （实例化提前到读数据之前了，见上面：该读哪些列要问它们）
         train, _, 新列 = apply_feature_ops(ops, train, [])
 
         features = [str(c) for c in wanted if str(c) in train.columns]
@@ -763,7 +839,10 @@ class RealExecutor:
 
         chunks: list[pd.DataFrame] = []
         total = 0
-        for raw in read_in_batches(pathlib.Path(test_path), budget):
+        # 同样只读用得上的列：4301 万行 × 50 列里有 18 个 list 列，
+        # 不裁的话每批装不了几个分片，光读就要很久
+        for raw in read_in_batches(pathlib.Path(test_path), budget,
+                                   columns=self._needed_columns(bundle["ops"])):
             if "sample_id" not in raw.columns:
                 raise ValueError(f"{test_path} 里没有 sample_id，预测没法跟官方的行对齐")
             target, ctr, cvr = self._predict_chunk(bundle, raw)
@@ -831,9 +910,14 @@ class RealExecutor:
             # 深度路径的每轮曲线 —— 医生判「在背题」「学得不够」要看它
             **({"深度训练": 深度训练} if 深度训练 else {}),
             "实际超参数": {"点击塔": ctr_kw or {}, "购买塔": cvr_kw or {}},
+            # ⚠️ 判据是**数据集里有哪些列**，不是 train 这个 DataFrame 有哪些列。
+            # 裁列之后这些字段压根不会被读进来，按 train.columns 判会永远返回空 ——
+            # 医生就再也看不到「历史行为没用上」「特征没组合起来」的证据了，
+            # 而且不报错。裁列本身是对的，但不能顺手把诊断依据也裁掉。
             "未使用的字段": [c for c in ("109_14", "110_14", "127_14", "150_14",
                                       "508", "509", "702", "853")
-                          if c in train.columns and c not in features],
+                          if c in self._available_columns(self.train_path)
+                          and c not in features],
         }
 
         if cvr_auc is not None and val.loc[clicked_mask, "conversion"].sum() < 50:
