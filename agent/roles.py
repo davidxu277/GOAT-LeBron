@@ -129,6 +129,10 @@ def propose(
     shelved: list[dict[str, Any]] | None = None,
     budget_left: str = "一般",
     pipeline_state: str = "",
+    # 最近几轮发生了什么。以前只有医生拿得到，军师完全看不见 ——
+    # 于是「上一版为什么没跑起来」只能顺着医生的证据文字间接漏一点过来。
+    # 开药的人看不到上一副药为什么没煎成，只能靠猜。
+    history_brief: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     card_ids = [c.id for c in candidates]
 
@@ -200,8 +204,18 @@ def propose(
         f"条件已经变了就别提，也不用解释为什么放弃。\n\n"
         if shelved else ""
     )
+    # 「出了什么错」那一栏是执行器和工兵的原话。军师必须看到它 ——
+    # 否则同一堵墙会被撞第二次、第三次，每撞一次就是一整轮白跑。
+    历史块 = (
+        f"## 最近几轮发生了什么\n\n{_dump(history_brief)}\n\n"
+        f"**「出了什么错」那一栏是执行器或工兵的原话，不是套话。**"
+        f"里面写明的限制是真实存在的：同一个限制撞第二次，这一轮就白跑了。"
+        f"如果上一版是因为某个限制没跑起来，要么绕开它，要么明确说明这次为什么不会再撞上。\n\n"
+        if history_brief else ""
+    )
     user = (
         f"## 医生诊断\n\n{_dump(findings)}\n\n"
+        f"{历史块}"
         f"## 对症的药方卡（已按病名筛选过）\n\n{cards_block}\n\n"
         f"## 本轮已经试过的\n\n{_dump(tried_before or [])}\n\n"
         f"{shelf_block}"

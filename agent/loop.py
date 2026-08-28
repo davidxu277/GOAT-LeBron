@@ -481,7 +481,11 @@ def _crashed_reflection(chosen: dict[str, Any] | None, error: str) -> dict[str, 
             "prior_delta": PriorLedger.CRASHED,
             "note": f"这一版没跑起来：{error}",
         },
-        "next_hint": "换一个方案，或者先修这个报错",
+        # ⚠️ 这里以前是写死的一句「换一个方案，或者先修这个报错」。
+        # 它非空，于是 _brief 的 `备注` 永远取到它，`or` 后面的 recoveries
+        # 永远轮不到 —— 执行器说的「你要的那些列读不进内存」在这一步就被扔了。
+        # 下一轮只知道"没跑起来"，不知道为什么，只能换个说法再撞一次同一堵墙。
+        "next_hint": f"上一版没跑起来。执行器的原话：{error[:300]}",
         "promote": False,
         "由代码合成": True,          # 标记：不是复盘官说的，是代码填的
     }
@@ -555,6 +559,7 @@ def run_round(
         llm, vocab, findings, candidates,
         tried_before=tried_before, shelved=shelved,
         budget_left=budget_left, pipeline_state=current_config,
+        history_brief=history_brief,
     )
     if log.proposals is None:
         return finish()
@@ -836,7 +841,7 @@ def _with_bands(report: dict[str, Any], bands: dict[str, Any] | None) -> dict[st
 def _brief(log: RoundLog) -> dict[str, Any]:
     """把一轮压成一两行，喂给下一轮的医生和军师。全文喂过去会烧光预算。"""
     ref = log.reflection or {}
-    return {
+    brief: dict[str, Any] = {
         "轮次": log.round_id,
         "选了": (log.chosen or {}).get("card_id") or "（自创或未选中）",
         "数据": log.fidelity,
@@ -844,6 +849,12 @@ def _brief(log: RoundLog) -> dict[str, Any]:
         "实际变化": ref.get("actual", {}),
         "备注": ref.get("next_hint", "") or "；".join(log.recoveries[:2]),
     }
+    # 出错原文单独占一格，不跟 `备注` 抢位置 —— 这是下一轮唯一能知道
+    # 「为什么没跑起来」的渠道。复盘官成功、但中途有恢复事件的轮次
+    # （比如工兵换了备胎）以前也传不出去，一并补上。
+    if log.recoveries:
+        brief["出了什么错"] = "；".join(log.recoveries)[:400]
+    return brief
 
 
 @dataclass
@@ -1169,15 +1180,29 @@ def run_session(
             on_round(log, summary)
 
         # ── 记忆：试过什么、哪些别再试 ──
-        card_id = (log.chosen or {}).get("card_id")
+        选中 = log.chosen or {}
+        card_id = 选中.get("card_id")
+        verdict = ref.get("verdict", "本轮作废")
         if card_id:
-            verdict = ref.get("verdict", "本轮作废")
             tried.append({"card_id": card_id, "结论": verdict})
             if verdict in ("猜错了", "没跑起来"):
                 blacklist.add(card_id)      # 失败的招，别再提
             elif verdict == "猜对了":
                 applied.add(card_id)        # 已经并进流水线了，再上一次是空转
             # 「说不清」两边都不进：换个数据量或换个条件还值得再试一次
+        elif 选中:
+            # 自创方案没有 card_id，以前 `if card_id:` 整段跳过 —— 于是它
+            # 不进「已经试过的」，军师下一轮完全不知道自己提过、更不知道
+            # 被拒了，只能换个说法再提一遍。
+            # 只记进 tried（给军师看），不进 blacklist：黑名单是按 card_id
+            # 硬过滤的，而两个自创方案本来就不是同一个东西，硬拦会误伤。
+            tried.append({
+                "card_id": "（自创）",
+                "治": 选中.get("targets") or [],
+                "做法": (选中.get("how_to") or "")[:100],
+                "结论": verdict,
+            })
+        tried[:] = tried[-12:]              # 只留最近的，别让上下文越滚越大
 
         # ── 逃生舱：连着查不出病，说明这个数据量已经看不出差别了 ──
         if log.diagnosis and log.diagnosis.get("no_finding"):

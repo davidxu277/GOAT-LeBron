@@ -2874,3 +2874,117 @@ def test_爬山_第0轮有快照所以第1轮就变差也退得回去(tmp_path):
         rounds=2, run_id="开局就差", logs_dir=tmp_path, rollback_margin=0.0)
     assert summary.best_round == 0
     assert "第1轮加的" not in ex.config        # 退回了起点
+
+
+# ── 失败原因必须传到下一轮 ────────────────────────────────────
+#
+# 真跑 10 轮 0 成功那次的根因：崩掉时 _crashed_reflection 写死一句
+# 「换一个方案，或者先修这个报错」，而 _brief 的 `备注` 取的正是它、
+# `or` 后面的 recoveries 永远轮不到。执行器说的「你要的那些列读不进内存」
+# 在这一步被扔掉，Agent 只能靠猜，连着几轮撞同一堵墙。
+
+
+def test_崩了之后报错原文要传下去():
+    from agent.loop import RoundLog, _brief, _crashed_reflection
+
+    log = RoundLog(round_id=3, started_at="", run_id="x")
+    log.chosen = {"card_id": "", "targets": ["历史行为没用上"]}
+    log.recoveries = ["执行失败：UnsupportedByExecutor: 这些多值列读不进内存"]
+    log.reflection = _crashed_reflection(log.chosen, "UnsupportedByExecutor: 读不进内存")
+    b = _brief(log)
+    assert "读不进内存" in b["备注"]              # next_hint 带上了原话
+    assert "读不进内存" in b["出了什么错"]         # 恢复事件也单独占一格
+
+
+def test_没崩但有恢复事件也要传下去():
+    """工兵换了备胎、某个角色重试过 —— 这些以前也传不出去。"""
+    from agent.loop import RoundLog, _brief
+
+    log = RoundLog(round_id=2, started_at="", run_id="x")
+    log.recoveries = ["工兵实现失败（FinalMLP）：出现了禁用字段 click"]
+    log.reflection = {"verdict": "猜对了", "actual": {}, "next_hint": "继续"}
+    assert "禁用字段 click" in _brief(log)["出了什么错"]
+
+
+def test_没出错就不占位():
+    from agent.loop import RoundLog, _brief
+
+    log = RoundLog(round_id=1, started_at="", run_id="x")
+    log.reflection = {"verdict": "猜对了", "actual": {}, "next_hint": "继续"}
+    assert "出了什么错" not in _brief(log)
+
+
+# ── 自创方案也要记账 ──────────────────────────────────────────
+
+
+class _只提自创的假模型(ScriptedLLM):
+    def _军师(self, schema):
+        out = super()._军师(schema)
+        for p in out["proposals"]:
+            p["card_id"], p["novel"] = "", True
+            p["how_to"] = "自己想的：按类目做兜底编码，K 从 20 起"
+        return out
+
+
+def test_自创方案会进已经试过的清单(tmp_path):
+    """以前 `if card_id:` 整段跳过 —— 自创方案不留痕，军师下一轮
+    完全不知道自己提过、更不知道被拒了，只能换个说法再提一遍。"""
+    看到的 = []
+    真propose = roles.propose
+
+    def 记一笔(*a, **kw):
+        看到的.append(kw.get("tried_before") or [])
+        return 真propose(*a, **kw)
+
+    import agent.loop as loop_mod
+    原 = loop_mod.roles.propose
+    loop_mod.roles.propose = 记一笔
+    try:
+        ex = DriftingExecutor()
+        run_session(
+            llm=_只提自创的假模型(promote_on=()), vocab=SymptomVocab.load(),
+            cards=CardLibrary.load(SymptomVocab.load()), executor=ex,
+            initial_report=ex.report("小份"),
+            module_interface="", example_module="", current_config="",
+            rounds=3, logs_dir=tmp_path)
+    finally:
+        loop_mod.roles.propose = 原
+
+    最后一轮看到的 = 看到的[-1]
+    assert 最后一轮看到的, "军师应该看到前面试过的自创方案"
+    assert any(t.get("card_id") == "（自创）" for t in 最后一轮看到的)
+    assert any("按类目做兜底编码" in (t.get("做法") or "") for t in 最后一轮看到的)
+
+
+def test_军师能拿到最近几轮的历史(vocab, cards):
+    """开药的人得看得到上一副药为什么没煎成。"""
+    看到的 = {}
+
+    class _FakeLLM:
+        ledger = Ledger()
+
+        def call(self, **kw):
+            看到的["user"] = kw["user"]
+            return {"proposals": [_提案()]}
+
+    roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门商品学不动"}],
+                  [cards.get("类目兜底")],
+                  history_brief=[{"轮次": 1, "结论": "没跑起来",
+                                  "出了什么错": "这些多值列读不进内存"}])
+    assert "最近几轮发生了什么" in 看到的["user"]
+    assert "读不进内存" in 看到的["user"]
+
+
+def test_没历史时不塞空块(vocab, cards):
+    看到的 = {}
+
+    class _FakeLLM:
+        ledger = Ledger()
+
+        def call(self, **kw):
+            看到的["user"] = kw["user"]
+            return {"proposals": [_提案()]}
+
+    roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门商品学不动"}],
+                  [cards.get("类目兜底")])
+    assert "最近几轮发生了什么" not in 看到的["user"]
