@@ -218,7 +218,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 ```bash
 .venv/bin/python -m agent.cli check                       # 词表与卡片是否自洽
-.venv/bin/python -m pytest tests/ -q                      # 138 个离线测试
+.venv/bin/python -m pytest tests/ -q                      # 全部离线测试（不联网、不花钱）
 .venv/bin/python -m agent.cli run --offline --rounds 8    # 假模型演习整场
 ```
 

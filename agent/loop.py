@@ -972,7 +972,7 @@ def run_session(
 
         已经在最高档上时返回 False —— 没地方可升了，交给调用方判停。
         """
-        nonlocal rung, cur, best_score, best, stale, no_finding_streak
+        nonlocal rung, cur, best_score, best, stale, no_finding_streak, noise_bands
         if rung >= len(FIDELITY_LADDER) - 1:
             return False
         rung += 1
@@ -986,6 +986,13 @@ def run_session(
         if result is not None and result.ok:
             cur = result.health_report
             summary.total_train_seconds += result.seconds
+            # 换档位之后噪声带必须跟着变 —— 正样本一多，抖动就小。
+            # 沿用起步档位的带子是一把过松的尺子：真实提升会被当噪声抹掉。
+            # 不重测（那要再烧 N 次训练），按样本量解析缩放。
+            if noise_bands:
+                from . import noise as _noise             # 延迟导入：不装 pandas 也能跑
+                noise_bands = _noise.rescale(noise_bands, cur)
+                print(f"  ↳ 噪声带{noise_bands.get('缩放说明', '')}")
         elif result is not None:
             # 重测没跑起来：档位照升，但沿用旧成绩单，并记一笔恢复事件
             print(f"  ⚠️ {fidelity}上的重测失败：{result.error}，沿用上一档的成绩单")
@@ -1042,16 +1049,27 @@ def run_session(
         log.interventions = len(fresh)
         log.intervention_notes = [e["干了什么"] for e in fresh]
 
-        # 快照：这一轮跑完之后流水线长什么样，交付物 #4 靠它还原
+        # ── 落盘：快照、日志、账本、待议架。每轮都写，中途断电也不丢 ──
+        #
+        # 整段包保险丝：四个角色都有保护，记账反而没有，那是最讽刺的死法 ——
+        # 这段跑在**昂贵的训练之后**，磁盘满、某个字段序列化不了、
+        # yaml dump 打个嗝，整场就挂在这里，连刚跑完那一轮的成果一起丢。
+        # 写失败只是少一份记录，不该让整场停下来。
         for path_ in log.patch_files:
             module_owner[path_] = rid
-        snapshot_round(logs_dir, log, effective_config(executor, current_config), module_owner)
-
-        # ── 落盘：日志、账本、待议架。每轮都写，中途断电也不丢 ──
-        log.dump(logs_dir / "rounds.jsonl")
-        time_ledger.dump(logs_dir / "time_ledger.json")
-        prior_ledger.dump(logs_dir / "prior_ledger.json")
-        shelf.dump(logs_dir / "shelf.json")
+        for 名字, 动作 in (
+            ("快照", lambda: snapshot_round(
+                logs_dir, log, effective_config(executor, current_config), module_owner)),
+            ("逐轮日志", lambda: log.dump(logs_dir / "rounds.jsonl")),
+            ("耗时账本", lambda: time_ledger.dump(logs_dir / "time_ledger.json")),
+            ("靠谱度账本", lambda: prior_ledger.dump(logs_dir / "prior_ledger.json")),
+            ("待议架", lambda: shelf.dump(logs_dir / "shelf.json")),
+        ):
+            try:
+                动作()
+            except Exception as exc:                 # noqa: BLE001
+                log.recoveries.append(f"{名字}写失败：{type(exc).__name__}: {exc}")
+                emit("recovery", text=f"{名字}写失败：{exc}")
 
         summary.rounds_run = rid
         summary.total_tokens = llm.ledger.total_tokens

@@ -410,6 +410,11 @@ class RealExecutor:
 
         require_labels=False 时目标数据可以没有标签（真测试集就是这样）。
         """
+        # 评分那条路在 run() 里已经查过一遍，但导出预测是从这里直接进来的 ——
+        # 不查的话，一份写着 deepfm 的配置会**悄悄训一个普通 LightGBM**，
+        # 给你一份看起来完全正常的预测文件，没有任何迹象说明它没按配置跑。
+        # 交付物 #4 是最终提交物，这种"看起来正常但其实不对"最要命。
+        check_supported(self.config)
         from lightgbm import LGBMClassifier
 
         train = self._read(self.train_path)

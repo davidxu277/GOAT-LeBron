@@ -13,6 +13,8 @@ import sys
 import pytest
 import yaml
 
+from conftest import need
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from agent.knowledge import Card, CardLibrary, SymptomVocab
@@ -1760,7 +1762,7 @@ def test_跑挂了的结果会标出是不是兑现不了():
 def _造数据(tmp_path, n=400):
     """造一份最小可训练数据：两个类别特征 + 点击 + 转化。"""
     pd = pytest.importorskip("pandas")
-    pytest.importorskip("lightgbm")
+    need("lightgbm")
     import numpy as np
 
     rng = np.random.default_rng(0)
@@ -1789,6 +1791,7 @@ def _配置(**train_over):
 
 
 def test_整条路_基线跑得完并出成绩单(tmp_path):
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -1802,6 +1805,7 @@ def test_整条路_基线跑得完并出成绩单(tmp_path):
 
 def test_整条路_改超参数真的会传到模型上(tmp_path):
     """R7：配置里写的数必须真的进模型，不是摆设。"""
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -1815,6 +1819,7 @@ def test_整条路_改超参数真的会传到模型上(tmp_path):
 
 def test_整条路_开早停跑得完(tmp_path):
     """早停从训练集内部切裁判，不碰被评的那份数据（R2/R3）。"""
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -1827,6 +1832,7 @@ def test_整条路_开早停跑得完(tmp_path):
 
 
 def test_整条路_开负采样跑得完且训练集变小(tmp_path):
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -1841,6 +1847,7 @@ def test_整条路_开负采样跑得完且训练集变小(tmp_path):
 
 def test_整条路_兑现不了的配置标成unsupported(tmp_path):
     """跑不了要跟跑崩了分开，否则会扣错卡片的信任分。"""
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -1854,6 +1861,7 @@ def test_整条路_兑现不了的配置标成unsupported(tmp_path):
 
 def test_整条路_训练崩了不算unsupported(tmp_path):
     """普通的崩溃仍然该扣分 —— 别把两种失败混成一种。"""
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -1981,6 +1989,7 @@ def _造无标签测试集(tmp_path, n=120):
 
 def test_预测_测试集没有标签也能出预测(tmp_path):
     """真测试集就是没标签的 —— 这条要是不通，交付物 #4 根本交不出来。"""
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -1991,6 +2000,7 @@ def test_预测_测试集没有标签也能出预测(tmp_path):
 
 
 def test_预测_概率都在0和1之间(tmp_path):
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -2003,6 +2013,7 @@ def test_预测_概率都在0和1之间(tmp_path):
 def test_预测_ctcvr是两者相乘(tmp_path):
     """口径写死：cvr 是 P(购买|点击) 这个条件概率，ctcvr 才是 P(点击且购买)。
     两者混用是这个赛题里最容易犯的错（见 ESMM 卡片）。"""
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -2013,6 +2024,7 @@ def test_预测_ctcvr是两者相乘(tmp_path):
 
 def test_预测_sample_id原样带出来(tmp_path):
     """对不上行就等于没交 —— 顺序和取值都不许动。"""
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     tr, va = _造数据(tmp_path)
@@ -2022,6 +2034,7 @@ def test_预测_sample_id原样带出来(tmp_path):
 
 
 def test_预测_没有sample_id要当场报错(tmp_path):
+    need("lightgbm")
     from harness.executor import RealExecutor
 
     pd = pytest.importorskip("pandas")
@@ -2040,6 +2053,7 @@ def test_预测_跟评分走同一条路(tmp_path):
     交上去的预测就跟验证时评的不是同一个模型，而且**分数完全正常**，
     根本看不出来。
     """
+    need("lightgbm")
     from harness.executor import RealExecutor
     from sklearn.metrics import roc_auc_score
 
@@ -2053,3 +2067,58 @@ def test_预测_跟评分走同一条路(tmp_path):
     m = out.merge(truth, on="sample_id")
     assert roc_auc_score(m["click"], m["ctr"]) == pytest.approx(
         report["验证集"]["点击分"], abs=1e-9)
+
+
+# ────────────────── 审查修掉的问题：回归锁 ──────────────────
+
+
+def test_落盘失败不该拖垮整场(tmp_path, monkeypatch):
+    """四个角色都有保险丝，记账反而没有 —— 那是最讽刺的死法。
+
+    这段跑在昂贵的训练之后：磁盘满、某个字段序列化不了，
+    整场挂在这里，连刚跑完那一轮的成果一起丢。
+    """
+    from agent import loop as loop_mod
+
+    def 写不了(*a, **kw):
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(loop_mod, "snapshot_round", 写不了)
+    llm, ex = ScriptedLLM(promote_on=()), DriftingExecutor()
+    summary = run_session(
+        llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
+        executor=ex, initial_report=ex.report("小份"),
+        module_interface="", example_module="", current_config="",
+        rounds=3, logs_dir=tmp_path,
+    )
+    assert summary.rounds_run == 3                      # 照跑不误
+    assert summary.recoveries >= 3                      # 但每次都记了一笔
+
+
+def test_噪声带_按样本量缩放到新档位():
+    """升档只换数据量重训，不重测噪声带 —— 正样本一多抖动就小，
+    沿用起步档位的带子是一把过松的尺子。"""
+    from agent import noise
+
+    小份 = [{"保真度": "小份", "验证集": {"总行数": 218000, "点击数": 8950,
+                                    "转化数": 38, "点击分": 0.61, "购买分": p}}
+           for p in (0.56, 0.60, 0.52)]
+    bands = noise.summarize(小份, [1, 2, 3])
+    assert bands["样本量"]["转化数"] == 38
+
+    放大 = noise.rescale(bands, {"保真度": "全量",
+                               "验证集": {"总行数": 2180000, "点击数": 89500, "转化数": 467}})
+    # 转化样本从 38 涨到 467，购买带必须明显收窄
+    assert 放大["分指标噪声带"]["购买AUC"] < bands["分指标噪声带"]["购买AUC"] / 2
+    assert 放大["分指标噪声带"]["点击AUC"] < bands["分指标噪声带"]["点击AUC"]
+    assert "缩放" in 放大["缩放说明"]
+
+
+def test_噪声带_缺样本量时原样返回并说明():
+    """悄悄用一把错的尺子，比没有尺子更糟。"""
+    from agent import noise
+
+    bands = {"分指标噪声带": {"点击AUC": 0.002}, "样本量": {}}
+    out = noise.rescale(bands, {"验证集": {}})
+    assert out["分指标噪声带"] == bands["分指标噪声带"]
+    assert "没做缩放" in out["缩放说明"]

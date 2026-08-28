@@ -374,11 +374,18 @@ def cmd_predict(args) -> int:
         print(f"用配置：{args.config}")
     elif args.round is not None:
         from .loop import read_snapshot
-        got = read_snapshot(pathlib.Path(args.logs), args.run or "", args.round)
+        logs = pathlib.Path(args.logs)
+        # 没指定哪一场就挑最新那场 —— restore 早就是这个行为，predict 也该一致，
+        # 不然同一件事在两条命令上要用两种写法
+        场次 = [args.run] if args.run else [
+            d.name for d in sorted((logs / "snapshots").glob("*")) if d.is_dir()]
+        got = next((g for run in reversed(场次)
+                    if (g := read_snapshot(logs, run, args.round)) is not None), None)
         if got is None:
+            有哪些 = "、".join(场次) or "（一场都没有）"
             raise SystemExit(
-                f"读不到第 {args.round} 轮的快照。先看看有哪些："
-                f"ls {args.logs}/snapshots/*/")
+                f"读不到第 {args.round} 轮的快照。现有的场次：{有哪些}\n"
+                f"用 --run <场次编号> 指定，或换一个 --round")
         config, files = got
         for rel, content in files.items():
             target = ROOT / rel
@@ -389,6 +396,10 @@ def cmd_predict(args) -> int:
     else:
         print("用当前的 config/pipeline.yaml")
 
+    if not args.train:
+        raise SystemExit(
+            "predict 要重新训一遍模型才能出预测，所以必须给 --train（还有 --val-features）。\n"
+            "不给的话会在底层抛一个看不懂的 TypeError —— 最后一天凌晨撞上这个最难查。")
     ex = RealExecutor(args.train, args.val_features or args.test,
                       args.val_labels, seed=args.seed, config=config)
     print(f"训练中（{args.fidelity}数据）……")

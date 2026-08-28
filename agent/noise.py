@@ -120,9 +120,13 @@ def summarize(reports: list[dict[str, Any]], seeds: list[int]) -> dict[str, Any]
         if any(r.get(key) for r in reports)
     }
 
+    val = (reports[0].get("验证集") or {}) if reports else {}
     bands = {
         "种子": seeds,
         "保真度": reports[0].get("保真度", "") if reports else "",
+        # 测量时的样本量 —— 换档位之后要靠它把带子解析地缩放过去（见 rescale）
+        "样本量": {"总行数": val.get("总行数"), "点击数": val.get("点击数"),
+                 "转化数": val.get("转化数")},
         "点击分": ctr,
         "购买分": cvr,
         # ⚠️ 门槛必须**分指标**：两个指标的抖动差一个数量级。
@@ -169,6 +173,66 @@ def render(bands: dict[str, Any]) -> str:
         "→ 分桶差距的判定阈值应该逐桶用上面这一列，而不是 symptoms.yaml 里那个统一的 0.03",
     ]
     return "\n".join(lines)
+
+
+def _counts(report: dict[str, Any]) -> dict[str, Any]:
+    val = report.get("验证集") or report.get("样本量") or {}
+    return {k: val.get(k) for k in ("总行数", "点击数", "转化数")}
+
+
+def _se_pair(auc: float, counts: dict[str, Any]) -> dict[str, float | None]:
+    """这份样本量下，两个指标各自的理论标准误。"""
+    总, 点击, 转化 = counts.get("总行数"), counts.get("点击数"), counts.get("转化数")
+    return {
+        "点击AUC": (hanley_mcneil_se(auc, 点击, 总 - 点击)
+                  if 总 and 点击 and 总 > 点击 else None),
+        # 购买 AUC 在点击子集上算：正样本=转化，负样本=点了没买
+        "购买AUC": (hanley_mcneil_se(auc, 转化, 点击 - 转化)
+                  if 点击 and 转化 and 点击 > 转化 else None),
+    }
+
+
+def rescale(bands: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    """按新档位的样本量，把噪声带解析地缩放过去。
+
+    为什么需要：升档只是换个数据量重训一次，**不会重测噪声带**。
+    而正样本一多，抖动就变小 —— 拿小份测出的带子（购买 ≈0.09）去卡全量的结果
+    （真实抖动可能只有 ≈0.02），是一把过松的尺子：0.03 的真实提升会被当噪声抹掉。
+
+    重测要再烧 N 次训练。这里改用 Hanley-McNeil 从正负样本数解析缩放：
+
+        新带 = 旧带 × SE理论(新样本量) ÷ SE理论(旧样本量)
+
+    保留了实测带的量级（它含种子效应这些公式覆盖不到的东西），
+    只把「样本量变了」这部分调过去。缩放不了（缺样本量、公式算不出）就原样返回，
+    并在 `缩放说明` 里写清楚为什么 —— 悄悄用一把错的尺子比没有尺子更糟。
+    """
+    旧 = bands.get("样本量") or {}
+    新 = _counts(report)
+    if not any(旧.values()) or not any(新.values()):
+        return {**bands, "缩放说明": "缺样本量，没做缩放，仍用测量档位的带子"}
+
+    out = dict(bands)
+    门槛 = dict(bands.get("分指标噪声带") or {})
+    均值 = {"点击AUC": (bands.get("点击分") or {}).get("均值", 0.6),
+           "购买AUC": (bands.get("购买分") or {}).get("均值", 0.6)}
+    说明 = []
+    for metric, 旧带 in 门槛.items():
+        auc = float(均值.get(metric) or 0.6)
+        se旧 = _se_pair(auc, 旧).get(metric)
+        se新 = _se_pair(auc, 新).get(metric)
+        if not se旧 or not se新 or not 旧带:
+            说明.append(f"{metric} 没缩放（算不出理论标准误）")
+            continue
+        门槛[metric] = round(旧带 * se新 / se旧, 5)
+        说明.append(f"{metric} {旧带:.4f} → {门槛[metric]:.4f}")
+
+    out["分指标噪声带"] = 门槛
+    out["样本量"] = 新
+    out["保真度"] = report.get("保真度", bands.get("保真度", ""))
+    out["缩放说明"] = (f"按样本量从「{bands.get('保真度') or '?'}」缩放到"
+                    f"「{out['保真度'] or '?'}」：" + "；".join(说明))
+    return out
 
 
 def measure(*, train: str, val_features: str, val_labels: str | None,
