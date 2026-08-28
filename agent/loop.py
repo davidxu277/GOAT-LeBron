@@ -22,7 +22,7 @@ import yaml
 from .events import emit
 from .knowledge import Card, CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
-from . import roles
+from . import noise, roles
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -806,7 +806,12 @@ def _with_bands(report: dict[str, Any], bands: dict[str, Any] | None) -> dict[st
         # 两头都错。这是医生判断"这个分组差距算不算病"该看的数字。
         "分指标": bands.get("分指标噪声带"),
         "单指标": bands.get("单指标噪声带"),   # 旧字段，判分组差距请用上面的「分指标」
-        "分组": {g: {k: v.get("购买分", {}).get("噪声带") for k, v in rows.items()}
+        # 逐桶取「这个桶该用的那把尺子」：缩放后的有效带 → 实测带 → 理论带。
+        # 直接读实测带是不行的 —— 保真度抽样只抽负样本，click=1 子集每个种子
+        # 完全相同，扰动不到购买塔，**每个桶实测出来都是 0.0000**。
+        # 门槛是 0 意味着任何分桶差距都算病，而「冷门商品学不动」「新用户不会做」
+        # 正是拿分桶差距判的。详见 agent/noise.py: bucket_band
+        "分组": {g: {k: noise.bucket_band(v) for k, v in rows.items()}
                 for g, rows in bands.get("分组", {}).items()},
         "怎么用": ("这是同配置换随机种子跑出来的抖动幅度。"
                  "任何小于它的差距都是噪声，不许当成病；"
@@ -841,6 +846,10 @@ class SessionSummary:
     # 锁定集上的分数（R3：整场只评一次）。空 = 没配锁定集，或裁决失败。
     holdout_scores: dict[str, float] = field(default_factory=dict)
     holdout_note: str = ""      # 锁定集大考的说明（跳过时写明为什么）
+    # 这一场用的噪声带是怎么来的：量在哪个档位、有没有缩放过、有没有过期。
+    # 必须进结果表 —— 「这次算不算真提升」全靠这把尺子，尺子刻度不对不会报错，
+    # 只会让结论慢慢错，读交付材料的人有权知道它当时对不对得上。
+    noise_note: str = ""
     baseline: dict[str, float] = field(default_factory=dict)
     total_tokens: int = 0
     total_train_seconds: float = 0.0
@@ -889,6 +898,8 @@ class SessionSummary:
                 lines.append(f"  {metric:<12} {value:.4f}{tail}")
         else:
             lines.append("锁定集裁决      未做（没配锁定集）—— 开发集分数可能偏乐观")
+        if self.noise_note:
+            lines.append(f"噪声带          {self.noise_note}")
         lines += [
             f"LLM token 总量  {self.total_tokens:,}",
             f"训练总时长      {self.total_train_seconds / 3600:.3f} GPU-小时"
@@ -964,6 +975,34 @@ def run_session(
     summary = SessionSummary(run_id=run_id, baseline=dict(baseline or {}),
                              total_train_seconds=initial_train_seconds)
 
+    # ── 开跑前先对一次尺子 ──
+    #
+    # 噪声带是在**某一个档位**上量出来的，只对那个档位有效。拿小份量的带子
+    # （购买 ≈0.09）去卡全量跑出来的结果（真实抖动可能只有 ≈0.02），是一把
+    # 过松的尺子：0.03 的真实提升会被判成「说不清」；反过来又会把噪声奖励成
+    # 「猜对了」白送 +0.15 信任分。
+    #
+    # 最坑的地方是它**不会报错**，只会让结论慢慢错，然后顺着信任分、黑名单、
+    # 升档决策一路传染。所以这里要么按样本量缩过去，要么把「没对上」写进
+    # 结果表，别让它默默溜过去。
+    if noise_bands:
+        量在, 起步 = noise_bands.get("保真度") or "?", FIDELITY_LADDER[rung]
+        if 量在 != 起步:
+            noise_bands = noise.rescale(noise_bands, cur)
+            noise_floor = float(noise_bands.get("单指标噪声带") or noise_floor)
+            summary.noise_note = (f"带子量在「{量在}」档、这一场从「{起步}」起步："
+                                  f"{noise_bands.get('缩放说明', '未能缩放')}")
+            print(f"  ↳ {summary.noise_note}")
+        else:
+            summary.noise_note = f"带子量在「{量在}」档，与起步档位一致"
+    else:
+        summary.noise_note = (
+            f"没测过噪声带，全程用 R11 的兜底门槛 {max(noise_floor, roles.MIN_REAL_GAIN):.4f}"
+            f"，而实测购买 AUC 的抖动能到 0.09（差 180 倍）"
+            f" —— 正式跑之前应该先 `agent.cli noise --seeds 3 "
+            f"--fidelity {FIDELITY_LADDER[rung]}`，否则「算不算真提升」没有依据")
+        print(f"⚠️ {summary.noise_note}\n")
+
     def escalate(round_id: int, reason: str) -> bool:
         """升一档数据，并在新档位上原样重测一次，拿到可比的新基准。
 
@@ -972,7 +1011,8 @@ def run_session(
 
         已经在最高档上时返回 False —— 没地方可升了，交给调用方判停。
         """
-        nonlocal rung, cur, best_score, best, stale, no_finding_streak, noise_bands
+        nonlocal rung, cur, best_score, best, stale, no_finding_streak
+        nonlocal noise_bands, noise_floor
         if rung >= len(FIDELITY_LADDER) - 1:
             return False
         rung += 1
@@ -990,15 +1030,27 @@ def run_session(
             # 沿用起步档位的带子是一把过松的尺子：真实提升会被当噪声抹掉。
             # 不重测（那要再烧 N 次训练），按样本量解析缩放。
             if noise_bands:
-                from . import noise as _noise             # 延迟导入：不装 pandas 也能跑
-                noise_bands = _noise.rescale(noise_bands, cur)
+                noise_bands = noise.rescale(noise_bands, cur)
+                # 标量门槛也得跟着走：分指标缺某个指标时，复盘官退回的正是它
+                noise_floor = float(noise_bands.get("单指标噪声带") or noise_floor)
+                summary.noise_note = f"升到{fidelity}时{noise_bands.get('缩放说明', '按样本量缩放')}"
                 print(f"  ↳ 噪声带{noise_bands.get('缩放说明', '')}")
-        elif result is not None:
-            # 重测没跑起来：档位照升，但沿用旧成绩单，并记一笔恢复事件
-            print(f"  ⚠️ {fidelity}上的重测失败：{result.error}，沿用上一档的成绩单")
-            emit("recovery", text=f"升档重测失败：{result.error}")
-            summary.recoveries += 1
-            summary.total_train_seconds += result.seconds
+        else:
+            if result is not None:
+                # 重测没跑起来：档位照升，但沿用旧成绩单，并记一笔恢复事件
+                print(f"  ⚠️ {fidelity}上的重测失败：{result.error}，沿用上一档的成绩单")
+                emit("recovery", text=f"升档重测失败：{result.error}")
+                summary.recoveries += 1
+                summary.total_train_seconds += result.seconds
+            if noise_bands:
+                # 拿不到新档位的样本量就缩不过去。之后几轮是在用上一档的尺子量
+                # 新档位的结果 —— 门槛偏松，真提升会被当噪声抹掉。
+                # 这件事不会抛异常，所以必须自己喊出来并写进交付材料。
+                summary.noise_note = (
+                    f"⚠️ 升到{fidelity}时重测没跑起来，噪声带仍停在"
+                    f"「{noise_bands.get('保真度') or '起步档位'}」档，"
+                    f"这之后的「算不算真提升」判定偏松")
+                emit("recovery", text=summary.noise_note)
         best_score = total_score(cur)
         # 升档后跨档分数不可比：当前流水线就是新档位上的最佳，轮次记为刚跑完那轮
         best = {"round": round_id, "report": cur, "fidelity": fidelity}

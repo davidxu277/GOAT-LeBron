@@ -78,6 +78,62 @@ def _collect_buckets(reports: list[dict[str, Any]], group_key: str) -> dict[str,
     return result
 
 
+def bucket_band(entry: dict[str, Any]) -> float:
+    """这个桶实际该用的购买分噪声带。
+
+    优先级：缩放到当前档位的有效带 → 换种子实测的带 → Hanley-McNeil 理论带。
+
+    为什么不能直接用实测带 —— 跟 `_effective_bands` 里那个坑是同一个，
+    只是从没在分桶这一层修过：保真度抽样只抽负样本、正样本全留，
+    `click=1` 子集在每个种子下完全相同，购买塔训的是同一批数据，
+    换种子扰动不到它，于是**每个桶实测出来都是 0.0000**。
+    照单全收的话医生拿到的门槛就是 0，任何分桶差距都能越过它 ——
+    而「冷门商品学不动」「新用户不会做」这两个病正是拿分桶差距判的，
+    等于把纯噪声当病治。
+    """
+    有效 = entry.get("购买分_有效噪声带")
+    if 有效:
+        return float(有效)
+    实测 = float((entry.get("购买分") or {}).get("噪声带") or 0.0)
+    if 实测:
+        return 实测
+    return float(entry.get("购买分_理论噪声带") or 0.0)
+
+
+def _rescale_buckets(bands: dict[str, Any],
+                     report: dict[str, Any]) -> dict[str, Any]:
+    """逐桶把带子缩放到新档位 —— 用**这个桶自己**的转化正样本数，不是全局那个。
+
+    分桶差距的判定必须跟这个桶自己的带子比（`symptoms.yaml` 里
+    「冷门商品学不动」「新用户不会做」都是这么写的）。全局带子缩窄了、
+    桶带子还停在起步档位，等于医生手里两把刻度不一样的尺子。
+    """
+    out: dict[str, Any] = {}
+    for group, rows in (bands.get("分组") or {}).items():
+        新行 = {r.get("区间"): r for r in (report.get(group) or [])}
+        新组: dict[str, Any] = {}
+        for name, entry in rows.items():
+            新 = dict(entry)
+            旧带 = bucket_band(entry)
+            旧pos = int(entry.get("转化正样本数") or 0)
+            新pos = (新行.get(name) or {}).get("转化正样本数")
+            auc = float((entry.get("购买分") or {}).get("均值") or 0.6)
+            # n_neg 用 20:1 的粗略比例 —— 跟 `_collect_buckets` 算理论带时同一套假设。
+            # 两边不一致的话，缩放比例本身就是错的。
+            se旧 = hanley_mcneil_se(auc, 旧pos, max(1, 旧pos * 20))
+            se新 = (hanley_mcneil_se(auc, int(新pos), max(1, int(新pos) * 20))
+                   if 新pos else None)
+            if 旧带 and se旧 and se新:
+                新["购买分_有效噪声带"] = round(旧带 * se新 / se旧, 5)
+                新["转化正样本数"] = int(新pos)
+            else:
+                # 缩放不了就把当前有效值原样固化下来，别让它悄悄退回 0
+                新["购买分_有效噪声带"] = 旧带
+            新组[name] = 新
+        out[group] = 新组
+    return out
+
+
 def _effective_bands(ctr: dict, cvr: dict,
                      reports: list[dict[str, Any]]) -> dict[str, float]:
     """每个指标各自的判定门槛。
@@ -228,6 +284,12 @@ def rescale(bands: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
         说明.append(f"{metric} {旧带:.4f} → {门槛[metric]:.4f}")
 
     out["分指标噪声带"] = 门槛
+    # 合成的标量门槛也得跟着缩 —— 它是两个分指标带取大的结果，
+    # 不同步的话 `_with_bands` 喂给医生的「单指标」和「分指标」会是两个档位的数，
+    # 而复盘官在缺分指标时退回的正是这个标量。
+    if 门槛:
+        out["单指标噪声带"] = round(max(门槛.values()), 5)
+    out["分组"] = _rescale_buckets(bands, report)
     out["样本量"] = 新
     out["保真度"] = report.get("保真度", bands.get("保真度", ""))
     out["缩放说明"] = (f"按样本量从「{bands.get('保真度') or '?'}」缩放到"

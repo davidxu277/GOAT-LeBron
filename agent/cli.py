@@ -276,7 +276,9 @@ def cmd_run(args) -> int:
         faults = {"医生": [args.fail_role_call]} if args.fail_role_call else {}
         llm = ScriptedLLM(faults=faults)
         executor = DriftingExecutor(fail_rounds=tuple(args.fail_round or ()))
-        initial, first_seconds = executor.report("小份"), 0.0
+        # 第 0 轮成绩单要标对档位 —— 标死「小份」的话，演习时 --start-fidelity
+        # 一换，噪声带缩放就会打印出「从小份缩放到小份」这种自相矛盾的说明
+        initial, first_seconds = executor.report(args.start_fidelity), 0.0
         # 演习产出的假日志绝不能混进交付物 —— 单独一个目录
         logs_dir = LOGS / "offline"
         print(f"离线演习：假模型 + 假执行器，不联网不花钱（日志写 {logs_dir}）\n")
@@ -312,7 +314,21 @@ def cmd_run(args) -> int:
 
     bands = _noise_bands()
     if bands:
-        print(f"读到实测噪声带：单指标 {bands['单指标噪声带']:.4f}\n")
+        分 = bands.get("分指标噪声带") or {}
+        量在 = bands.get("保真度") or "?"
+        print(f"读到实测噪声带（量在「{量在}」档）："
+              f"点击 {分.get('点击AUC') or 0:.5f} / 购买 {分.get('购买AUC') or 0:.5f}")
+        # 带子只对量它的那个档位有效。档位对不上会自动按样本量缩放，但缩放是
+        # 用 Hanley-McNeil 从正负样本数推的，覆盖不到种子效应 —— 真要准就得重测。
+        # 这件事不会报错，所以必须在开跑那一刻当面喊出来。
+        if 量在 != args.start_fidelity:
+            print(f"  ⚠️ 这一场从「{args.start_fidelity}」起步，跟带子的档位对不上。"
+                  f"会自动按样本量缩放，但更准的做法是先重测一次：\n"
+                  f"     python -m agent.cli noise --seeds 3 "
+                  f"--fidelity {args.start_fidelity} --train ... --val-features ...")
+        print()
+    # 没测过带子的情况由 run_session 统一喊 —— 那条同时会进结果表，
+    # 网页控制台那条路也走得到（它不经过这个 cli）
     summary = run_session(
         llm=llm, vocab=vocab, cards=cards, executor=executor,
         initial_report=initial,
