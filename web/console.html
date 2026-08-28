@@ -110,8 +110,9 @@ button:disabled{opacity:.45; cursor:not-allowed}
         <select id="mode">
           <option value="agent" selected>自主迭代（四个角色全程参与）</option>
           <option value="train">只跑一次训练（验证数据管线）</option>
+          <option value="predict">导出预测（交付物 #4 的原料）</option>
         </select>
-        <div class="row">
+        <div id="rowRounds" class="row">
           <div style="flex:1"><label>起步数据规模</label>
             <select id="fidelity">
               <option selected>小份</option><option>中份</option>
@@ -119,6 +120,22 @@ button:disabled{opacity:.45; cursor:not-allowed}
             </select></div>
           <div style="flex:1"><label id="lblRounds">最多几轮</label>
             <input id="rounds" value="5"></div>
+        </div>
+        <div id="rowPredict" style="display:none">
+          <label>测试集（要预测的那份，可以没有标签）</label>
+          <div class="picker"><input id="test" placeholder="选文件或分片目录">
+            <button class="pick" data-for="test" data-kind="folder" data-title="选择测试集目录">目录</button>
+            <button class="pick" data-for="test" data-kind="file" data-title="选择测试集文件">文件</button></div>
+          <label>用哪份配置（留空 = 当前 config/pipeline.yaml）</label>
+          <div class="picker"><input id="predConfig" placeholder="比如 deliverables/best_pipeline/config/pipeline.yaml">
+            <button class="pick" data-for="predConfig" data-kind="file" data-title="选择配置文件">文件</button></div>
+          <label>预测数据用多大（要跟训出最佳版本时用的一致）</label>
+          <select id="predFidelity">
+            <option>小份</option><option>中份</option>
+            <option>大份</option><option selected>全量</option>
+          </select>
+          <label>写到哪（.csv 或 .parquet）</label>
+          <input id="predOut" value="submissions/prediction.parquet">
         </div>
         <label>随机种子</label>
         <input id="seed" value="20260827">
@@ -167,9 +184,14 @@ async function toggleDetail(div){
 }
 
 function paths(){
-  return {train:$('train').value.trim(), val_features:$('valx').value.trim(),
-          val_labels:$('valy').value.trim(), fidelity:$('fidelity').value,
-          seed:$('seed').value, mode:$('mode').value,
+  const mode = $('mode').value;
+  const base = {train:$('train').value.trim(), val_features:$('valx').value.trim(),
+                val_labels:$('valy').value.trim(), seed:$('seed').value, mode};
+  if(mode === 'predict'){
+    return {...base, test:$('test').value.trim(), config:$('predConfig').value.trim(),
+            fidelity:$('predFidelity').value, out:$('predOut').value.trim()};
+  }
+  return {...base, fidelity:$('fidelity').value,
           rounds:parseInt($('rounds').value || '5', 10)};
 }
 
@@ -191,10 +213,12 @@ document.querySelectorAll('.pick').forEach(btn => {
 });
 
 $('mode').onchange = () => {
-  const agent = $('mode').value === 'agent';
-  $('btnRun').textContent = agent ? '开始自主迭代' : '开始训练';
+  const mode = $('mode').value, agent = mode === 'agent', predict = mode === 'predict';
+  $('btnRun').textContent = agent ? '开始自主迭代' : predict ? '开始导出预测' : '开始训练';
   $('lblRounds').textContent = agent ? '最多几轮' : '轮数（只跑训练时无效）';
   $('rounds').disabled = !agent;
+  $('rowRounds').style.display = predict ? 'none' : '';
+  $('rowPredict').style.display = predict ? '' : 'none';
 };
 $('mode').onchange();
 
@@ -307,6 +331,25 @@ function showResult(last){
        </div>
        <p class="empty" style="margin:.6rem 0 .3rem">停止原因：${esc(last.stopped_because)}</p>
        <div class="detail"><div class="dsec">${esc(last.summary_text)}</div></div></div>`);
+    return;
+  }
+  // 导出预测模式：展示写到哪、多少行、哪几列，外加前几行预览
+  if(last.mode === 'predict'){
+    const esc = s => (s||'').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    const rows = (last.preview || []).map(r =>
+      '<tr>' + last.columns.map(c => `<td>${esc(String(r[c]))}</td>`).join('') + '</tr>').join('');
+    $('runBox').querySelector('.result')?.remove();
+    $('runBox').insertAdjacentHTML('afterbegin',
+      `<div class="result"><div class="metrics">
+         <div class="metric"><b>${(last.rows||0).toLocaleString()}</b><span>行</span></div>
+       </div>
+       <p class="empty" style="margin:.6rem 0 .3rem">写入 ${esc(last.out)}</p>
+       <div class="detail"><table style="width:100%; font-size:.75rem; border-collapse:collapse">
+         <tr>${last.columns.map(c => `<th style="text-align:left; padding:.2rem .4rem">${esc(c)}</th>`).join('')}</tr>
+         ${rows}
+       </table></div>
+       <p class="empty" style="margin-top:.5rem">口径提醒：cvr 是 P(购买|点击) 条件概率，
+       ctcvr = ctr × cvr 才是 P(点击且购买)。</p></div>`);
     return;
   }
   const v = last.report['验证集'] || {}, t = last.report['训练集'] || {};

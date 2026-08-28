@@ -8,6 +8,7 @@
     POST /api/pick        弹出系统文件选择器（Finder），返回选中文件的真实路径
     POST /api/preflight   读数据、报规模与质量、亮红绿灯（不训练）
     POST /api/run         真的跑一轮：训练 → 预测 → 评分 → 成绩单
+                          （mode: train / agent / predict）
     GET  /api/events      读 logs/live_events.jsonl 的增量（轮询）
 """
 
@@ -20,6 +21,8 @@ import sys
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -146,15 +149,18 @@ def _pick_path(title: str, kind: str = "file") -> str:
 def _run_job(payload: dict) -> None:
     """后台线程里跑任务，结果放进 _state。
 
-    两种模式：
-      train  —— 只跑一次训练（不经过四个角色），用来验证数据管线通不通
-      agent  —— 完整的自主迭代 N 轮，医生/军师/工兵/复盘官全程参与
+    三种模式：
+      train    —— 只跑一次训练（不经过四个角色），用来验证数据管线通不通
+      agent    —— 完整的自主迭代 N 轮，医生/军师/工兵/复盘官全程参与
+      predict  —— 对测试集出预测并落盘（交付物 #4 的原料）
     """
     mode = payload.get("mode", "train")
     try:
         from agent.events import emit
         if mode == "agent":
             _run_agent(payload, emit)
+        elif mode == "predict":
+            _run_predict(payload, emit)
         else:
             _run_train_only(payload, emit)
     except Exception as exc:
@@ -182,6 +188,44 @@ def _run_train_only(payload: dict, emit) -> None:
                       "error": result.error, "report": result.health_report}
     emit("round_end", seconds=result.seconds,
          verdict="完成" if result.ok else "失败")
+
+
+def _run_predict(payload: dict, emit) -> None:
+    """对测试集出预测并落盘 —— 走 CLI 那条一模一样的路径（RealExecutor.predict_frame）。
+
+    不在这里重新拼一遍训练逻辑：那样会重蹈"两条路慢慢走岔，交上去的预测
+    跟验证时评的不是同一个模型"的覆辙，而且分数看着完全正常，根本发现不了。
+    """
+    from harness.executor import RealExecutor
+
+    test_path = payload.get("test") or payload["val_features"]
+    fidelity = payload.get("fidelity", "全量")
+    emit("phase", name="启动", detail=f"导出预测 · 保真度 {fidelity}")
+
+    config = None
+    if payload.get("config"):
+        cfg_path = pathlib.Path(payload["config"])
+        config = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        emit("phase", name="用配置", detail=str(cfg_path))
+
+    ex = RealExecutor(payload["train"], payload["val_features"],
+                      payload.get("val_labels") or None,
+                      seed=int(payload.get("seed", 20260827)), config=config)
+    out = ex.predict_frame(test_path, fidelity)
+
+    dest = pathlib.Path(payload.get("out") or "submissions/prediction.parquet")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.suffix == ".csv":
+        out.to_csv(dest, index=False)
+    else:
+        out.to_parquet(dest, index=False)
+
+    _state["last"] = {
+        "mode": "predict", "ok": True, "seconds": 0.0,
+        "out": str(dest), "rows": len(out), "columns": list(out.columns),
+        "preview": out.head(5).to_dict(orient="records"),
+    }
+    emit("round_end", verdict="完成")
 
 
 def _run_agent(payload: dict, emit) -> None:
