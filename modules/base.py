@@ -50,25 +50,41 @@ class FeatureOp(Protocol):
 
 
 class ModelOp(Protocol):
-    """改模型类零件。
+    """改模型类零件。范文见 modules/models/mlp.py —— **照着它写**。
 
-    返回的对象要能被训练循环直接使用；具体框架（torch / lightgbm）由零件自己决定，
-    但必须遵守下面的签名。
+    训练循环（epoch、早停、权重回滚）由主程序管，你只负责「模型长什么样」。
     """
 
-    def build(self, feature_spec: Any) -> Any:
-        """根据特征规格构造模型对象。
+    def __init__(self, config: dict[str, Any]) -> None:
+        """加载时会用整份 config 实例化你 —— 所以**必须**接一个 config 参数。
 
-        feature_spec 描述每个字段的类型、基数、embedding 维度。
-        模型的层数、维度、dropout 等全部从 config 读（R7）。
+        自己去 config 里挖自己那一块（`model.<你的名字>`），
+        层数、维度、dropout 等全部从那里读，代码里不许写死（R7）。
+        少了这个 `__init__`，加载时会当场 `TypeError: XxxOp() takes no arguments`。
         """
 
-    def predict(self, model: Any, df: Any) -> dict[str, Any]:
-        """输出预测。
+    def build(self, feature_spec: dict[str, Any]) -> Any:
+        """根据特征规格构造模型对象（torch.nn.Module）。
+
+        feature_spec 的确切形状：
+            {"fields": [字段名, ...],          # 顺序与 predict 输入的列顺序一致
+             "cardinality": {字段名: 取值个数},  # 建 embedding 表用
+             "embed_dim": int}
+        """
+
+    def predict(self, model: Any, x: Any) -> dict[str, Any]:
+        """前向。
+
+        ⚠️ 第二个参数**不是 DataFrame**，是已经编码好的整数张量
+        `torch.LongTensor`，形状 (行数, 字段数)，列顺序 = feature_spec["fields"]。
+        ID 已经在训练集上建表映射过了（未见过的值映射成 OOV），
+        你不需要、也拿不到原始列名 —— **别去 df 里按列名取东西**
+        （按论文里的 `ctr_label` / `cvr_label` 这类名字去取会当场 KeyError，
+        那是别的数据集的 schema）。
 
         必须返回 {"ctr": <每行的点击概率>, "cvr": <每行的购买概率>}。
-        购买概率的定义是 P(购买 | 点击)；报分时在哪些记录上算
-        由评估代码决定，零件不要自己筛（见 CLAUDE.md 第五节）。
+        购买概率的定义是 P(购买 | 点击)；标签由训练循环自己拿，不用你管，
+        报分时在哪些记录上算也由评估代码决定（见 CLAUDE.md 第五节）。
         """
 
 

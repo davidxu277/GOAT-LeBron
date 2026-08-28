@@ -47,6 +47,9 @@ INTERFACE_SPEC = (ROOT / "modules" / "base.py").read_text(encoding="utf-8")
 PIPELINE_CONFIG = (ROOT / "config" / "pipeline.yaml").read_text(encoding="utf-8")
 
 _EXAMPLES = {
+    # ⚠️ 顺序有意义：example_for 按「卡片的环节名里含哪个关键字」取第一个命中的。
+    # 「模型」必须排在前面 —— 不少卡的环节是「模型 + 损失函数」这种复合写法。
+    "模型": ROOT / "modules" / "models" / "mlp.py",
     "训练": ROOT / "modules" / "train" / "early_stopping.py",
     "特征": ROOT / "modules" / "features" / "frequency_bucket.py",
 }

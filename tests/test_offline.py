@@ -3070,3 +3070,48 @@ def test_内存守卫也护验证集(tmp_path, monkeypatch):
     monkeypatch.setattr(ex_mod, "available_memory_bytes", lambda: 1024)
     with pytest.raises(ex_mod.UnsupportedByExecutor):
         ex._guard_memory(d, ["sample_id", "101", "109_14"])
+
+
+# ── 工兵拿到的范文必须对得上它要写的东西 ────────────────────────
+#
+# 真跑撞出来的：第 4 轮工兵写 FinalMLP（模型类），却拿到了「训练」类的范文
+# （_EXAMPLES 里压根没有「模型」这一档，example_for 兜底返回训练那份），
+# 而 base.py 的 ModelOp 契约又没声明 __init__ —— 于是它写出一个不接 config
+# 的类，加载时 `TypeError: FinalMLPOp() takes no arguments`，整轮作废。
+
+
+def test_模型类方案拿到的是模型范文():
+    from agent.cli import example_for
+
+    模型范文 = example_for("模型")
+    assert "ModelOp" in 模型范文 and "def build" in 模型范文
+    assert "def on_epoch_end" not in 模型范文, "拿到的是训练类范文，不是模型类"
+
+
+def test_复合环节也能取对范文():
+    """不少卡的环节写成「模型 + 损失函数」这种复合形式。"""
+    from agent.cli import example_for
+
+    assert "def build" in example_for("模型 + 损失函数")
+    assert "def transform" in example_for("特征")
+    assert "def on_epoch_end" in example_for("训练策略")
+
+
+def test_范文自己要满足契约():
+    """范文是工兵唯一会照抄的东西 —— 它必须真的能被加载器实例化。"""
+    need("torch")
+    from harness.deep import load_model_op
+
+    op = load_model_op({"model": {"impl": "modules/models/mlp.py", "name": "mlp"}})
+    assert callable(getattr(op, "build", None))
+    assert callable(getattr(op, "predict", None))
+
+
+def test_契约写明了要接config():
+    """`load_model_op` 是用 (config) 实例化零件的，契约里必须说这件事，
+    否则工兵写个不接参数的类，加载时才炸。"""
+    契约 = pathlib.Path("modules/base.py").read_text(encoding="utf-8")
+    模型段 = 契约[契约.index("class ModelOp"):契约.index("class TrainOp")]
+    assert "__init__" in 模型段 and "config" in 模型段
+    # predict 的第二个参数是编码好的张量，不是 DataFrame —— 契约以前写反了
+    assert "不是 DataFrame" in 模型段 or "LongTensor" in 模型段
