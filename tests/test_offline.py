@@ -1932,3 +1932,24 @@ def test_噪声带_测得出来就用实测的():
                for i in range(3)]
     分 = noise.summarize(reports, seeds=[1, 2, 3])["分指标噪声带"]
     assert 分["购买AUC"] < 0.05          # 实测出了抖动，就不该退回 0.09 的理论带
+
+
+def test_事件流_可以改道到别处(tmp_path, monkeypatch):
+    """看板的事件流要能改道，否则测试会往真日志里灌假事件。"""
+    from agent import events
+
+    target = tmp_path / "ev.jsonl"
+    monkeypatch.setenv("AGENT_EVENTS_PATH", str(target))
+    events.emit("phase", name="测试用", detail="不该进真日志")
+    assert "测试用" in target.read_text(encoding="utf-8")
+
+
+def test_事件流_设成空就谁也不写(tmp_path, monkeypatch):
+    """测试套件用的就是这一档（见 tests/conftest.py）。"""
+    from agent import events
+
+    monkeypatch.setenv("AGENT_EVENTS_PATH", "")
+    before = events.EVENTS_PATH.stat().st_size if events.EVENTS_PATH.exists() else 0
+    events.emit("phase", name="绝对不该出现在任何文件里")
+    after = events.EVENTS_PATH.stat().st_size if events.EVENTS_PATH.exists() else 0
+    assert after == before
