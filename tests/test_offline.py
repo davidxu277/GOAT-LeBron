@@ -2122,3 +2122,112 @@ def test_噪声带_缺样本量时原样返回并说明():
     out = noise.rescale(bands, {"验证集": {}})
     assert out["分指标噪声带"] == bands["分指标噪声带"]
     assert "没做缩放" in out["缩放说明"]
+
+
+# ── 大数据集不能一次性读进内存（真撞过 OOM）──────────────────────
+#
+# large_25pct 的 train+public_test 加起来两千多万行，predict_frame 整份
+# 读进 16GB 的机器直接被系统强制杀掉（退出码 137）。修法：按可用内存
+# 分批读目标数据，模型只训一次，分批的只是"喂给它做预测的数据"。
+
+
+def _造多分片数据(tmp_path, dirname, n_shards=5, rows_per_shard=20):
+    """造一个"分片目录"——几个小 parquet 文件，模拟真实的 256 片布局。"""
+    pd = pytest.importorskip("pandas")
+    import numpy as np
+    d = tmp_path / dirname
+    d.mkdir()
+    rng = np.random.default_rng(3)
+    for i in range(n_shards):
+        df = pd.DataFrame({
+            "sample_id": range(i * rows_per_shard, (i + 1) * rows_per_shard),
+            "101": rng.integers(0, 7, rows_per_shard),
+            "205": rng.integers(0, 5, rows_per_shard),
+        })
+        df.to_parquet(d / f"part-{i:04d}.parquet")
+    return d
+
+
+def test_分批读取_内存预算够大时一批读完(tmp_path):
+    from harness.executor import read_in_batches
+
+    d = _造多分片数据(tmp_path, "big_enough")
+    批次 = list(read_in_batches(d, budget_bytes=10 * 1024 ** 3))  # 10GB 预算，随便装
+    assert len(批次) == 1
+    assert len(批次[0]) == 5 * 20
+
+
+def test_分批读取_预算小就拆成多批(tmp_path):
+    from harness.executor import read_in_batches
+
+    d = _造多分片数据(tmp_path, "tight")
+    # 量出单个分片的真实大小，预算刚好够 2 个分片
+    import pandas as pd
+    one = pd.read_parquet(sorted(d.glob("*.parquet"))[0])
+    per_shard = int(one.memory_usage(deep=True).sum())
+    批次 = list(read_in_batches(d, budget_bytes=per_shard * 2))
+    assert len(批次) > 1, "预算收紧了却还是一批读完，分批没生效"
+    assert sum(len(b) for b in 批次) == 100          # 行一行没丢
+
+
+def test_分批读取_合起来跟不分批结果一样(tmp_path):
+    """分几批是内存策略，不该影响"读到了什么"——总行数、sample_id 集合必须一致。"""
+    from harness.executor import read_in_batches
+    import pandas as pd
+
+    d = _造多分片数据(tmp_path, "consistency")
+    整批 = pd.concat(list(read_in_batches(d, budget_bytes=10 * 1024 ** 3)), ignore_index=True)
+    分批 = pd.concat(list(read_in_batches(d, budget_bytes=1024)), ignore_index=True)  # 预算小到逼近逐片读
+    assert set(整批["sample_id"]) == set(分批["sample_id"])
+    assert len(整批) == len(分批)
+
+
+def test_分批读取_单个文件不是目录也能读(tmp_path):
+    """不是分片数据集时（单个 parquet 文件），整份当一批——绕不开这个限制，
+    但至少不能报错或漏数据。"""
+    pd = pytest.importorskip("pandas")
+    from harness.executor import read_in_batches
+
+    p = tmp_path / "single.parquet"
+    pd.DataFrame({"sample_id": range(10), "101": range(10)}).to_parquet(p)
+    批次 = list(read_in_batches(p, budget_bytes=1))  # 预算给到 1 字节也没用，文件不可再拆
+    assert len(批次) == 1
+    assert len(批次[0]) == 10
+
+
+def test_可用内存_装不上psutil就退回保守默认(monkeypatch):
+    import builtins
+    from harness import executor
+
+    真实import = builtins.__import__
+
+    def 假装没装(name, *a, **kw):
+        if name == "psutil":
+            raise ImportError("模拟这台机器没装 psutil")
+        return 真实import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", 假装没装)
+    assert executor.available_memory_bytes() == 2 * 1024 ** 3
+
+
+def test_预测_大数据集分批也能出完整预测(tmp_path):
+    """端到端验证：目标数据分成好几个小分片，跟单个大文件相比，
+    分批处理不能丢行、不能变模型——这是真正防回归的那道关卡。"""
+    from harness.executor import RealExecutor
+
+    tr, va = _造数据(tmp_path)
+    多分片测试集 = _造多分片数据(tmp_path, "predict_target", n_shards=4, rows_per_shard=15)
+
+    ex = RealExecutor(tr, va, seed=1, config=_配置())
+    # 逼它分很多批：预算小到只够一两个分片
+    import harness.executor as _exec_mod
+    原始函数 = _exec_mod.available_memory_bytes
+    try:
+        _exec_mod.available_memory_bytes = lambda: 200 * 1024   # 极小，逼出多批
+        out = ex.predict_frame(多分片测试集, "全量")
+    finally:
+        _exec_mod.available_memory_bytes = 原始函数
+
+    assert len(out) == 60                               # 4 片 × 15 行，一行不丢
+    assert set(out["sample_id"]) == set(range(60))
+    assert out["ctr"].between(0, 1).all()

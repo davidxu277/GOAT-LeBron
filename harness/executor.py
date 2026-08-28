@@ -122,6 +122,85 @@ def apply_feature_ops(ops: list[tuple[str, Any]], train: pd.DataFrame,
     return train, others, [c for c in train.columns if c not in before]
 
 
+def _flatten_array(v):
+    """数组转单值。空数组不是错误 —— 它的含义是「用户和这个商品没有交集」，
+    本身就是有用的信号（509 有 77% 是空的），所以映射成一个专门的类别 -1。
+
+    模块级函数，不是某个方法里的闭包：训练时（`_fit`）和每一批预测时
+    （`_predict_chunk`）都要用同一份逻辑处理同一批字段，闭包各写一份
+    容易悄悄改出两个不一致的版本。
+    """
+    if isinstance(v, str) or not hasattr(v, "__len__"):
+        return v
+    return v[0] if len(v) else -1
+
+
+def transform_feature_ops(ops: list[tuple[str, Any]], df: pd.DataFrame) -> pd.DataFrame:
+    """零件已经 fit 过了，这里只做 transform —— 不重新 fit。
+
+    分批出预测时，每一批目标数据都要过一遍这个函数：统计量早就在训练集上
+    算好定死了（R2），每一批只是去"套用"，绝不能借机再看一眼这批数据自己长什么样。
+    """
+    for name, op in ops:
+        df = op.transform(df)
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(f"零件「{name}」的 transform 没有返回 DataFrame")
+    return df
+
+
+def available_memory_bytes() -> int:
+    """这台机器现在还剩多少可用内存。取不到就保守地当 2GB 处理——
+
+    宁可把批分小一点、多跑几批，也不要因为高估了内存又撞一次 OOM
+    （真实撞过：`large_25pct` 的 train+public_test 加起来两千多万行，
+    一次性读进内存，在 16GB 的机器上直接被系统强制杀掉，退出码 137）。
+    """
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        return 2 * 1024 ** 3
+
+
+def _list_shards(path: pathlib.Path) -> list[pathlib.Path]:
+    """跟 harness.data.read_any 用同一套"怎么找分片"的规则。"""
+    if path.is_dir():
+        shards = sorted(path.glob("*.parquet")) or sorted(path.glob("*.csv"))
+        if not shards:
+            raise FileNotFoundError(f"目录里没有 parquet/csv 分片：{path}")
+        return shards
+    return [path]
+
+
+def read_in_batches(path: pathlib.Path, budget_bytes: int):
+    """按内存预算把一份分片数据分批读出来，每批尽量多装但不超预算。
+
+    分片粒度：一批 = 若干个完整分片拼起来，不做分片内部的行级切分——
+    这份数据集的分片本身就不大（几万到十来万行一个），够用了。
+    单个文件（不是分片目录）会整份当一批，绕不开这个限制。
+
+    第一个分片读出来后，量它的**真实内存占用**（`memory_usage(deep=True)`，
+    把多值字段那种 object/数组列也算上，浅算会大幅低估），
+    用这个数字换算"一批能装几个分片"，后面所有批次沿用这个估计
+    ——不是精确值，但比瞎猜靠谱，而且只多读一个分片的成本，可以接受。
+    """
+    files = _list_shards(path)
+    per_shard_bytes: int | None = None
+    batch: list[pd.DataFrame] = []
+    batch_bytes = 0
+    for f in files:
+        df = pd.read_parquet(f) if f.suffix == ".parquet" else pd.read_csv(f)
+        if per_shard_bytes is None:
+            per_shard_bytes = max(1, int(df.memory_usage(deep=True).sum()))
+        if batch and batch_bytes + per_shard_bytes > budget_bytes:
+            yield pd.concat(batch, ignore_index=True)
+            batch, batch_bytes = [], 0
+        batch.append(df)
+        batch_bytes += per_shard_bytes
+    if batch:
+        yield pd.concat(batch, ignore_index=True)
+
+
 def lgbm_kwargs(base: dict[str, Any] | None,
                 overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """把配置里的超参数翻译成 LGBMClassifier 的入参，越界的夹回区间内。
@@ -386,29 +465,45 @@ class RealExecutor:
                          eval_path: pathlib.Path | None = None) -> dict[str, Any]:
         """训练并评分。eval_path 不给就用开发集；给了就在那份数据上评
         （锁定集用这条路 —— 训练逻辑完全一样，只换被评的数据）。"""
-        got = self._fit_predict(fidelity, eval_path, require_labels=True)
-        val_x, val_y, features = got["target"], got["labels"], got["features"]
+        bundle = self._fit(fidelity)
+        features = bundle["features"]
+
+        val_x = self._read(eval_path or self.val_features_path)
+        # 标签来源二选一：单独的私藏文件，或验证集自带（分片数据集常见）
+        有标签 = {"click", "conversion"} <= set(val_x.columns)
+        if eval_path is not None:
+            # 锁定集自带标签（跟开发集同源同格式），不走那份私藏文件
+            if not 有标签:
+                raise ValueError(f"锁定集 {eval_path} 里没有标签，无法当裁判")
+            val_y = val_x[["sample_id", "click", "conversion"]].copy()
+        elif self.val_labels_path is not None:
+            val_y = self._read(self.val_labels_path)
+        elif 有标签:
+            val_y = val_x[["sample_id", "click", "conversion"]].copy()
+        else:
+            raise ValueError("验证集不含标签，且没有提供 val_labels 文件，无法评分")
+
+        val_x, ctr_pred, cvr_pred = self._predict_chunk(bundle, val_x)
+
+        # 预测自检：宁可崩掉，也不产出格式对但内容有问题的结果
+        assert len(ctr_pred) == len(val_x), "预测行数与目标数据对不上"
+        assert not np.isnan(ctr_pred).any() and not np.isnan(cvr_pred).any(), "预测里有 NaN"
 
         merged = val_x[["sample_id"] + features].merge(val_y, on="sample_id", how="inner")
         assert len(merged) == len(val_x), "按 sample_id 关联后丢行了"
 
-        return self._build_report(merged, got["ctr_pred"], got["cvr_pred"],
-                                  got["train"], features,
-                                  got["ctr_model"], got["cvr_model"], fidelity,
-                                  ctr_kw=got["ctr_kw"], cvr_kw=got["cvr_kw"],
-                                  op_names=got["op_names"])
+        return self._build_report(merged, ctr_pred, cvr_pred,
+                                  bundle["train"], features,
+                                  bundle["ctr_model"], bundle["cvr_model"], fidelity,
+                                  ctr_kw=bundle["ctr_kw"], cvr_kw=bundle["cvr_kw"],
+                                  op_names=[name for name, _ in bundle["ops"]])
 
-    def _fit_predict(self, fidelity: str,
-                     eval_path: pathlib.Path | None = None,
-                     *, require_labels: bool = True) -> dict[str, Any]:
-        """训练 + 对目标数据出预测。评分和导出预测**都走这一条**。
+    def _fit(self, fidelity: str) -> dict[str, Any]:
+        """只训练，不碰任何目标数据。返回一份"拟合好的家当"。
 
-        为什么不让导出预测自己写一份：那样两条路会慢慢走岔 ——
-        加特征零件、禁用字段拦截、数组字段拍平、类别转换、负采样后的概率还原，
-        任何一步只改了一边，交上去的预测就跟验证时评的不是同一个模型。
-        这正是我们这两天一直在抓的那类 bug，不能自己再造一个。
-
-        require_labels=False 时目标数据可以没有标签（真测试集就是这样）。
+        评分（`_train_and_score`）和导出预测（`predict_frame`）**都从这里拿家当**，
+        区别只在于拿着它去预测哪份数据、要不要分批喂——不能各自训一遍，
+        那样连"两边是不是同一个模型"都保证不了，这正是我们这两天一直在抓的那类 bug。
         """
         # 评分那条路在 run() 里已经查过一遍，但导出预测是从这里直接进来的 ——
         # 不查的话，一份写着 deepfm 的配置会**悄悄训一个普通 LightGBM**，
@@ -425,32 +520,13 @@ class RealExecutor:
             neg = train[train["click"] == 0].sample(frac=frac, random_state=self.seed)
             train = pd.concat([pos, neg]).sample(frac=1.0, random_state=self.seed)
 
-        val_x = self._read(eval_path or self.val_features_path)
-        # 标签来源二选一：单独的私藏文件，或验证集自带（分片数据集常见）
-        val_y = None
-        有标签 = {"click", "conversion"} <= set(val_x.columns)
-        if not require_labels:
-            # 导出预测走这条：真测试集没有标签，也不需要
-            val_y = val_x[["sample_id", "click", "conversion"]].copy() if 有标签 else None
-        elif eval_path is not None:
-            # 锁定集自带标签（跟开发集同源同格式），不走那份私藏文件
-            if not 有标签:
-                raise ValueError(f"锁定集 {eval_path} 里没有标签，无法当裁判")
-            val_y = val_x[["sample_id", "click", "conversion"]].copy()
-        elif self.val_labels_path is not None:
-            val_y = self._read(self.val_labels_path)
-        elif 有标签:
-            val_y = val_x[["sample_id", "click", "conversion"]].copy()
-        else:
-            raise ValueError("验证集不含标签，且没有提供 val_labels 文件，无法评分")
-
         # 特征清单从配置读（R7）—— 工兵改 features.base_fields 才真的生效。
         # 写死在代码里的话，医生诊断出「特征没用上」也没人能修。
         wanted = (self.config.get("features") or {}).get("base_fields") or BASE_FEATURES
         # 装上配置里启用的加特征零件 —— 以前工兵写的零件文件躺在 modules/ 下
         # 从来没有被 import 过，训练结果纹丝不动却被记成"这个方案没用"
         ops = load_feature_ops(self.config)
-        train, (val_x,), 新列 = apply_feature_ops(ops, train, [val_x])
+        train, _, 新列 = apply_feature_ops(ops, train, [])
 
         features = [str(c) for c in wanted if str(c) in train.columns]
         missing = [str(c) for c in wanted if str(c) not in train.columns]
@@ -458,7 +534,7 @@ class RealExecutor:
             emit("phase", name="特征缺失",
                  detail=f"配置里有 {len(missing)} 个字段数据里没有：{missing[:5]}")
         # 零件新长出来的列自动进特征表，工兵不用再记得改 base_fields
-        features += [c for c in 新列 if c in val_x.columns and c not in features]
+        features += [c for c in 新列 if c in train.columns and c not in features]
         if not features:
             raise ValueError(f"配置里的特征一个都不在数据里：{wanted[:8]}")
         guard_features(features)          # R1 运行时防线（新列也走这一关）
@@ -468,14 +544,12 @@ class RealExecutor:
         # 数组不能直接当类别特征 —— LightGBM 要求可哈希，会当场抛
         # 「unhashable type: numpy.ndarray」。单值的拆出来用，
         # 真多值的交给专门的编码零件（见「多值字段接回来」那张卡），这里先跳过。
-        def _flatten(v):
-            """数组转单值。空数组不是错误 —— 它的含义是「用户和这个商品没有交集」，
-            本身就是有用的信号（509 有 77% 是空的），所以映射成一个专门的类别 -1。"""
-            if isinstance(v, str) or not hasattr(v, "__len__"):
-                return v
-            return v[0] if len(v) else -1
-
+        #
+        # 这里定下的"拍平哪些列、跳过哪些列"要原样喂给 _predict_chunk，
+        # 每一批目标数据都照这份决定处理——不能每批自己重新判断一次，
+        # 万一某一批恰好该字段全是单值，会跟训练时的决定对不上。
         multivalue: list[str] = []
+        flatten_cols: list[str] = []
         for col in list(features):
             if not train[col].map(lambda v: hasattr(v, "__len__")
                                   and not isinstance(v, str)).any():
@@ -487,15 +561,14 @@ class RealExecutor:
                 multivalue.append(col)
                 features.remove(col)
                 continue
-            train[col] = train[col].map(_flatten)
-            val_x[col] = val_x[col].map(_flatten)
+            train[col] = train[col].map(_flatten_array)
+            flatten_cols.append(col)
         if multivalue:
             emit("phase", name="跳过多值字段",
                  detail=f"{multivalue} 是真多值，需要编码零件才能用")
 
         for col in features:
             train[col] = train[col].astype("category")
-            val_x[col] = val_x[col].astype("category")
 
         # 负采样：负样本按比例抽，正样本全留（R7，比例从配置读）。
         # 收益是训练更快、购买塔正负比更平衡；预测出来的概率整体偏大，
@@ -565,29 +638,51 @@ class RealExecutor:
             cvr_model.fit(clicked[features], clicked["conversion"],
                           categorical_feature=features, **cvr_extra)
 
-        ctr_pred = ctr_model.predict_proba(val_x[features])[:, 1]
-        cvr_pred = (cvr_model.predict_proba(val_x[features])[:, 1] if cvr_model is not None
-                    else np.full(len(val_x), float(clicked["conversion"].mean() or 0.005)))
-        if keep_ratio < 1.0:
+        return {
+            "features": features, "flatten_cols": flatten_cols, "ops": ops,
+            "keep_ratio": keep_ratio, "train": train,
+            "ctr_model": ctr_model, "cvr_model": cvr_model,
+            "cvr_fallback": float(clicked["conversion"].mean() or 0.005),
+            "ctr_kw": ctr_kw, "cvr_kw": cvr_kw,
+        }
+
+    def _predict_chunk(self, bundle: dict[str, Any], target: pd.DataFrame
+                       ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+        """拿 `_fit` 拟合好的家当，对**一批**目标数据出预测。
+
+        不重新 fit 任何东西——零件的统计量、多值字段的拍平/跳过决定、
+        特征列表，全部沿用训练时定的那份，保证不管分几批喂、每一批用的
+        都是同一个模型、同一套处理方式。
+
+        返回处理后的 target（带上零件新长出的列，供调用方拼成绩单用）
+        和两个预测数组。
+        """
+        features = bundle["features"]
+        target = transform_feature_ops(bundle["ops"], target)
+        for col in bundle["flatten_cols"]:
+            if col in target.columns:
+                target[col] = target[col].map(_flatten_array)
+        for col in features:
+            target[col] = target[col].astype("category")
+
+        ctr_pred = bundle["ctr_model"].predict_proba(target[features])[:, 1]
+        cvr_pred = (bundle["cvr_model"].predict_proba(target[features])[:, 1]
+                   if bundle["cvr_model"] is not None
+                   else np.full(len(target), bundle["cvr_fallback"]))
+        if bundle["keep_ratio"] < 1.0:
             # 只有点击塔的负样本被抽掉了；购买塔用的是 click=1 子集，不受影响
-            ctr_pred = np.asarray(recalibrate(ctr_pred, keep_ratio))
-
-        # 预测自检：宁可崩掉，也不产出格式对但内容有问题的结果
-        assert len(ctr_pred) == len(val_x), "预测行数与目标数据对不上"
-        assert not np.isnan(ctr_pred).any() and not np.isnan(cvr_pred).any(), "预测里有 NaN"
-
-        return {"target": val_x, "labels": val_y, "features": features,
-                "ctr_pred": ctr_pred, "cvr_pred": cvr_pred, "train": train,
-                "ctr_model": ctr_model, "cvr_model": cvr_model,
-                "ctr_kw": ctr_kw, "cvr_kw": cvr_kw,
-                "op_names": [name for name, _ in ops]}
+            ctr_pred = np.asarray(recalibrate(ctr_pred, bundle["keep_ratio"]))
+        return target, ctr_pred, cvr_pred
 
     def predict_frame(self, test_path: str | pathlib.Path,
                       fidelity: str = "全量") -> pd.DataFrame:
         """对一份数据出预测，返回 DataFrame（交付物 #4 的原料）。
 
-        跟评分**完全同一条训练路径**（`_fit_predict`），只是目标数据换成测试集、
-        不要求它带标签。所以交上去的预测，就是验证时评的那个模型出的。
+        跟评分**同一条训练路径**（先 `_fit` 训一次，再用 `_predict_chunk` 出预测），
+        只是目标数据换成测试集、不要求它带标签，而且**按内存预算分批读**——
+        真撞过 OOM：`large_25pct` 的 train+public_test 加起来两千多万行，
+        一次性读进 16GB 的机器直接被系统杀掉。模型只训一次，分批的只是
+        "喂给它做预测的数据"，所以不管分几批，出来的都是同一个模型的结果。
 
         列的含义：
             sample_id  原样带出来，用来跟官方的行对齐
@@ -596,16 +691,26 @@ class RealExecutor:
             ctcvr      P(点击且购买) = ctr × cvr，顺手给出，
                        因为不同评测脚本要的口径不一样（见 docs/baseline笔记.md Q1）
         """
-        got = self._fit_predict(fidelity, pathlib.Path(test_path),
-                                require_labels=False)
-        target, ctr, cvr = got["target"], got["ctr_pred"], got["cvr_pred"]
-        if "sample_id" not in target.columns:
-            raise ValueError(f"{test_path} 里没有 sample_id，预测没法跟官方的行对齐")
-        out = pd.DataFrame({
-            "sample_id": target["sample_id"].to_numpy(),
-            "ctr": ctr, "cvr": cvr, "ctcvr": ctr * cvr,
-        })
-        emit("phase", name="导出预测", detail=f"{len(out):,} 行 · {fidelity}训练")
+        bundle = self._fit(fidelity)
+        budget = min(2 * 1024 ** 3, max(256 * 1024 ** 2, available_memory_bytes() // 4))
+        emit("phase", name="导出预测", detail=f"分批读取 · 每批预算约 {budget // 1024**2}MB")
+
+        chunks: list[pd.DataFrame] = []
+        total = 0
+        for raw in read_in_batches(pathlib.Path(test_path), budget):
+            if "sample_id" not in raw.columns:
+                raise ValueError(f"{test_path} 里没有 sample_id，预测没法跟官方的行对齐")
+            target, ctr, cvr = self._predict_chunk(bundle, raw)
+            chunks.append(pd.DataFrame({
+                "sample_id": target["sample_id"].to_numpy(),
+                "ctr": ctr, "cvr": cvr, "ctcvr": ctr * cvr,
+            }))
+            total += len(target)
+            emit("phase", name="导出预测·进度", detail=f"已出 {total:,} 行")
+
+        out = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(
+            columns=["sample_id", "ctr", "cvr", "ctcvr"])
+        emit("phase", name="导出预测完成", detail=f"{len(out):,} 行 · {fidelity}训练")
         return out
 
     def _build_report(self, val, ctr_pred, cvr_pred, train, features,
