@@ -25,7 +25,15 @@
    零件类自己去 config 里挖 `features.<名字>` 这一块（范文里就是这么写的），
    所以两边的名字必须对上。新长出来的特征列会自动进特征表，不用改 base_fields。
 
-3. **绝对不许把这五个字段放进模型输入**：
+3. **config_patch 的顶层键只能是这三个**：`features` / `model` / `train`。
+
+   写了别的（`data`、`eval`、数据规模…）会被当场打回，你这一轮就白跑了。
+   那几棵子树由人和调度器管 —— 它们一旦被改，各轮的分数就不可比了，
+   等于考到一半偷偷换考卷。
+
+   想加字段进模型，改的是 `features.base_fields`，**不是** `data`。
+
+4. **绝对不许把这五个字段放进模型输入**：
    sample_id、common_id、click、conversion、ctcvr
    其中 ctcvr = click × conversion，放进去等于直接把答案告诉模型。
 
