@@ -74,10 +74,12 @@ def _load_fixtures() -> dict:
 
 
 def _add_data_args(p) -> None:
-    """三条数据路径。给了就用真执行器，不给就用假的。"""
+    """三条数据路径 + 锁定集。给了 --train 就用真执行器，不给就用假的。"""
     p.add_argument("--train", help="训练集：单个文件或分片目录")
     p.add_argument("--val-features", help="验证集特征")
     p.add_argument("--val-labels", help="验证集标签（验证集自带标签时可省）")
+    p.add_argument("--holdout", help="锁定集（R3）：全程只读一次，用于收敛后的最终裁决，"
+                                     "不给就跳过大考，不算错")
     p.add_argument("--seed", type=int, default=20260827, help="随机种子（CLAUDE.md R8）")
 
 
@@ -89,7 +91,8 @@ def _make_executor(args, fallback_report: dict):
         raise SystemExit("给了 --train 就必须给 --val-features")
     from harness.executor import RealExecutor
     return RealExecutor(args.train, args.val_features, args.val_labels,
-                        seed=args.seed), True
+                        seed=args.seed,
+                        holdout_path=getattr(args, "holdout", None)), True
 
 
 def _initial_report(executor, real: bool, fallback: dict,

@@ -201,7 +201,8 @@ def _run_agent(payload: dict, emit) -> None:
     vocab = SymptomVocab.load()
     executor = RealExecutor(payload["train"], payload["val_features"],
                             payload.get("val_labels") or None,
-                            seed=int(payload.get("seed", 20260827)))
+                            seed=int(payload.get("seed", 20260827)),
+                            holdout_path=payload.get("holdout") or None)
     # 第一份成绩单：先跑一次基线，医生要看着它做第一次诊断
     emit("phase", name="跑基线", detail="给医生第一份成绩单")
     base = executor.run({"new_files": [], "config_patch": ""}, fidelity)
