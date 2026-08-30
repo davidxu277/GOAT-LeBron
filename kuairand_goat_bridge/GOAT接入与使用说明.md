@@ -1,5 +1,9 @@
 # GOAT-LeBron 接入 KuaiRand Bridge 使用说明
 
+> 最新推荐入口：编辑`configs/kuairand_task.yaml`，先运行`goat-run --dry-run`，
+> 再运行`goat-run`。该入口会自动创建KuaiRand执行器、接入GOAT多轮循环、
+> 按官方规则收敛并整理最终输出。完整命令见根目录`README.md`开头。
+
 这份说明写给刚拿到 `kuairand_goat_bridge` 文件夹的合作者。目标是把自己电脑上的
 GOAT-LeBron 或其他训练程序连接到官方 KuaiRand-Pure 数据和评分脚本。
 

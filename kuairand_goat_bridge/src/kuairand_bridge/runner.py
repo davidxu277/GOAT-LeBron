@@ -24,9 +24,23 @@ def _load_trainer(path):
     return mod
 
 
-def run_trainer(data_dir, trainer_path, output_dir="output", seed=0, make_test=False):
+def run_trainer(data_dir, trainer_path, output_dir="output", seed=0, make_test=False,
+                agent_patch=None):
     dataset = load_dataset(data_dir)
     trainer = _load_trainer(trainer_path)
+    patch = agent_patch or {"new_files": [], "config_patch": ""}
+    history_has_changes = any(
+        p.get("new_files") or p.get("config_patch") for p in (patch.get("history") or [])
+    )
+    has_changes = bool(patch.get("new_files") or patch.get("config_patch")
+                       or history_has_changes)
+    if has_changes:
+        hook = getattr(trainer, "apply_agent_patch", None)
+        if not callable(hook):
+            raise NotImplementedError(
+                "本轮包含 Agent 修改，但 trainer 没有实现 apply_agent_patch(patch, output_dir)。"
+                "Bridge 不会静默忽略修改，否则这一轮分数没有意义。")
+        hook(patch, pathlib.Path(output_dir))
     model = trainer.fit(dataset.train, dataset.valid, seed=seed)
     valid_scores = np.asarray(trainer.predict(model, dataset.valid), dtype=float).reshape(-1)
     work = pathlib.Path(output_dir)

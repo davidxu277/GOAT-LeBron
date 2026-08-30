@@ -1,1 +1,3 @@
 numpy>=1.24
+PyYAML>=6.0
+# 一键自主GOAT模式还需要：pip install -e '.[goat]'

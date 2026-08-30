@@ -1,0 +1,11 @@
+KuaiRand Trainer 插件接口：
+
+1. fit(train, valid, seed=0) -> model
+2. predict(model, split) -> 一维score数组
+3. apply_agent_patch(patch, output_dir) -> None
+
+正式标签只有 long_view。正式输出只有一个 score。
+任何统计量、词表、分桶边界只能使用Train拟合。
+不得读取dataset.test.rows内部标签，不得把long_view作为输入特征。
+Agent新建的文件只能在Trainer自己的受控实验目录中加载。
+配置修改应使用 model.* / features.* / train.* 前缀。

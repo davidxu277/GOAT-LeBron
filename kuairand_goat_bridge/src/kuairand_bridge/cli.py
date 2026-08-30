@@ -24,11 +24,18 @@ def main(argv=None):
     q.add_argument("--data-dir", required=True); q.add_argument("--trainer", required=True)
     q.add_argument("--output-dir", default="output"); q.add_argument("--seed", type=int, default=0)
     q.add_argument("--make-test", action="store_true")
+    q = sub.add_parser("goat-run")
+    q.add_argument("--config", required=True)
+    q.add_argument("--dry-run", action="store_true",
+                   help="只检查路径和参数，不调用LLM或训练")
     a = p.parse_args(argv)
 
     if a.command == "run-trainer":
         print(json.dumps(run_trainer(a.data_dir, a.trainer, a.output_dir, a.seed, a.make_test),
                          ensure_ascii=False, indent=2)); return
+    if a.command == "goat-run":
+        from .goat_run import run
+        print(json.dumps(run(a.config, a.dry_run), ensure_ascii=False, indent=2)); return
     dataset = load_dataset(a.data_dir)
     if a.command == "preflight":
         report = {"status": "ok", "data_dir": str(dataset.data_dir),

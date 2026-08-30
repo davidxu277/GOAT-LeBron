@@ -1,0 +1,12 @@
+编号: pairwise_loss
+名字: 用户内Pairwise排序损失
+治哪些毛病: [排序损失不匹配, Top5排序不足]
+属于哪个环节: 训练策略
+为什么管用: 在同一用户内构造正负视频对，使训练目标直接优化相对次序，更接近GAUC和nDCG。
+预计能提多少: {点击AUC: 0.008, 购买AUC: 0.008}
+要花多少力气: {代码难度: 中等, 训练时间倍数: 2.0}
+前提条件: [Trainer支持自定义loss]
+靠不靠谱: 0.7
+怎么实现: 仅在Train中按user_id构造long_view正负对，新增可配置pairwise loss模块。
+失败信号: 训练耗时显著上升但Validation Primary没有超过0.002提升。
+出处: BPR ranking loss

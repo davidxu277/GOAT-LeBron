@@ -63,17 +63,24 @@ class DatasetBundle:
         return getattr(self, name)
 
     def official_encoded(self):
-        """Official FM-compatible arrays; test y must not be used by Agent."""
-        raw = {name: self.split(name).rows for name in ("train", "valid", "test")}
-        return module("data").encode(raw)
+        """Official FM-compatible arrays with the test label replaced by None."""
+        safe_test = [tuple(r[:6]) + (0,) for r in self.test.rows]
+        raw = {"train": self.train.rows, "valid": self.valid.rows, "test": safe_test}
+        encoded, dim = module("data").encode(raw)
+        test_x, _discarded, test_users = encoded["test"]
+        encoded["test"] = (test_x, None, test_users)
+        return encoded, dim
 
 
 def load_dataset(data_dir: str | pathlib.Path) -> DatasetBundle:
     data_dir = pathlib.Path(data_dir).expanduser().resolve()
     raw = module("data").load(str(data_dir))
+    # Discard local test labels at the boundary. Hiding only ``test.labels`` is
+    # insufficient because a trainer could otherwise read row[6] directly.
+    test_rows = [tuple(r[:6]) + (None,) for r in raw["test"]]
     return DatasetBundle(
         train=SplitView("train", raw["train"], True),
         valid=SplitView("valid", raw["valid"], True),
-        test=SplitView("test", raw["test"], False),
+        test=SplitView("test", test_rows, False),
         data_dir=data_dir,
     )

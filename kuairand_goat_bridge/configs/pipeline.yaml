@@ -1,0 +1,20 @@
+task:
+  dataset: KuaiRand-Pure
+  label: long_view
+  ranking_scope: within_user
+  metrics: [GAUC, nDCG@5]
+
+features:
+  fields: [user_id, video_id, author_id, tab, duration_ms]
+
+model:
+  name: item_popularity
+  prior: 20.0
+
+train:
+  seed: 0
+
+evaluation:
+  primary: mean_gauc_ndcg5
+  epsilon: 0.002
+  patience: 3

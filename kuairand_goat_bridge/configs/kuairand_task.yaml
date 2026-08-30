@@ -1,0 +1,14 @@
+data_dir: /path/to/KuaiRand-Pure/data
+trainer: examples/tunable_popularity_trainer.py
+output_dir: output/full_run
+
+seed: 0
+max_rounds: 50
+epsilon: 0.002
+patience: 3
+max_wall_seconds: 21600
+token_budget: 2000000
+generate_test_after_convergence: true
+
+# GOAT LLM credentials are read from its normal environment, for example:
+# DEEPSEEK_API_KEY / ANTHROPIC_API_KEY.

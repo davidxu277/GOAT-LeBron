@@ -1,8 +1,10 @@
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
 output/*
 !output/.gitkeep
 KuaiRand-Pure/
 raw_data/
 prediction_template_valid.csv
+configs/local_task.yaml

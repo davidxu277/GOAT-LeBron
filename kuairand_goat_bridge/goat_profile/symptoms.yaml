@@ -1,0 +1,38 @@
+version: "1.0"
+symptoms:
+  - id: 冷门视频排序不足
+    detect: 冷门视频相较热门视频的用户内排序质量明显更差，且样本量足够。
+    needs: 按训练集中视频出现次数分组的GAUC和nDCG@5。
+    core: true
+  - id: Top5排序不足
+    detect: GAUC尚可但nDCG@5明显落后，说明列表顶部质量不足。
+    needs: GAUC、nDCG@5及相对官方基线差值。
+    core: true
+  - id: 排序损失不匹配
+    detect: 当前使用pointwise分类损失，但目标是用户内GAUC和nDCG@5排序。
+    needs: 当前损失函数和官方指标。
+    core: true
+  - id: 用户历史未使用
+    detect: 模型没有利用训练期用户行为序列或历史聚合信息。
+    needs: 当前特征与历史构造方式。
+    core: false
+  - id: 时间漂移
+    detect: 训练期与验证期按日期分布变化明显，模型验证表现下降。
+    needs: 日期分组指标与特征分布。
+    core: false
+  - id: 训练过拟合
+    detect: 训练排序指标明显高于Validation，且差距超过噪声。
+    needs: 训练与Validation指标。
+    core: false
+  - id: 训练太慢
+    detect: 单轮耗时占6小时预算比例过高。
+    needs: 单轮耗时与总墙钟预算。
+    core: false
+  - id: 结果不稳定
+    detect: 同配置不同随机种子的Primary波动超过0.002。
+    needs: 多随机种子结果。
+    core: false
+  - id: 数据或预测错位
+    detect: 行数、row_id、user_id、video_id不匹配，或score含NaN/Inf。
+    needs: Bridge格式检查结果。
+    core: true

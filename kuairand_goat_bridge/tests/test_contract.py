@@ -19,6 +19,12 @@ class ContractTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             _ = split.labels
 
+    def test_loaded_test_rows_can_be_sanitized(self):
+        raw = (20220429, "u", "v", "a", "t", 1.0, 1)
+        sanitized = tuple(raw[:6]) + (None,)
+        split = SplitView("test", [sanitized], False)
+        self.assertIsNone(split.rows[0][6])
+
     def test_score_only_csv_becomes_official_submission(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
