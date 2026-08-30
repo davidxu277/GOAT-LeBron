@@ -77,6 +77,59 @@ def read_any(path: str | pathlib.Path, columns: list[str] | None = None) -> pd.D
     return pd.read_csv(p, usecols=columns)
 
 
+def available_columns(path: str | pathlib.Path) -> list[str]:
+    """只读首个分片的 schema，返回列名，不加载任何数据行。"""
+    p = pathlib.Path(path)
+    first = ((sorted(p.glob("*.parquet")) or sorted(p.glob("*.csv")))[0]
+             if p.is_dir() else p)
+    if first.suffix == ".parquet":
+        import pyarrow.parquet as pq
+        return list(pq.ParquetFile(first).schema_arrow.names)
+    return list(pd.read_csv(first, nrows=0).columns)
+
+
+def read_training_sample(path: str | pathlib.Path, negative_fraction: float,
+                         seed: int, columns: list[str] | None = None) -> pd.DataFrame:
+    """读取训练集，并在每个分片内先抽负样本再合并。
+
+    AliCCP 的 Parquet 在磁盘上是压缩的；若先把几百个分片全部解压拼接，再做
+    fidelity 抽样，16GB 内存会在抽样开始前耗尽。这里保持原有规则不变：
+    click=1 全留、click=0 按比例抽，只把抽完的行放进最终 DataFrame。
+
+    这只用于训练集。验证集和锁定集仍走 read_any，绝不会参与抽样统计（R2/R3）。
+    """
+    if not 0.0 < negative_fraction <= 1.0:
+        raise ValueError(f"negative_fraction 必须在 (0, 1]，收到 {negative_fraction}")
+
+    p = pathlib.Path(path)
+    if p.is_dir():
+        shards = sorted(p.glob("*.parquet")) or sorted(p.glob("*.csv"))
+        if not shards:
+            raise FileNotFoundError(f"目录里没有 parquet/csv 分片：{p}")
+    else:
+        shards = [p]
+
+    sampled: list[pd.DataFrame] = []
+    for shard_index, shard in enumerate(shards):
+        frame = (pd.read_parquet(shard, columns=columns) if shard.suffix == ".parquet"
+                 else pd.read_csv(shard, usecols=columns))
+        if "click" not in frame.columns:
+            raise ValueError(f"训练分片缺少 click 标签：{shard}")
+        invalid = ~frame["click"].isin((0, 1))
+        if invalid.any():
+            raise ValueError(f"训练分片 click 只能是 0/1：{shard}")
+
+        if negative_fraction < 1.0:
+            positive = frame[frame["click"] == 1]
+            negative = frame[frame["click"] == 0].sample(
+                frac=negative_fraction, random_state=seed + shard_index)
+            frame = pd.concat([positive, negative], ignore_index=True)
+        sampled.append(frame)
+
+    result = pd.concat(sampled, ignore_index=True)
+    return result.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+
 def count_rows(path: str | pathlib.Path) -> int:
     """只读元数据数行数，不把数据载进内存 —— 预检时几百万行也很快。"""
     p = pathlib.Path(path)
