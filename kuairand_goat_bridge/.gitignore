@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+output/*
+!output/.gitkeep
+KuaiRand-Pure/
+raw_data/
+prediction_template_valid.csv

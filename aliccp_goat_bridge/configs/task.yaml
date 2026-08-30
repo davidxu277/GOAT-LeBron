@@ -1,0 +1,36 @@
+# Shared contract for Member 1: Data & Evaluation.
+dataset:
+  processed_dir: data_processed
+  default_size: small
+  sizes:
+    small: small_0.5pct
+    medium: medium_5pct
+    large: large_25pct
+    full: full
+    review: sample_run
+  splits:
+    train: train
+    val: val
+    public_test: public_test
+  user_id_field: "101"
+  item_id_field: "205"
+  labels: [click, conversion]
+  excluded_model_inputs: [sample_id, common_id, click, conversion, ctcvr]
+  sampling:
+    unit: user
+    algorithm: seeded_blake2b_hash
+    seed_source: command_line_or_generated
+    nested_sizes: true
+
+evaluation:
+  prediction_columns: [sample_id, ctr, cvr, ctcvr]
+  ctr_auc_scope: all_exposures
+  cvr_auc_scope: clicked_exposures_only
+  also_report_cvr_on_all: true
+  official_script_integrated: false
+
+artifacts:
+  schema: aliccp_tools/schema/aliccp_schema.json
+  small_vs_large: small_vs_large_validation.csv
+  experiment_results: results/experiments
+  final_results: results/final

@@ -1,0 +1,48 @@
+{
+  "dataset": "AliCCP medium 5%",
+  "sampling_seed": "12345678",
+  "sampling_unit": "user_id_101_with_common_id_fallback",
+  "splits": {
+    "train": {
+      "exposures": 1912077,
+      "click_positives": 73804,
+      "conversion_positives": 388,
+      "label_combinations": {
+        "click=0,conversion=0": 1838273,
+        "click=1,conversion=0": 73416,
+        "click=1,conversion=1": 388
+      },
+      "ctr": 0.03859886395788454,
+      "cvr_among_clicked": 0.005257167633190613
+    },
+    "val": {
+      "exposures": 217974,
+      "click_positives": 8950,
+      "conversion_positives": 38,
+      "label_combinations": {
+        "click=0,conversion=0": 209024,
+        "click=1,conversion=0": 8912,
+        "click=1,conversion=1": 38
+      },
+      "ctr": 0.04105994292897318,
+      "cvr_among_clicked": 0.004245810055865922
+    },
+    "public_test": {
+      "exposures": 2176298,
+      "click_positives": 85586,
+      "conversion_positives": 467,
+      "label_combinations": {
+        "click=0,conversion=0": 2090712,
+        "click=1,conversion=0": 85119,
+        "click=1,conversion=1": 467
+      },
+      "ctr": 0.03932641577578071,
+      "cvr_among_clicked": 0.005456499894842614
+    }
+  },
+  "notes": [
+    "CTR is click positives divided by all exposures.",
+    "CVR is conversion positives divided by clicked exposures.",
+    "All invalid click=0,conversion=1 rows were excluded during preprocessing."
+  ]
+}

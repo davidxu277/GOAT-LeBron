@@ -1,0 +1,13 @@
+{
+  "status": "succeeded",
+  "rows": 217974,
+  "clicked_rows": 8950,
+  "click_positives": 8950,
+  "conversion_positives_in_clicked": 38,
+  "ctr_auc": 0.5664717889710134,
+  "cvr_auc": 0.5016683596333743,
+  "cvr_auc_all": 0.45540452001360127,
+  "warnings": [],
+  "labels_path": "/Users/huyaofu/Documents/GitHub/Original_raw/data_processed/medium_5pct/val",
+  "predictions_path": "/Users/huyaofu/Documents/GitHub/TJ2026/nise_medium_seed_12345678/results/val_prediction_lightgbm_tj2026.parquet"
+}
