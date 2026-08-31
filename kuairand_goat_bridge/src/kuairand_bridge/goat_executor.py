@@ -244,6 +244,7 @@ class KuaiRandGoatExecutor:
         remaining_iterations: int,
         elapsed_seconds: float,
         remaining_seconds: float,
+        executor_round: int,
     ) -> dict[str, Any]:
         gauc = float(metrics["GAUC"])
         ndcg = float(metrics["nDCG@5"])
@@ -304,6 +305,9 @@ class KuaiRandGoatExecutor:
                 ),
                 "剩余墙钟秒数": (
                     remaining_seconds
+                ),
+                "执行器轮次": int(
+                    executor_round
                 ),
             },
             "官方结果目录": str(
@@ -390,6 +394,9 @@ class KuaiRandGoatExecutor:
             self._patch_history.append(
                 normalized
             )
+            executor_round = (
+                len(self._patch_history) - 1
+            )
 
             effective_patch = {
                 "new_files": list(
@@ -439,6 +446,7 @@ class KuaiRandGoatExecutor:
                 remaining_seconds=(
                     self.remaining_seconds
                 ),
+                executor_round=executor_round
             )
 
             return BridgeRunResult(

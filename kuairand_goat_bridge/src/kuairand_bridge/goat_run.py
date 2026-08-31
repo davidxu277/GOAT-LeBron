@@ -436,7 +436,8 @@ def run(
     )
     interface = (
         profile
-        / "model_interface.py.txt"
+        / "modules"
+        / "base.py"
     ).read_text(
         encoding="utf-8"
     )
@@ -492,8 +493,18 @@ def run(
         logs_dir=logs,
     )
 
+    best_report_path = (
+        logs / "best_report.json"
+    )
+
+    best_report = json.loads(
+        best_report_path.read_text(
+            encoding="utf-8"
+        )
+    )
+
     executor.select_round(
-        int(summary.best_round)
+        int(best_report["执行器轮次"])
     )
 
     final = None

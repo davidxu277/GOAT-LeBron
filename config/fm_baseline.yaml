@@ -1,0 +1,12 @@
+# KuaiRand-Pure 官方 Factorization Machine 配方。
+# 仅包含传给 official_fm_trainer.fit(config=...) 的配置。
+model:
+  name: fm
+  k: 16
+  learning_rate: 0.001
+
+train:
+  epochs: 40
+  batch_size: 8192
+  early_stopping_patience: 4
+  min_delta: 0.00001

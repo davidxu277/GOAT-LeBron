@@ -1,9 +1,8 @@
 data_dir: D:/GOAT-LeBron/dataset/KuaiRand-Pure/KuaiRand-Pure/data
-# 用 GOAT Trainer：它把 harness/ 那套「Agent 自己写代码」的能力接了进来
-# （FeatureOp / ModelOp / TrainOp 加载 + embedding 表 + epoch 循环 + 最佳权重回滚）。
-# 想只做超参数实验、或要一条纯净的官方基线，换回 examples/official_fm_trainer.py。
-trainer: examples/goat_trainer.py
-output_dir: output/full_run
+trainer: examples/official_fm_trainer.py
+
+# 必须使用全新目录，不能继续复用 output/full_run
+output_dir: output/fm_baseline_seed0
 
 seed: 0
 max_iterations: 50
@@ -12,44 +11,26 @@ patience: 3
 max_wall_seconds: 21600
 token_budget: 2000000
 generate_test_after_convergence: true
-# GOAT MLP 与官方 FM 是不同模型，默认只把官方分数作为对照基线，
-# 不要求第 0 轮在 ±0.003 内复现 FM。切回 official_fm_trainer.py 时可设为 true。
-require_baseline_reproduction: false
+
+# 第0轮必须复现官方FM
+require_baseline_reproduction: true
 
 trainer_config:
-  # goat_trainer 的键名。想换回 official_fm_trainer 的话，
-  # 这一段要改成它那套（model.k / model.learning_rate / train.epochs …）
-  features:
-    # Agent 写的加特征零件挂在这里：
-    #   <名字>: {enabled: true, impl: modules/features/xxx.py, ...参数}
-    # 启用了却没写 impl 会直接报错 —— 静默无效是最坑的形态
-
   model:
-    name: goat_mlp
-    impl: modules/models/mlp.py       # Agent 可以改成自己写的模型零件
-    mlp:
-      hidden: [128, 64]
-      tower: [32]
-      dropout: 0.1
-    deep:
-      device: auto                    # 有 CUDA 就用 CUDA，否则安全退回 CPU（Mac 可运行）
-      epochs: 12
-      batch_size: 8192
-      learning_rate: 0.003
-      embed_dim: 16
-      weight_decay: 0.00001
+    name: fm
+    k: 16
+    learning_rate: 0.001
 
   train:
-    # Agent 写的训练过程零件（早停 / SWA / 学习率调度）挂在这里：
-    #   <名字>: {enabled: true, impl: modules/train/xxx.py, ...参数}
-    early_stopping:
-      inner_holdout_frac: 0.1
+    epochs: 40
+    batch_size: 8192
+    early_stopping_patience: 4
+    min_delta: 0.00001
 
 official_baseline:
   validation:
     GAUC: 0.6674
     nDCG@5: 0.5357
-
     primary: 0.60155
 
   hidden_test:
@@ -58,6 +39,5 @@ official_baseline:
     primary: 0.5946
 
   reproduction_tolerance: 0.003
-
 # GOAT LLM credentials are read from its normal environment, for example:
 # DEEPSEEK_API_KEY / ANTHROPIC_API_KEY.
