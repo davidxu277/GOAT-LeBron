@@ -3363,9 +3363,17 @@ def test_范文自己要满足契约():
     need("torch")
     from harness.deep import load_model_op
 
-    op = load_model_op({"model": {"impl": "modules/models/mlp.py", "name": "mlp"}})
+    完整配置 = {"model": {"impl": "modules/models/mlp.py", "name": "mlp",
+                       "mlp": {"hidden": [8], "tower": [4], "dropout": 0.0}}}
+    op = load_model_op(完整配置)
     assert callable(getattr(op, "build", None))
     assert callable(getattr(op, "predict", None))
+
+    # 参数不给全就该当场报错，不许静默用默认值（R7）——
+    # 有默认值最坑的不是"值不对"，是掩盖配置拼写错误
+    with pytest.raises(ValueError, match="缺少"):
+        load_model_op({"model": {"impl": "modules/models/mlp.py", "name": "mlp",
+                                 "mlp": {"hidden": [8], "tower": [4]}}})
 
 
 def test_契约写明了要接config():
@@ -3430,3 +3438,104 @@ def test_危险信号_差距不大时不干涉(vocab):
     roles.diagnose(_FakeLLM(), vocab,
                    {"训练集": {"点击分": 0.57}, "验证集": {"点击分": 0.56}})
     captured["validate"]({"findings": [], "no_finding": True, "reason_if_none": "都在噪声带内"})
+
+
+# ────────────────── 目标编码：训练集必须走折外，否则是目标泄漏 ──────────────────
+
+
+def _目标编码零件(seed=0, smoothing=0):
+    from harness.executor import _load_op_class_by
+    cfg = {"train": {"seed": seed},
+           "features": {"目标编码": {
+               "enabled": True, "impl": "modules/features/target_encoding.py",
+               "target_col": "click", "fields": ["101"],
+               "smoothing": smoothing, "n_folds": 5}}}
+    Op = _load_op_class_by(
+        "modules/features/target_encoding.py", ("fit", "transform"), "FeatureOp")
+    return Op(cfg)
+
+
+def _只出现一次的数据():
+    pd = pytest.importorskip("pandas")
+    # A 标签 1、B 标签 0，各只出现一次 —— 泄漏时编码值会**等于这一行自己的标签**
+    return pd.DataFrame({"101": ["A", "B"] + [f"x{i}" for i in range(18)],
+                         "click": [1, 0] + [i % 2 for i in range(18)]})
+
+
+def test_目标编码_训练集走折外不再把答案抄进特征():
+    """旧路径对训练集调普通 transform：每一行用**包含自己标签**的统计量给自己编码。
+
+    只出现一次的 ID 最能说明问题 —— 编码值会精确等于这一行的标签。
+    模型只要读这一列就能"预测"训练集，开发集分数虚高，而日志上看不出来。
+    """
+    pytest.importorskip("pandas")
+    df = _只出现一次的数据()
+    op = _目标编码零件()
+    op.fit(df)
+    col = "target_enc_0_101"
+
+    泄漏 = op.transform(df.copy())[col].head(2).tolist()
+    assert 泄漏 == [1.0, 0.0]                      # 编码值 == 自己的标签，这就是泄漏
+
+    折外 = op.transform_train(df.copy())[col].head(2).tolist()
+    assert 折外 == [op.global_mean, op.global_mean]  # 自己那折看不到自己，退回全局均值
+
+
+def test_目标编码_执行器真的走了折外那条():
+    """零件写好了防泄漏的通道，但加载器不调用它 —— 那跟没写一样。"""
+    pytest.importorskip("pandas")
+    from harness.executor import apply_feature_ops
+
+    df = _只出现一次的数据()
+    op = _目标编码零件()
+    出, _, 新列 = apply_feature_ops([("目标编码", op)], df.copy(), [])
+    assert 新列 == ["target_enc_0_101"]
+    assert 出["target_enc_0_101"].head(2).tolist() == [op.global_mean, op.global_mean]
+
+
+def test_目标编码_验证集仍用全训练集统计量():
+    """折外只适用于训练集。验证集本来就没参与统计，用全量统计量才是对的。"""
+    pytest.importorskip("pandas")
+    df = _只出现一次的数据()
+    op = _目标编码零件()
+    op.fit(df)
+    验证 = op.transform(df.copy())          # 模拟验证集走 transform
+    assert 验证["target_enc_0_101"].head(2).tolist() == [1.0, 0.0]
+
+
+def test_目标编码_折分种子从配置读():
+    """写死 random_state=42 时，跑三个种子做稳定性实验，折分始终不变 ——
+    等于把这部分随机性人为抹掉了（也违反 R7）。"""
+    pytest.importorskip("pandas")
+    df = _只出现一次的数据()
+    a, b = _目标编码零件(seed=1), _目标编码零件(seed=2)
+    assert a.seed == 1 and b.seed == 2
+    a.fit(df); b.fit(df)
+    assert any(list(a._fold_rows[i]) != list(b._fold_rows[i]) for i in a._fold_rows)
+
+
+def test_目标编码_目标列不再默认那个不存在的列():
+    """原来默认 target_col='ctr_label'，那一列在任何数据里都不存在，一启用就炸。"""
+    pytest.importorskip("pandas")
+    from harness.executor import _load_op_class_by
+
+    Op = _load_op_class_by(
+        "modules/features/target_encoding.py", ("fit", "transform"), "FeatureOp")
+    op = Op({"train": {"seed": 0},
+             "features": {"目标编码": {"fields": ["101"], "smoothing": 0, "n_folds": 5}}})
+    op.fit(_只出现一次的数据())
+    assert op.target_col == "click"        # 没配就从数据里认出来
+
+
+def test_加特征零件都声明了needs():
+    """不声明 needs()，执行器只能读整张表 —— 而这些零件本来就是为省内存写的。"""
+    pytest.importorskip("pandas")
+    from harness.executor import _load_op_class_by
+
+    for name in ("target_encoding", "sequence_summary", "category_fallback",
+                 "frequency_bucket"):
+        path = pathlib.Path("modules/features") / f"{name}.py"
+        if not path.exists():
+            continue
+        cls = _load_op_class_by(str(path), ("fit", "transform"), "FeatureOp")
+        assert callable(getattr(cls, "needs", None)), f"{name} 没声明 needs()"

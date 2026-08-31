@@ -48,9 +48,17 @@ class MLPModel:
 
     def __init__(self, config: dict[str, Any]):
         cfg = ((config.get("model") or {}).get("mlp")) or {}
-        self.hidden = [int(value) for value in cfg.get("hidden", [128, 64])]
-        self.tower = [int(value) for value in cfg.get("tower", [32])]
-        self.dropout = float(cfg.get("dropout", 0.1))
+        # 不给默认值（R7：所有参数从配置读）。
+        # 有默认值最坑的不是"值不对"，是**掩盖配置错误**：
+        # 把 hidden 打成 hiden，它静默用 [128,64] 跑完，你还以为配置生效了。
+        缺 = [k for k in ("hidden", "tower", "dropout") if k not in cfg]
+        if 缺:
+            raise ValueError(
+                f"配置 model.mlp 缺少 {缺} —— 这三项必须显式写出来。"
+                f"当前 model.mlp 有的键：{sorted(cfg)}")
+        self.hidden = [int(value) for value in cfg["hidden"]]
+        self.tower = [int(value) for value in cfg["tower"]]
+        self.dropout = float(cfg["dropout"])
 
     def build(self, feature_spec: dict[str, Any]) -> nn.Module:
         return SharedBottomMLP(

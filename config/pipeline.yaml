@@ -54,6 +54,8 @@ features:
 
   目标编码:
     enabled: false
+    impl: modules/features/target_encoding.py    # 缺这行启用后直接报错
+    target_col: click                            # 目标列（KuaiRand 上是 label）
     fields: ["101", "205", "206"]
     smoothing: 20                  # 平滑强度，越大越靠近全局先验
     n_folds: 5                     # 折外计算，防泄漏（R2）

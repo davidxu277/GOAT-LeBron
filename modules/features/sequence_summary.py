@@ -24,6 +24,10 @@ class SequenceSummary:
         if unknown:
             raise ValueError(f"不支持的序列摘要：{sorted(unknown)}")
 
+    def needs(self) -> list[str]:
+        """要读哪些列。本来就是为了省内存写的零件，不声明反而会整表加载。"""
+        return list(self.fields) if hasattr(self, "fields") else []
+
     def fit(self, train_df: pd.DataFrame) -> None:
         """只校验训练集字段；本零件不从验证集学习任何统计量。"""
         missing = self._missing_columns(train_df)

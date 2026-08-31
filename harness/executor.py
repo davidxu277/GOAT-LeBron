@@ -124,7 +124,12 @@ def apply_feature_ops(ops: list[tuple[str, Any]], train: pd.DataFrame,
     for name, op in ops:
         emit("phase", name="装零件", detail=name)
         op.fit(train)
-        train = op.transform(train)
+        # 训练集优先走零件自己的折外通道 —— 目标编码这类零件，
+        # 用 transform 会让每一行"用包含自己标签的统计量"给自己编码，
+        # 那是目标泄漏：分数虚高、日志上看不出来、到测试集才现原形。
+        # 零件提供了 transform_train 就说明它知道这件事，让它自己处理。
+        训练变换 = getattr(op, "transform_train", None)
+        train = 训练变换(train) if callable(训练变换) else op.transform(train)
         others = [op.transform(df) for df in others]
         if not isinstance(train, pd.DataFrame):
             raise TypeError(f"零件「{name}」的 transform 没有返回 DataFrame")

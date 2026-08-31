@@ -47,6 +47,10 @@ class CategoryFallback:
         self.frequent_items: set[str] | None = None
         self.category_freq_mean: pd.Series | None = None   # 类目->频繁商品的平均出现次数
 
+    def needs(self) -> list[str]:
+        """要读哪些列。不声明的话执行器只能读整张表。"""
+        return [self.field, self.category_field]
+
     def fit(self, train_df: pd.DataFrame) -> None:
         """只在训练集上统计（R2）。"""
         self.item_count = train_df[self.item_field].value_counts()
