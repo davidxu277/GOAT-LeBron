@@ -1,14 +1,40 @@
-data_dir: /path/to/KuaiRand-Pure/data
-trainer: examples/tunable_popularity_trainer.py
+data_dir: D:/GOAT-LeBron/dataset/KuaiRand-Pure/KuaiRand-Pure/data
+trainer: examples/official_fm_trainer.py
 output_dir: output/full_run
 
 seed: 0
-max_rounds: 50
+max_iterations: 50
 epsilon: 0.002
 patience: 3
 max_wall_seconds: 21600
 token_budget: 2000000
 generate_test_after_convergence: true
+
+trainer_config:
+  model:
+    name: fm
+    k: 16
+    learning_rate: 0.001
+
+  train:
+    epochs: 40
+    batch_size: 8192
+    early_stopping_patience: 4
+    min_delta: 0.00001
+
+official_baseline:
+  validation:
+    GAUC: 0.6674
+    nDCG@5: 0.5357
+
+    primary: 0.60155
+
+  hidden_test:
+    GAUC: 0.6610
+    nDCG@5: 0.5282
+    primary: 0.5946
+
+  reproduction_tolerance: 0.003
 
 # GOAT LLM credentials are read from its normal environment, for example:
 # DEEPSEEK_API_KEY / ANTHROPIC_API_KEY.

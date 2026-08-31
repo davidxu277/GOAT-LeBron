@@ -19,8 +19,15 @@ from . import schemas
 
 PROMPTS = pathlib.Path(__file__).resolve().parent / "prompts"
 
-# CLAUDE.md R1：这五个字段永远不许进入模型输入
-FORBIDDEN_FIELDS = ("sample_id", "common_id", "click", "conversion", "ctcvr")
+# CLAUDE.md R1：这六个字段永远不许进入模型输入
+FORBIDDEN_FIELDS = (
+    "sample_id",
+    "common_id",
+    "click",
+    "conversion",
+    "ctcvr",
+    "long_view",
+)
 _HAS_DIGIT = re.compile(r"\d")
 _HEDGE_WORDS = ("试试看", "可能有帮助", "值得一试", "一般来说效果不错", "应该有帮助")
 
@@ -62,6 +69,14 @@ def _check_config_patch(text: str) -> None:
         raise SchemaViolation(
             f"config_patch 解析出来是 {type(parsed).__name__}，必须是键值对"
         )
+
+    serialized = yaml.safe_dump(parsed, allow_unicode=True)
+    for forbidden in FORBIDDEN_FIELDS:
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(forbidden)}(?![A-Za-z0-9_])",
+                    serialized):
+            raise SchemaViolation(
+                f"config_patch 中出现禁用字段 {forbidden}，标签不得进入模型输入"
+            )
     for key in parsed:
         root = str(key).split(".", 1)[0]
         if root not in ALLOWED_CONFIG_ROOTS:

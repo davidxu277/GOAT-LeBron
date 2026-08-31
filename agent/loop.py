@@ -344,7 +344,18 @@ def read_scores(report: dict[str, Any]) -> dict[str, float]:
 
 
 def total_score(report: dict[str, Any]) -> float:
-    """两个 AUC 之和 —— 排名按两项 delta 等权平均，和与均值同序。"""
+    """返回任务正式主分。
+
+    KuaiRand 成绩单明确提供 ``主分``，必须直接使用它，因为官方
+    epsilon=0.002 是针对 primary，而不是 GAUC+nDCG@5。
+
+    旧 AliCCP 成绩单没有 ``主分`` 时，继续退回原来的双指标求和。
+    """
+    for section in _SCORE_SECTIONS:
+        block = report.get(section)
+        if isinstance(block, dict) and block.get("主分") is not None:
+            return float(block["主分"])
+
     scores = read_scores(report)
     return sum(scores.values()) if scores else float("-inf")
 
