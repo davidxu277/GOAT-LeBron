@@ -308,7 +308,38 @@ def implement(
                         f"{path} 里出现了禁用字段 {bad}（CLAUDE.md R1）。"
                         f"这五个字段永远不许进入模型输入。"
                     )
-        _check_config_patch(data.get("config_patch") or "")
+        patch_text = data.get("config_patch") or ""
+        _check_config_patch(patch_text)
+        parsed_patch = yaml.safe_load(patch_text) or {}
+
+        # 深度训练每轮真正产出的指标名只有这三个（点击分/购买分/loss，
+        # 见 harness/deep.py 的 metrics 字典）。工兵曾反复写
+        # ctr_auc / cvr_auc / mean_auc 这类英文名，直到烧完一次真训练才 KeyError——
+        # 这条检查本来在这里，一次合并冲突手动解决时被整段删掉，没人发现，
+        # 直到范文（modules/train/early_stopping.py）还在教错误名字才被揪出来。
+        monitor = parsed_patch.get("train.early_stopping.monitor")
+        train_patch = parsed_patch.get("train")
+        if monitor is None and isinstance(train_patch, dict):
+            early_patch = train_patch.get("early_stopping")
+            if isinstance(early_patch, dict):
+                monitor = early_patch.get("monitor")
+        allowed_monitors = {"点击分", "购买分", "loss"}
+        if monitor is not None and str(monitor) not in allowed_monitors:
+            raise SchemaViolation(
+                f"train.early_stopping.monitor 写成了 {monitor!r}，"
+                f"但训练循环只产出 {sorted(allowed_monitors)}。"
+                "请改用「点击分」、「购买分」或 loss。"
+            )
+
+        mlp_patch = ((parsed_patch.get("model") or {}).get("mlp")
+                     if isinstance(parsed_patch.get("model"), dict) else None)
+        if ("model.mlp.epochs" in parsed_patch
+                or isinstance(mlp_patch, dict) and "epochs" in mlp_patch):
+            raise SchemaViolation(
+                "epochs 写在 model.mlp 下不会生效；"
+                "深度训练轮数必须写在 model.deep.epochs。"
+            )
+
         # 接口的 minItems 只认 0 和 1，所以"至少 3 条"只能在这里卡
         if len(data["self_check"]) < schemas.MIN_SELF_CHECKS:
             raise SchemaViolation(

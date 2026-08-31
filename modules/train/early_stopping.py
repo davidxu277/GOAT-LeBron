@@ -23,7 +23,10 @@ class EarlyStopping:
     """连续若干轮没有变好就停下，并把权重回滚到最好的那一轮。
 
     配置项（全部从 config 读，不许写死 —— R7）：
-        train.early_stopping.monitor    盯哪个指标，如 "mean_auc" / "cvr_auc"
+        train.early_stopping.monitor    盯哪个指标——只能是训练循环真正产出的
+                                         「点击分」「购买分」或 "loss"，写别的名字
+                                         （比如常见的 "mean_auc"/"cvr_auc"）
+                                         会在 on_epoch_end 里直接 KeyError
         train.early_stopping.patience   连续多少轮没变好就停
         train.early_stopping.min_delta  涨多少才算"变好"（建议和 R11 门槛对齐）
         train.early_stopping.mode       "max"（AUC 越大越好）或 "min"（loss 越小越好）

@@ -467,6 +467,68 @@ def test_合法的配置补丁放行():
     _impl_validate(data)
 
 
+# ────────────────── 工兵：深度训练的 monitor 名字 / epochs 位置 ──────────────────
+#
+# 这两条检查曾经存在，在 f15ccef 那次合并冲突里被整段删掉、没人发现——
+# 直到范文（modules/train/early_stopping.py）还在教错误的英文名字才被揪出来。
+# 删掉之后的后果不是"写错立刻打回"，而是"真训练跑完一轮才 KeyError"，
+# 一次真实训练的算力和时间就这样白烧了。补回来，别再丢第二次。
+
+
+def test_早停盯的指标名不对会当场打回():
+    data = {
+        "change_type": "只改配置",
+        "config_patch": "train:\n  early_stopping:\n    monitor: mean_auc\n",
+        "new_files": [],
+        "self_check": BASE_CHECK,
+    }
+    with pytest.raises(SchemaViolation, match="点击分.*购买分|monitor"):
+        _impl_validate(data)
+
+
+def test_早停盯的指标名写点号路径也拦得住():
+    """config_patch 支持两种写法（点号路径 / 嵌套字典），两种都要拦。"""
+    data = {
+        "change_type": "只改配置",
+        "config_patch": "train.early_stopping.monitor: cvr_auc\n",
+        "new_files": [],
+        "self_check": BASE_CHECK,
+    }
+    with pytest.raises(SchemaViolation, match="点击分.*购买分|monitor"):
+        _impl_validate(data)
+
+
+def test_早停盯真实产出的中文指标名放行():
+    for name in ("点击分", "购买分", "loss"):
+        data = {
+            "change_type": "只改配置",
+            "config_patch": f"train:\n  early_stopping:\n    monitor: {name}\n",
+            "new_files": [], "self_check": BASE_CHECK,
+        }
+        _impl_validate(data)   # 不该抛
+
+
+def test_epochs写在model_mlp下会被打回():
+    """深度训练轮数只认 model.deep.epochs；写在 model.mlp 下不会生效，
+    却不会报错——写错了以为生效了，比崩溃更隐蔽。"""
+    data = {
+        "change_type": "只改配置",
+        "config_patch": "model:\n  mlp:\n    epochs: 20\n",
+        "new_files": [], "self_check": BASE_CHECK,
+    }
+    with pytest.raises(SchemaViolation, match="model.deep.epochs"):
+        _impl_validate(data)
+
+
+def test_epochs写在model_deep下放行():
+    data = {
+        "change_type": "只改配置",
+        "config_patch": "model:\n  deep:\n    epochs: 20\n",
+        "new_files": [], "self_check": BASE_CHECK,
+    }
+    _impl_validate(data)   # 不该抛
+
+
 # ────────────────── 军师预计提升限幅 ──────────────────
 
 
