@@ -576,13 +576,14 @@ class KuaiRandGoatExecutor:
                     "尚未运行第0轮baseline"
                 )
 
+            # ⚠️ 这里必须用 `is not None`。第 0 轮（官方基线那一版）是完全
+            # 合法的选择 —— Agent 一轮都没改进时，最该交的就是它。
+            # 写成 `if self._selected_round` 的话 0 是假值，会被当成
+            # "没选过"而退回末尾那一轮，又变成交错版本。
             selected = (
                 self._selected_round
-                if self._selected_round
-                is not None
-                else len(
-                    self._patch_history
-                ) - 1
+                if self._selected_round is not None
+                else len(self._patch_history) - 1
             )
 
             final_patch = {
@@ -635,6 +636,11 @@ class KuaiRandGoatExecutor:
                 remaining_seconds=(
                     self.remaining_seconds
                 ),
+                # 最终提交是**按选中那一轮**重放补丁跑出来的，
+                # 所以这里记的必须是 selected，不是 history 的末尾。
+                # 漏了这个参数会 TypeError —— 而这一步在整场训练之后，
+                # 就差写提交文件时才炸，前面几个小时全白跑。
+                executor_round=selected,
                 official_baseline=self.official_baseline,
                 training=result.get("training") or {},
                 group_evidence=result.get("diagnostics") or {},

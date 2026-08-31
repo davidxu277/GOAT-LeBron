@@ -368,6 +368,7 @@ class GoatExecutorTests(
                 training_attempt=1,
                 remaining_iterations=49,
                 elapsed_seconds=1.0,
+                executor_round=0,
                 remaining_seconds=21599.0,
             )
         )
@@ -409,7 +410,8 @@ class GoatExecutorTests(
                     training_attempt=1,
                     remaining_iterations=49,
                     elapsed_seconds=1.0,
-                    remaining_seconds=21599.0,
+                    executor_round=0,
+                remaining_seconds=21599.0,
                 )
             )
 
@@ -433,6 +435,7 @@ class GoatExecutorTests(
                 training_attempt=1,
                 remaining_iterations=49,
                 elapsed_seconds=1.0,
+                executor_round=0,
                 remaining_seconds=21599.0,
             )
         )
@@ -489,6 +492,78 @@ class GoatExecutorTests(
             self.assertEqual(
                 executor.training_attempts,
                 2,
+            )
+
+    def test_选中第0轮时不会被当成没选过(
+        self,
+    ):
+        """第 0 轮（官方基线那一版）是完全合法的选择。
+
+        Agent 一轮都没改进时，最该交的就是它。可 `if self._selected_round`
+        里 0 是**假值**，会被当成"没选过"而退回 history 末尾那一轮 ——
+        又变成"交上去的不是我们选的那一版"。
+
+        现有的 test_final_submission_consumes_attempt 盖不住这个：
+        它 history 里只有一轮，末尾恰好也是 0，两条分支结果一样。
+        必须跑够两轮才分得出来。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = KuaiRandGoatExecutor(
+                tmp,
+                __file__,
+                tmp,
+                max_iterations=5,
+                runner=fake_runner,
+            )
+
+            executor.run({}, "全量")          # 第 0 轮
+            executor.run(                     # 第 1 轮
+                {
+                    "new_files": [],
+                    "config_patch": "model:\n  k: 32\n",
+                },
+                "全量",
+            )
+
+            self.assertEqual(
+                len(executor._patch_history),
+                2,
+            )
+
+            executor.select_round(0)
+            final = executor.make_final_submission()
+
+            self.assertTrue(final.ok, final.error)
+            # 交的是第 0 轮，不是末尾那一轮
+            self.assertEqual(
+                final.health_report["运行预算"]["执行器轮次"],
+                0,
+            )
+
+    def test_最终提交的成绩单也带执行器轮次(
+        self,
+    ):
+        """_health_report 现在要求 executor_round，而 make_final_submission
+
+        那个调用点一度漏传 —— TypeError，且发生在整场训练**之后**、
+        就差写提交文件时，前面几个小时全白跑。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = KuaiRandGoatExecutor(
+                tmp,
+                __file__,
+                tmp,
+                max_iterations=3,
+                runner=fake_runner,
+            )
+
+            executor.run({}, "全量")
+            final = executor.make_final_submission()
+
+            self.assertTrue(final.ok, final.error)
+            self.assertIn(
+                "执行器轮次",
+                final.health_report["运行预算"],
             )
 
     def test_final_submission_consumes_attempt(

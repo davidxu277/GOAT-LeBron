@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 
+import pytest
 import yaml
 
 
@@ -457,3 +458,48 @@ class GoatRunConfigTests(
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─────────── 09-01：最佳轮编号取错层，整场跑完才炸 ───────────
+
+
+def test_最佳轮编号从运行预算里取():
+    """`执行器轮次` 写在「运行预算」下面，不是顶层。
+
+    在顶层读会 KeyError —— 而这一行跑在 run_session **之后**，
+    也就是整场（最长 6 小时）训练全部跑完、就差生成提交文件时才炸。
+    """
+    from kuairand_bridge.goat_run import _best_executor_round
+
+    报告 = {
+        "验证集": {"GAUC": 0.6638, "nDCG@5": 0.5344, "主分": 0.5991},
+        "运行预算": {"训练尝试编号": 9, "执行器轮次": 7},
+    }
+    assert _best_executor_round(报告, pathlib.Path("best_report.json")) == 7
+
+
+def test_最佳轮编号取不到就当场报错():
+    """下一步就是生成最终提交。宁可在这里停，
+
+    也不能默默交一个不知道是哪一轮的版本 —— select_round 只检查下标
+    越不越界，选错了不报错，照样跑完照样出文件。
+    """
+    from kuairand_bridge.goat_run import _best_executor_round
+
+    for 坏报告 in ({"验证集": {}}, {"运行预算": {}}, {"运行预算": "不是字典"}):
+        with pytest.raises(KeyError):
+            _best_executor_round(坏报告, pathlib.Path("best_report.json"))
+
+
+def test_最佳轮编号不能拿Agent轮次顶替():
+    """Agent 轮次和执行器轮次会往**两个方向**漂：
+
+      · 第 0 轮基线、升档重测 —— 调了 executor.run，但不是 Agent 轮次
+      · 医生 no_finding 跳过、军师/工兵失败 —— 那一轮压根没调 executor.run
+    """
+    from kuairand_bridge.goat_run import _best_executor_round
+
+    # Agent 第 5 轮最好，但它在执行器里是第 7 份补丁
+    报告 = {"运行预算": {"执行器轮次": 7}}
+    assert _best_executor_round(报告, pathlib.Path("x")) != 5
+    assert _best_executor_round(报告, pathlib.Path("x")) == 7

@@ -251,6 +251,7 @@ def 出一份成绩单(**extra):
         remaining_iterations=49,
         elapsed_seconds=31.0,
         remaining_seconds=21568.0,
+        executor_round=0,
         **extra,
     )
 

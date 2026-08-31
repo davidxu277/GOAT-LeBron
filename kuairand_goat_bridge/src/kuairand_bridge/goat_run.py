@@ -311,6 +311,38 @@ def validate_task(
     return config
 
 
+def _best_executor_round(
+    best_report: dict[str, Any],
+    source: pathlib.Path,
+) -> int:
+    """最佳那一轮在执行器里的编号。
+
+    为什么不能用 ``summary.best_round``：那是 **Agent 的轮次编号**，
+    而执行器数的是自己 ``_patch_history`` 的下标，两者会往两个方向漂 ——
+
+      · 第 0 轮基线、升档重测：调了 executor.run，但不是 Agent 轮次
+      · 医生 no_finding 直接跳过、军师或工兵失败：那一轮压根没调 executor.run
+
+    拿 Agent 的编号去 select_round，选中的是**另一轮**，而且
+    select_round 只检查下标越不越界 —— 选错了不报错，照样跑完、
+    照样出提交文件，交上去的却是另一个模型。
+
+    取不到就**当场报错**。这一步之后就是生成最终提交，宁可在这里停下，
+    也不能默默交一个不知道是哪一轮的版本。
+    """
+    budget = best_report.get("运行预算")
+
+    if not isinstance(budget, dict) or budget.get("执行器轮次") is None:
+        raise KeyError(
+            f"{source} 里没有「运行预算 → 执行器轮次」，"
+            "无法确定最佳轮在执行器里的编号。"
+            "这份 best_report.json 可能是旧版本执行器写的；"
+            "请重新跑一场，或手动 select_round 后再生成提交。"
+        )
+
+    return int(budget["执行器轮次"])
+
+
 def run(
     config_path: str | pathlib.Path,
     dry_run: bool = False,
@@ -528,7 +560,10 @@ def run(
     )
 
     executor.select_round(
-        int(best_report["执行器轮次"])
+        _best_executor_round(
+            best_report,
+            best_report_path,
+        )
     )
 
     final = None
