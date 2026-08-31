@@ -1,73 +1,91 @@
 ## Challenges we ran into
 
-**The doctor kept saying "I can't tell."**
+**The doctor kept saying it couldn't tell.**
 
-Our first real run was a disaster of a particular kind. Every single round, the doctor
-looked at the scorecard and reported nothing wrong. The session converged having
-written zero lines of code. The strategist and the engineer were never even woken up.
+We started the first real run in the evening and came back expecting to read arguments.
+Instead we read the same sentence twenty times. No findings this round. No findings this
+round. No findings this round.
 
-The obvious fix is to lower the bar — tell it to find *something*. We didn't, and we're
-glad. We went and read what it actually wrote, and it had been right every time:
-*"needs the training-set score, not here", "needs the per-bucket numbers, not here",
-"needs users split into seen and unseen, not here."*
+The session had converged. It had written nothing. The strategist and the engineer — the
+two roles that actually do the work — had never once been woken up.
 
-Most of what a doctor diagnoses is not the total score. Overfitting is the gap between
-training and validation. Cold-start is one bucket against another. New users are one
-group against another. Our scorecard had three validation numbers and nothing else. We
-had asked it to diagnose from a thermometer reading.
+Our first instinct was that the doctor was too cautious, and that the fix was to tell it
+to try harder. Before doing that we read what it had actually written, which we should
+have done first. It had been explaining the problem to us, patiently, every round:
 
-So we rebuilt the scorecard instead of the doctor. It now carries the training-set
-score, per-exposure-bucket scores, seen-versus-unseen users, day-by-day scores, and the
-composition of the user base. The first run afterwards, it found two real problems and
-ruled out four others with numbers for each. Nothing about the doctor changed.
+*Needs the training-set score. Not here.*
+*Needs the per-bucket numbers. Not here.*
+*Needs users split into seen and unseen. Not here.*
 
-**A library of methods is always going to run out.**
+It was right. Almost nothing a doctor diagnoses is the total score. Overfitting is the
+distance between training and validation. Cold start is one bucket held against another.
+New users are one group held against another. Our scorecard had three validation numbers
+on it and nothing else. We had handed it a thermometer and asked for a diagnosis.
 
-We wrote a library of method cards — each one a technique from the recommender-systems
-literature, with what it treats, why it works, how to build it, and what failure looks
-like. The obvious problem: the agent can only ever be as good as our reading list.
+So we rebuilt the scorecard and left the doctor alone. It now gets the training score,
+the score for each exposure bucket, seen users against unseen ones, a number for every
+day, and the shape of the user base. On the next run it found two real problems, ruled
+out four others, and gave numbers for all six. Not a word of the doctor changed.
 
-The tempting fix is to hand it the papers. Fill the context window with literature and
-let it work things out. We think that's worse, not better. Every round it would have to
-re-read everything and decide by feel which paper applies — an expensive, fuzzy
-judgement, repeated, with a fresh chance to hallucinate a connection each time.
+The lesson stuck. When the agent says it cannot tell, that is information about us.
 
-We did two other things instead.
+**A library of methods always runs out.**
 
-First, we distilled rather than dumped. A card is a paper compressed into the four
-things you need at the moment of choosing, and it is *labelled* with which problems it
-treats — using the same fixed vocabulary the doctor is restricted to. That makes
-matching a set intersection: instant, free, and incapable of inventing a match that
-isn't there. The doctor's output schema physically cannot produce a symptom name that
-no card treats.
+Every technique we knew went onto a card: what it treats, why it works, how to build it,
+and what it looks like when it goes wrong. That library is what the agent prescribes
+from — which means, on the face of it, the agent can never be smarter than our reading
+list.
 
-Second, we gave the strategist an escape hatch. If nothing in the library fits the
-diagnosis, or everything that fits has already been tried, it is allowed to invent a
-remedy that exists on no card — it just has to write the implementation sketch itself
-and argue for it like any other proposal. Those proposals go through exactly the same
-scrutiny afterwards. In our runs, several of the agent's own inventions came from
-reading the error message of something that had failed two rounds earlier.
+The obvious answer is to hand it the papers. Fill the context with literature and let it
+think. We decided that was worse. It would have to re-read the whole shelf every round
+and decide by feel what applied — slow, expensive, and a fresh opportunity each time to
+invent a connection that isn't there.
 
-The library is the floor, not the ceiling.
+We did two other things.
 
-**The score went up, and it meant nothing.**
+First, we distilled instead of dumping. A card is a paper reduced to the four things you
+need at the moment of choosing, and it carries a label: which problems it treats. Those
+labels come from the same fixed list the doctor is restricted to. So finding the right
+card is not a judgement at all. It is an intersection of two sets. It costs nothing, it
+takes no time, and it cannot invent a match — the doctor is physically unable to name a
+problem that no card treats.
 
-This is the failure we were most afraid of, because it looks like success.
+Second, we gave the strategist a way out of the library. When nothing fits the
+diagnosis, or everything that fits has already failed, it may propose something that
+exists on no card. It sketches the implementation itself, defends it like any other
+proposal, and faces exactly the same review afterwards.
 
-The agent says "cold-start items are the problem", applies a fix, and the score
-improves. Except the cold-start bucket didn't move at all — something unrelated did.
-Record that as "the fix worked" and it will keep reaching for that fix, and keep
-getting further from the real problem. Do it for twenty rounds and you have a
-confidently wrong system with a rising score.
+That path gets used. Some of its inventions came from reading the error message of
+something that had broken two rounds earlier — it went back, worked out why that attempt
+had failed, and went around it.
 
-So the reviewer role isn't allowed to just look at the total. It has to name the number
-it was aiming at and report what that number was before and after. And those rules are
-written as checks that fail, not as instructions in a prompt. It cannot claim success
-while admitting nothing improved. It cannot claim a symptom is cured while its own
+The library turned out to be the floor, not the ceiling.
+
+**The score went up and it meant nothing.**
+
+This is the failure we were most afraid of, because it arrives dressed as success.
+
+Say the agent decides cold-start items are the problem. It picks a fix, writes it,
+trains, and the score improves. Everybody is pleased. Except the cold-start bucket never
+moved — the gain came from somewhere else entirely.
+
+Write that down as "the fix worked" and the damage starts. It reaches for the same fix
+next time. The trust score on that card goes up. Twenty rounds later you have a system
+with a rising number and a completely wrong picture of its own model.
+
+It is the maths tutor problem. The child is bad at maths, so you hire a maths tutor, and
+the term score goes up three points. Maths is unchanged; the gain came from an easy
+literature paper. And now you will hire that tutor again.
+
+So the reviewer is not allowed to look at the total. It has to name the number it was
+aiming at, and report what that number did.
+
+We wrote those rules as checks that fail, not as instructions that ask. It cannot claim
+success while admitting nothing improved. It cannot say a problem is fixed while its own
 before and after are identical. It cannot claim a win smaller than the noise. If a
-proposal said it would treat three problems, it must account for all three.
+proposal promised to treat three problems, it accounts for all three or it is sent back.
 
-Everything we wrote as an instruction was eventually ignored. Everything we wrote as a
+Every rule we wrote as an instruction was eventually ignored. Every rule we wrote as a
 check held.
 
 **Is 0.03 a big difference? Nobody knew.**
