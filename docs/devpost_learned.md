@@ -1,50 +1,30 @@
 ## What we learned
 
-**Machine learning research can be autonomous, and watching it happen changes how you
-think about what these models are for.**
+**Automating research turned out to be stranger, and more fun, than we expected.**
 
-Before this we thought of an LLM as something you ask questions. What we built asks its
-own questions. It reads a result, decides what is wrong, argues for what to try next,
-writes the code, runs it, and then tells us whether it was right — including when the
-answer is no. The loop that we thought was the human part of the job turned out to be
-mechanisable, and the interesting work moved somewhere else: to deciding what evidence
-it gets to see, and what it is not allowed to conclude.
+We arrived thinking of a model as something you ask questions. We left having built
+something that asks its own. The first time it read a result, decided the model was
+memorising its training set, argued for a fix, wrote the code, and then came back to
+tell us that its own idea hadn't worked — that was the moment this stopped being an
+assignment.
 
-**Prompts are signs on the wall. Validators are the wall.**
+**We understand multi-agent systems far better than we did three weeks ago.**
 
-Every constraint we wrote as an instruction was eventually ignored — not maliciously,
-just under pressure, on a long run, in a case we hadn't imagined. Every constraint we
-wrote as a check that fails held every time. We stopped asking the agent to be careful
-and started making carelessness impossible to express.
+One model asked to do everything does all of it vaguely. Four roles with a clear handoff
+between them do each part sharply. But collaboration isn't free. They need a shared
+vocabulary or they talk past each other, and somebody has to check the others' work or
+they agree far too easily.
 
-**"I can't tell" is a feature, and we nearly deleted it.**
+Most of what we actually built is the space between the roles, not the roles.
 
-An agent that always finds something wrong is useless, because you cannot distinguish
-its findings from its habits. When ours reported nothing for twenty rounds our instinct
-was to lower the bar. Reading its reasoning instead was the single most useful hour we
-spent — it had been telling us what was missing, in detail, the entire time. Honest
-uncertainty is not a failure to answer. It is the answer, and usually it is about you.
+**And we learned what dividing up work looks like when part of your team isn't human.**
 
-**Giving an agent less can make it smarter.**
+The four of us split the project almost exactly the way the agent is split inside:
+someone prepared the data, someone stocked the knowledge, someone built the roles,
+someone ran it and found where it fell over.
 
-We removed the official baseline from what the agent sees, and its diagnoses got
-sharper. With the number, it compared itself to a constant and stopped looking. Without
-it, it had to look at the actual evidence — the gap between training and validation, one
-bucket against another, the shape of the user base. Not every piece of context you can
-give a model is worth giving it.
-
-**The dangerous failures don't raise errors.**
-
-Almost nothing that hurt us crashed. A wrong constant produced the exact opposite
-conclusion. A one-line config change quietly turned the agent back into a knob-turner
-for five rounds. `if round:` treated round zero as "nobody chose". Every one of them
-finished successfully and handed us the wrong thing. Loud failures are cheap; you find
-them in a minute. We now spend our review time asking what could go wrong here without
-anyone noticing.
-
-**A number that can only ever be zero is not a measurement.**
-
-We report how many times a human intervened. It read zero — and then we found the
-command wrote to one file while the run read another, so it could only ever have read
-zero. The number was true and worthless. If you are going to report a metric, first make
-sure the bad value was reachable.
+Our own jobs changed shape while we did it. We spent much less time writing models, and
+much more deciding what the agent should be allowed to see, what it must never be
+allowed to conclude, and how we would know if it were fooling itself. That felt less
+like engineering and more like management — which is probably what a lot of engineering
+is about to feel like.
