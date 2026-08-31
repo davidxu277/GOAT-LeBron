@@ -1,39 +1,44 @@
 ## Team member contributions
 
-We thought of the project as a school with four things in it. Each of us took one.
+We were building a hospital for machine learning models. Four of us, four parts of it.
 
-**The exam hall — data and the runner.**
-Somebody has to be able to say "try this idea and tell me the score." That is harder
-than it sounds. The hall has to set the same exam every time, and it must not fall down
-no matter how strange the idea being tested. So: get the real dataset in, split it
-exactly the way the organisers split it, and score it with the organisers' own code
-rather than our own copy of it — a scorer that is *almost* the official one only shows
-you the difference on the day you submit. Every experiment runs in its own process with
-a timer on it, so one badly written idea can hang forever without taking the day down
-with it.
+**The first of us got the patient ready.**
+None of this means anything without data you can trust. They took the raw dataset,
+cleaned it up, and split it the way the organisers split it — not the way that would
+have made our scores look better. They are also the reason we score with the
+organisers' own code instead of writing our own version. A scorer that is *nearly*
+right is the worst kind. It agrees with you all week, then disagrees on the one day
+that counts.
 
-**The student — the model.**
-First build a recommender by hand that scores as well as the official one, so we have a
-fair thing to beat. Then take it apart, so that every piece — the features, the network,
-the way it is trained — can be replaced by someone who is not you. The second half is
-the one that matters. **An agent can only change what somebody made changeable.**
+**The second of us wrote the pharmacy.**
+They read their way through recommender systems — how people actually fix a ranking
+model when it is broken — and turned each technique into a card. Every card says the
+same four things: what it treats, why it should work, how to build it, and what it
+looks like when it fails. So when the agent has a diagnosis, it has somewhere to look
+it up.
 
-**The teacher — the agent.**
-Read the student's report card, work out what is actually wrong, decide what to try
-next, write the code, and know when to stop. That is four different jobs, so we made
-four roles and put plain code between them. The hardest part was not getting it to have
-ideas; it was stopping it from marking its own homework too kindly. Those rules are
-written as checks that fail, not as instructions we hope it follows.
+Then they did the harder half. They gave the agent hands. It doesn't only pick cards
+off a shelf — it can write the code itself. New features, new model parts, new training
+tricks. Whatever it writes goes straight into the pipeline and gets trained.
 
-**The camera — the log.**
-Record all of it, because more than half the marks are for the thinking rather than the
-score. The format had to be agreed on the first day, before the other three wrote a
-line — if the camera turns up late, everyone else has to go back and redo their work to
-fit it. Every round we keep what the agent hoped would happen, the code it wrote, the
-score it got, and anything that broke along the way.
+**The third of us built the medical team.**
+One model staring at one scorecard was never going to be enough. So the thinking got
+split into four. A doctor, who reads the report and says what is wrong. A strategist,
+who picks the treatment and has to argue for it. An engineer, who writes it. And a
+reviewer, who checks afterwards whether the thing they were treating actually got
+better.
 
-The order mattered more than we expected. Until the exam hall actually worked, the
-teacher and the student were both just guessing.
+Getting them to talk to each other was the easy part. The hard part was making sure the
+reviewer couldn't quietly let the strategist off the hook — so those checks are code
+that fails, not instructions we hoped would be followed. And any one of the four can
+fall over without bringing the whole run down with it.
 
-And the split was never clean. We all read each other's code, and nearly every serious
-bug in this project was found by the person who did not write it.
+**The fourth of us ran it for real.**
+Everything above is a theory until somebody presses go on the real dataset and watches
+it break. They ran the real sessions, found where it fell apart, and fixed it. Most of
+what we now know about this system, we know because they ran it and it didn't work.
+
+None of the four was optional, and we found that out in order. Until the data was
+right, nobody could tell whether the agent was wrong or the exam was. Until the agent
+had somewhere to look things up, it had good instincts and nothing to do with them.
+And until someone ran the whole thing end to end, we were all just fairly confident.
