@@ -54,3 +54,6 @@ secrets.*
 .DS_Store
 .idea/
 .vscode/
+
+# 一场跑整理出来的交付物 —— 由 tools/collect_logs.py 生成，不进仓库
+deliverables/
