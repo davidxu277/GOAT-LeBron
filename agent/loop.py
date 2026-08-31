@@ -328,18 +328,36 @@ def beats_noise(gains: dict[str, float],
     )
 
 
-def read_scores(report: dict[str, Any]) -> dict[str, float]:
-    """从成绩单里取出两个 AUC。取不到的返回空 dict。
+# 每套任务的两个分指标在成绩单里叫什么。KuaiRand 在前 —— 当前任务是它。
+# b35cbff 把 KuaiRand 成绩单里的「点击分/购买分」兼容字段删掉了（本来就
+# 没有购买任务，留着是误导），只认旧名字的话这里会一路返回空 dict：
+# 收敛判定走「主分」不受影响，但 best_scores、锁定集分数、叙事里每轮的
+# 分数会全是空的 —— 交付物 #3/#5 上直接看得见。
+# 左边是成绩单里的字段名，右边是对外报的指标名。
+# AliCCP 那两个名字沿用原样（点击分 → 点击AUC），别顺手改 —— 结果表、
+# 噪声带、复盘官的 actual 全都按那套名字对齐。
+_METRIC_NAMING = (
+    (("GAUC", "nDCG@5"), ("GAUC", "nDCG@5")),
+    (("点击分", "购买分"), ("点击AUC", "购买AUC")),
+)
 
-    收敛判定、挑最佳版本、算 delta 全靠它，所以两种成绩单格式都要认。
+
+def read_scores(report: dict[str, Any]) -> dict[str, float]:
+    """从成绩单里取出两个分指标，键名用这套任务自己的叫法。
+
+    挑最佳版本、算 delta、写结果表全靠它，所以两种成绩单格式都要认。
+    取不到返回空 dict。
     """
     for section in _SCORE_SECTIONS:
         block = report.get(section)
-        if isinstance(block, dict) and block.get("点击分") is not None:
-            return {
-                "点击AUC": float(block["点击分"]),
-                "购买AUC": float(block.get("购买分") or 0.0),
-            }
+        if not isinstance(block, dict):
+            continue
+        for (first, second), (out_first, out_second) in _METRIC_NAMING:
+            if block.get(first) is not None:
+                return {
+                    out_first: float(block[first]),
+                    out_second: float(block.get(second) or 0.0),
+                }
     return {}
 
 

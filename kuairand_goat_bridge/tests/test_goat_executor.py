@@ -39,6 +39,7 @@ def fake_runner(
     make_test,
     agent_patch=None,
     trainer_config=None,
+    fidelity="全量",
 ):
     """模块顶层成功Runner，兼容Windows spawn。"""
     del (
@@ -58,6 +59,13 @@ def fake_runner(
     )
 
     result = {
+        "training": {
+            "fidelity": fidelity,
+            "训练集抽样比例": 1.0 if fidelity == "全量" else 0.15,
+            "训练行数": 171167 if fidelity == "小份" else 1141112,
+            "全量训练行数": 1141112,
+            "每轮训练记录": {"训练轮数": 3, "最佳轮次": 2},
+        },
         "validation": {
             "metrics": {
                 "GAUC": 0.6671,
@@ -102,6 +110,7 @@ def broken_runner(
     make_test,
     agent_patch=None,
     trainer_config=None,
+    fidelity="全量",
 ):
     """模块顶层失败Runner，兼容Windows spawn。"""
     del (
@@ -127,6 +136,7 @@ def unsupported_runner(
     make_test,
     agent_patch=None,
     trainer_config=None,
+    fidelity="全量",
 ):
     """模拟Trainer不支持Agent修改。"""
     del (
@@ -149,7 +159,7 @@ class GoatExecutorTests(
 ):
     """测试Executor协议、指标、预算和错误恢复。"""
 
-    def test_protocol_and_metric_aliases(
+    def test_protocol_and_track2_metrics(
         self,
     ):
         with tempfile.TemporaryDirectory() as tmp:
@@ -183,18 +193,38 @@ class GoatExecutorTests(
                 ]
             )
 
-            self.assertEqual(
-                validation["GAUC"],
-                validation["点击分"],
-            )
-            self.assertEqual(
-                validation["nDCG@5"],
-                validation["购买分"],
-            )
+            self.assertNotIn("点击分", validation)
+            self.assertNotIn("购买分", validation)
             self.assertAlmostEqual(
                 validation["主分"],
                 0.60145,
             )
+            self.assertEqual(
+                result.health_report["官方Validation基线"]["GAUC"],
+                0.6674,
+            )
+            self.assertAlmostEqual(
+                result.health_report["相对官方基线"]["Primary"],
+                -0.0001,
+            )
+            self.assertEqual(
+                result.health_report["训练诊断"]["每轮训练记录"]["最佳轮次"],
+                2,
+            )
+
+    def test_fidelity_is_forwarded_to_runner_and_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = KuaiRandGoatExecutor(
+                tmp,
+                __file__,
+                tmp,
+                runner=fake_runner,
+            )
+            result = executor.run({}, "小份")
+            self.assertTrue(result.ok, result.error)
+            self.assertEqual(result.health_report["保真度"], "小份")
+            self.assertEqual(result.health_report["训练诊断"]["fidelity"], "小份")
+            self.assertEqual(result.health_report["训练诊断"]["训练行数"], 171167)
 
     def test_errors_become_run_results(
         self,

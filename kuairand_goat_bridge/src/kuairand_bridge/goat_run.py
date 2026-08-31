@@ -27,6 +27,17 @@ OFFICIAL_MAX_ITERATIONS = 50
 OFFICIAL_MAX_SECONDS = 21600
 
 
+def _track2_read_scores(report: dict[str, Any]) -> dict[str, float]:
+    """把 Track 2 正式指标翻译成旧 GOAT 账本键；不污染健康报告。"""
+    validation = report.get("验证集") or {}
+    if validation.get("GAUC") is None:
+        return {}
+    return {
+        "点击AUC": float(validation["GAUC"]),
+        "购买AUC": float(validation.get("nDCG@5") or 0.0),
+    }
+
+
 def _resolve(
     value: str,
     base: pathlib.Path,
@@ -339,7 +350,13 @@ def run(
         CardLibrary,
         SymptomVocab,
     )
-    from agent.loop import run_session
+    from agent import loop as goat_loop
+
+    # 旧 GOAT 的内部账本仍把两个分量命名为点击AUC/购买AUC。只在本次
+    # Bridge 进程内部安装读取适配器，不把这些错误业务名写进 Doctor 成绩单。
+    # 这样核心调度/总结保持兼容，LLM 看到的始终只有 Track 2 正式语义。
+    goat_loop.read_scores = _track2_read_scores
+    run_session = goat_loop.run_session
 
     # 病名词表与药方卡用主仓库那一套（knowledge/），不再单独维护一份。
     # 08-31 之前这里指向 bridge 内的 goat_profile/，那份只有 9 病 3 卡，
@@ -385,16 +402,20 @@ def run(
             "trainer_config",
             {},
         ),
+        official_baseline=official,
     )
 
     assert_goat_compatible(executor)
 
+    initial_fidelity = (
+        "全量" if config["require_baseline_reproduction"] else "小份"
+    )
     first = executor.run(
         {
             "new_files": [],
             "config_patch": "",
         },
-        "全量",
+        initial_fidelity,
     )
 
     if not first.ok:
@@ -486,9 +507,12 @@ def run(
         ),
         epsilon=config["epsilon"],
         patience=config["patience"],
+        start_fidelity=initial_fidelity,
+        # 键名必须跟 read_scores 读出来的一致，否则「相对官方基线」
+        # 这一栏取不到交集，结果表上是一片空白。
         baseline={
-            "点击AUC": official["GAUC"],
-            "购买AUC": official["nDCG@5"],
+            "GAUC": official["GAUC"],
+            "nDCG@5": official["nDCG@5"],
         },
         logs_dir=logs,
     )

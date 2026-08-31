@@ -11,6 +11,14 @@ import numpy as np
 from .official import module
 
 
+FIDELITY_FRACTIONS = {
+    "小份": 0.15,
+    "中份": 0.40,
+    "大份": 0.75,
+    "全量": 1.00,
+}
+
+
 @dataclass(frozen=True)
 class SplitView:
     name: str
@@ -56,6 +64,38 @@ class DatasetBundle:
     valid: SplitView
     test: SplitView | None
     data_dir: pathlib.Path
+
+    def with_train_fidelity(self, fidelity: str, seed: int) -> "DatasetBundle":
+        """只缩放训练集；官方 validation/test 永远保持固定日期切分和全量。
+
+        正负标签分别做确定性抽样，避免小份数据偶然改变 long_view 比例。
+        选中后按原始行号排序，保证同一 seed/fidelity 在各平台可复现。
+        """
+        if fidelity not in FIDELITY_FRACTIONS:
+            raise ValueError(
+                f"fidelity 必须是 {sorted(FIDELITY_FRACTIONS)}，收到 {fidelity!r}"
+            )
+        fraction = FIDELITY_FRACTIONS[fidelity]
+        if fraction >= 1.0:
+            return self
+
+        labels = self.train.labels.astype(np.int8)
+        rng = np.random.default_rng(int(seed))
+        selected: list[int] = []
+        for label in (0, 1):
+            candidates = np.flatnonzero(labels == label)
+            if not len(candidates):
+                continue
+            count = max(1, int(round(len(candidates) * fraction)))
+            selected.extend(rng.choice(candidates, size=count, replace=False).tolist())
+        selected.sort()
+        sampled_rows = [self.train.rows[index] for index in selected]
+        return DatasetBundle(
+            train=SplitView("train", sampled_rows, True),
+            valid=self.valid,
+            test=self.test,
+            data_dir=self.data_dir,
+        )
 
     def split(self, name: str) -> SplitView:
         if name not in {"train", "valid", "test"}:

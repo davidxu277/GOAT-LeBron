@@ -26,6 +26,7 @@ if str(SRC_DIR) not in sys.path:
 
 
 from kuairand_bridge.dataset import (
+    DatasetBundle,
     SplitView,
     load_dataset,
 )
@@ -36,6 +37,38 @@ from kuairand_bridge.predictions import (
 
 class ContractTests(unittest.TestCase):
     """检查 test 标签隔离和官方 submission 契约。"""
+
+    def test_train_fidelity_is_deterministic_and_keeps_validation_full(self):
+        rows = [
+            (20220408, f"u{i}", f"v{i}", "a", "1", 1.0, i % 2)
+            for i in range(100)
+        ]
+        valid_rows = [
+            (20220422, "uv", f"vv{i}", "a", "1", 1.0, i % 2)
+            for i in range(20)
+        ]
+        bundle = DatasetBundle(
+            train=SplitView("train", rows, True),
+            valid=SplitView("valid", valid_rows, True),
+            test=None,
+            data_dir=pathlib.Path("."),
+        )
+        first = bundle.with_train_fidelity("小份", seed=7)
+        second = bundle.with_train_fidelity("小份", seed=7)
+        self.assertEqual(first.train.rows, second.train.rows)
+        self.assertEqual(len(first.train), 16)  # 两类各 round(50 * 0.15)=8
+        self.assertEqual(len(first.valid), 20)
+        self.assertEqual(int(first.train.labels.sum()), 8)
+
+    def test_unknown_fidelity_is_rejected(self):
+        bundle = DatasetBundle(
+            train=SplitView("train", [], True),
+            valid=SplitView("valid", [], True),
+            test=None,
+            data_dir=pathlib.Path("."),
+        )
+        with self.assertRaisesRegex(ValueError, "fidelity"):
+            bundle.with_train_fidelity("随便", seed=0)
 
     def test_test_labels_are_locked(self):
         """test SplitView 不允许通过 labels 属性读取标签。"""

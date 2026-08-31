@@ -23,7 +23,7 @@ from agent.loop import (SHELF_KEEP, CostAwareScheduler, InterventionLog, PriorLe
                         RunResult, Shelf, TimeLedger, _with_bands, effective_config,
                         run_round, run_session)
 from agent.offline import DriftingExecutor, ScriptedLLM
-from agent import noise, roles, schemas
+from agent import loop, noise, roles, schemas
 
 
 @pytest.fixture(scope="module")
@@ -3539,3 +3539,80 @@ def test_加特征零件都声明了needs():
             continue
         cls = _load_op_class_by(str(path), ("fit", "transform"), "FeatureOp")
         assert callable(getattr(cls, "needs", None)), f"{name} 没声明 needs()"
+
+
+# ─────────── 08-31 晚：医生看得见证据了（真跑一场之后补的） ───────────
+
+仓库根 = pathlib.Path(__file__).resolve().parent.parent
+
+
+def test_成绩单_KuaiRand的分数读得出来():
+    """b35cbff 把「点击分/购买分」兼容字段删了（本来就没有购买任务）。
+
+    只认旧名字的话 read_scores 一路返回空 dict：收敛判定走「主分」不受
+    影响，但 best_scores、锁定集分数、叙事里每轮的分数会全是空的 ——
+    交付物 #3/#5 上直接看得见。
+    """
+    报告 = {"验证集": {"GAUC": 0.6638, "nDCG@5": 0.5344, "主分": 0.5991}}
+    assert loop.read_scores(报告) == {"GAUC": 0.6638, "nDCG@5": 0.5344}
+    assert loop.total_score(报告) == 0.5991
+
+
+def test_成绩单_AliCCP的叫法不许被顺手改掉():
+    """结果表、噪声带、复盘官的 actual 全都按「点击AUC/购买AUC」对齐。"""
+    报告 = {"验证集": {"点击分": 0.55, "购买分": 0.58}}
+    assert loop.read_scores(报告) == {"点击AUC": 0.55, "购买AUC": 0.58}
+
+
+def test_危险信号_KuaiRand上也要能触发():
+    """训练/验证差 > 0.15 是 CLAUDE.md 写死的闸门。
+
+    它原来只读「点击分」，而 KuaiRand 成绩单里没有这个字段 ——
+    08-31 那场真跑，闸门一次都没响过，等于不存在。
+    """
+    报告 = {"训练集": {"主分": 0.80}, "验证集": {"主分": 0.58}}
+    assert roles._main_metric_pair(报告) == (0.80, 0.58)
+
+
+def test_危险信号_两边指标名对不上就不算():
+    """拿训练集的主分减验证集的点击分，差值毫无意义却会照样触发闸门。"""
+    报告 = {"训练集": {"主分": 0.80}, "验证集": {"点击分": 0.58}}
+    assert roles._main_metric_pair(报告) == (None, None)
+
+
+def test_危险信号_训练集缺席时不硬判():
+    报告 = {"验证集": {"主分": 0.58}}
+    assert roles._main_metric_pair(报告) == (None, None)
+
+
+def test_病名表_不许再写死官方基线数字():
+    """0.6016 是 primary，不是 GAUC。写死一个错数字把结论整个写反了：
+
+    那一场跑出 GAUC 0.6638（**低于**真实基线 0.6674），医生拿着 0.6016
+    算出"明显高于基线"，把唯一该报的病判成了没病。
+
+    基线一律从成绩单读 —— 写死的常数走岔时不会报错，只会安静地带偏结论。
+    """
+    原文 = (仓库根 / "knowledge" / "symptoms.yaml").read_text(encoding="utf-8")
+    正文 = "\n".join(
+        行 for 行 in 原文.splitlines() if not 行.lstrip().startswith("#")
+    )
+    assert "0.6016" not in 正文
+    assert "baseline_scores.json" not in 正文
+    assert "官方Validation基线" in 正文
+
+
+def test_病名表_每个病都写明去看成绩单哪个字段():
+    """needs 写"要 4 个桶的 GAUC"没用 —— 医生不知道去哪找。
+
+    08-31 那场医生逐条写"需要分桶数据，这里没有"，它没做错，
+    是我们既没给证据、也没告诉它证据叫什么名字。
+    """
+    表 = yaml.safe_load(
+        (仓库根 / "knowledge" / "symptoms.yaml").read_text(encoding="utf-8")
+    )
+    没指路 = [
+        s["id"] for s in 表["symptoms"]
+        if "成绩单" not in str(s.get("needs", "")) and s["id"] != "结果不稳"
+    ]
+    assert not 没指路, f"这些病没写明去看成绩单哪个字段：{没指路}"
