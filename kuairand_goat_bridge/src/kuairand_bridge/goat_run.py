@@ -333,15 +333,17 @@ def run(
     )
     from agent.loop import run_session
 
-    profile = (
-        BRIDGE_ROOT / "goat_profile"
-    )
+    # 病名词表与药方卡用主仓库那一套（knowledge/），不再单独维护一份。
+    # 08-31 之前这里指向 bridge 内的 goat_profile/，那份只有 9 病 3 卡，
+    # 而主仓库那套是从 AliCCP 一路积累下来、按新任务改过口径的 12 病 14 卡。
+    # 两份并存的代价是：改一边、忘一边，军师看到的永远是没人维护的那份。
+    profile = _goat_root()
     vocab = SymptomVocab.load(
-        profile / "symptoms.yaml"
+        profile / "knowledge" / "symptoms.yaml"
     )
     cards = CardLibrary.load(
         vocab,
-        profile / "cards",
+        profile / "knowledge" / "cards",
     )
 
     output = pathlib.Path(

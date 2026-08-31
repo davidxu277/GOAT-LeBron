@@ -40,7 +40,7 @@ def cards(vocab):
 
 
 def test_词表加载且包含四个核心病(vocab):
-    for sid in ["转化样本偏差", "冷门商品学不动", "在背题", "新用户不会做"]:
+    for sid in ["冷门视频排不上去", "Top5排不上去", "在背题", "新用户不会做"]:
         assert sid in vocab
         assert vocab[sid].core
 
@@ -75,23 +75,23 @@ def test_缺少为什么管用的卡片直接报错(vocab, tmp_path):
 
 def test_按病名筛卡片(cards):
     """同上：卡片库会一直长大，所以断言「对症的在、不对症的不在」，不锁死具体名单。"""
-    命中 = [c.id for c in cards.match(["冷门商品学不动"], limit=99)]
+    命中 = [c.id for c in cards.match(["冷门视频排不上去"], limit=99)]
     assert "类目兜底" in 命中
-    assert "ESMM" not in 命中          # ESMM 不治这个病，不该被筛出来
+    assert "SWA权重平均" not in 命中          # ESMM 不治这个病，不该被筛出来
 
     # 每一张被筛出来的卡，标签里都必须真的有这个病
-    for card in cards.match(["冷门商品学不动"], limit=99):
-        assert "冷门商品学不动" in card.treats
+    for card in cards.match(["冷门视频排不上去"], limit=99):
+        assert "冷门视频排不上去" in card.treats
 
 
 def test_筛卡片会排除已试过的(cards):
     """卡片库会一直长大，所以断言「被排除的那张不在结果里」，而不是断言结果为空。"""
-    命中 = [c.id for c in cards.match(["转化样本偏差"], limit=99)]
-    assert "ESMM" in 命中
+    命中 = [c.id for c in cards.match(["在背题"], limit=99)]
+    assert "SWA权重平均" in 命中
 
-    排除后 = [c.id for c in cards.match(["转化样本偏差"], exclude_ids={"ESMM"}, limit=99)]
-    assert "ESMM" not in 排除后
-    assert set(排除后) == set(命中) - {"ESMM"}   # 只少了那一张，别的没被误伤
+    排除后 = [c.id for c in cards.match(["在背题"], exclude_ids={"SWA权重平均"}, limit=99)]
+    assert "SWA权重平均" not in 排除后
+    assert set(排除后) == set(命中) - {"SWA权重平均"}   # 只少了那一张，别的没被误伤
 
 
 # ────────────────── 医生：病名 enum 由词表生成 ──────────────────
@@ -228,7 +228,7 @@ def _reflect_validate(vocab, data, targets=None):
     captured["validate"](data)
 
 
-def _resolved(symptom="冷门商品学不动", resolved="是", before=0.07, after=None):
+def _resolved(symptom="冷门视频排不上去", resolved="是", before=0.07, after=None):
     # resolved 与 before/after 必须自洽：说治好了，那两个数就得真的变了
     if after is None:
         after = before if resolved == "否" else 0.03
@@ -271,7 +271,7 @@ def test_说不清时不许大改卡片可信度(vocab):
 
 def _proposal(card_id, gain, 难度, 倍数):
     return {
-        "rank": 1, "card_id": card_id, "targets": ["冷门商品学不动"],
+        "rank": 1, "card_id": card_id, "targets": ["冷门视频排不上去"],
         "rationale": "", "expected": {"点击AUC": 0.0, "购买AUC": gain},
         "cost": {"代码难度": 难度, "训练时间倍数": 倍数},
         "risk": "", "novel": not card_id, "how_to": "",
@@ -284,7 +284,7 @@ def test_预期最高的方案不一定胜出(cards):
     这正是"成本感知"的意义：不是挑看起来能提最多的，是挑单位算力回报最高的。
     """
     小而准 = _proposal("类目兜底", 0.003, "简单", 1.0)   # 0.003*0.60/(1.0*1.0) = 0.00180
-    大而贵 = _proposal("ESMM", 0.008, "难", 2.0)        # 0.008*0.85/(3.0*2.0) = 0.00113
+    大而贵 = _proposal("SWA权重平均", 0.008, "难", 2.0)        # 0.008*0.85/(3.0*2.0) = 0.00113
 
     sched = CostAwareScheduler()
     assert 大而贵["expected"]["购买AUC"] > 小而准["expected"]["购买AUC"]   # 预期更高
@@ -298,14 +298,14 @@ def test_预期最高的方案不一定胜出(cards):
 
 def test_预算紧张时只留便宜方案(cards):
     便宜 = _proposal("类目兜底", 0.001, "改配置", 1.0)
-    昂贵 = _proposal("ESMM", 0.02, "难", 3.0)
+    昂贵 = _proposal("SWA权重平均", 0.02, "难", 3.0)
     chosen, _, _ = CostAwareScheduler().pick([昂贵, 便宜], cards, "紧张")
     assert chosen is 便宜
 
 
 def test_已经试过的卡不会被再选(cards):
     a = _proposal("类目兜底", 0.003, "简单", 1.0)
-    b = _proposal("ESMM", 0.001, "难", 3.0)
+    b = _proposal("SWA权重平均", 0.001, "难", 3.0)
     chosen, _, _ = CostAwareScheduler(tried_cards={"类目兜底"}).pick([a, b], cards, "一般")
     assert chosen is b
 
@@ -324,45 +324,45 @@ def test_耗时账本_没跑过就退回猜测值():
 def test_耗时账本_实测倍数是相对全部运行的中位数():
     ledger = TimeLedger()
     ledger.record("类目兜底", 100)
-    ledger.record("ESMM", 300)
+    ledger.record("SWA权重平均", 300)
     # 全部运行的中位耗时 = 200 → 类目兜底 0.5 倍，ESMM 1.5 倍
     assert ledger.multiplier("类目兜底", 1.0) == pytest.approx(0.5)
-    assert ledger.multiplier("ESMM", 1.2) == pytest.approx(1.5)
+    assert ledger.multiplier("SWA权重平均", 1.2) == pytest.approx(1.5)
 
 
 def test_耗时账本_坏输入不入账():
     ledger = TimeLedger()
     ledger.record("", 100)        # 自创方案没有 card_id
-    ledger.record("ESMM", 0.0)    # 假执行器的 0 耗时
-    ledger.record("ESMM", -5)
+    ledger.record("SWA权重平均", 0.0)    # 假执行器的 0 耗时
+    ledger.record("SWA权重平均", -5)
     assert ledger.records == {}
 
 
 def test_调度器用实测耗时而不是军师的报价(cards):
     """军师说两个方案一样快（倍数都报 1.0），但账本知道 ESMM 实测慢 6 倍。
 
-    实测倍数：ESMM = 600/350 ≈ 1.71，类目兜底 = 100/350 ≈ 0.29。
+    实测倍数：pairwise_loss = 600/350 ≈ 1.71，类目兜底 = 100/350 ≈ 0.29。
     尽管 ESMM 的靠谱度更高（0.85 vs 0.60），实测成本一除就翻盘了。
     """
     ledger = TimeLedger()
-    ledger.record("ESMM", 600)
+    ledger.record("pairwise_loss", 600)
     ledger.record("类目兜底", 100)
 
-    p_esmm = _proposal("ESMM", 0.003, "简单", 1.0)
+    p_esmm = _proposal("pairwise_loss", 0.003, "简单", 1.0)
     p_fallback = _proposal("类目兜底", 0.003, "简单", 1.0)
 
     有账本 = CostAwareScheduler(time_ledger=ledger)
     没账本 = CostAwareScheduler()
-    assert 没账本.score(p_esmm, cards) > 没账本.score(p_fallback, cards)   # 只看报价：ESMM 靠谱度高，胜
-    assert 有账本.score(p_esmm, cards) < 有账本.score(p_fallback, cards)   # 看实测：ESMM 太慢，败
+    assert 没账本.score(p_esmm, cards) > 没账本.score(p_fallback, cards)   # 只看报价：pairwise_loss 靠谱度高（0.70 > 0.60），胜
+    assert 有账本.score(p_esmm, cards) < 有账本.score(p_fallback, cards)   # 看实测：它太慢，败
 
 
 def test_耗时账本_落盘再读回(tmp_path):
     ledger = TimeLedger()
-    ledger.record("ESMM", 600)
+    ledger.record("SWA权重平均", 600)
     path = tmp_path / "time_ledger.json"
     ledger.dump(path)
-    assert TimeLedger.load(path).records == {"ESMM": [600.0]}
+    assert TimeLedger.load(path).records == {"SWA权重平均": [600.0]}
     assert TimeLedger.load(tmp_path / "不存在.json").records == {}
 
 
@@ -540,7 +540,7 @@ def test_预计提升限幅不在schema层_因为接口不支持(vocab):
     限幅现在由 roles.propose 的 validate 强制，见
     test_军师_预计提升超过上限会被打回。这里只钉住"别再写回 schema 里"。
     """
-    prop = schemas.strategist_schema(vocab, ["ESMM"])["properties"]["proposals"]["items"]
+    prop = schemas.strategist_schema(vocab, ["SWA权重平均"])["properties"]["proposals"]["items"]
     for m in ("点击AUC", "购买AUC"):
         字段 = prop["properties"]["expected"]["properties"][m]
         assert "maximum" not in 字段 and "minimum" not in 字段
@@ -552,8 +552,8 @@ def test_预计提升限幅不在schema层_因为接口不支持(vocab):
 
 def test_靠谱度账本_按规则加减():
     led = PriorLedger()
-    assert led.value("ESMM", 0.85) == 0.85                       # 空账本用卡上的先验
-    assert led.apply("ESMM", "猜对了", 0.85, symptom_improved=True) == pytest.approx(0.95)  # 限幅
+    assert led.value("SWA权重平均", 0.85) == 0.85                       # 空账本用卡上的先验
+    assert led.apply("SWA权重平均", "猜对了", 0.85, symptom_improved=True) == pytest.approx(0.95)  # 限幅
     assert led.apply("类目兜底", "猜错了", 0.60) == pytest.approx(0.50)
     assert led.apply("AITM", "没跑起来", 0.50) == pytest.approx(0.35)
     assert led.apply("DCNv2", "说不清", 0.50) == pytest.approx(0.50)
@@ -561,14 +561,14 @@ def test_靠谱度账本_按规则加减():
 
 def test_靠谱度账本_猜对了但没超噪声带不加分():
     led = PriorLedger()
-    assert led.apply("ESMM", "猜对了", 0.50, beat_noise=False) == pytest.approx(0.50)
+    assert led.apply("SWA权重平均", "猜对了", 0.50, beat_noise=False) == pytest.approx(0.50)
 
 
 def test_靠谱度账本_限幅在0点05到0点95():
     led = PriorLedger()
     for _ in range(20):
-        led.apply("ESMM", "猜错了", 0.5)
-    assert led.values["ESMM"] == pytest.approx(PriorLedger.FLOOR)
+        led.apply("SWA权重平均", "猜错了", 0.5)
+    assert led.values["SWA权重平均"] == pytest.approx(PriorLedger.FLOOR)
 
 
 def test_靠谱度账本_自创方案没有卡可更新():
@@ -578,17 +578,17 @@ def test_靠谱度账本_自创方案没有卡可更新():
 
 
 def test_靠谱度账本_盖到卡片上而不动yaml(cards):
-    led = PriorLedger(values={"ESMM": 0.21})
+    led = PriorLedger(values={"SWA权重平均": 0.21})
     led.apply_to(cards)
-    assert cards.get("ESMM").prior == pytest.approx(0.21)
-    assert CardLibrary.load(SymptomVocab.load()).get("ESMM").prior == pytest.approx(0.85)
+    assert cards.get("SWA权重平均").prior == pytest.approx(0.21)
+    assert CardLibrary.load(SymptomVocab.load()).get("SWA权重平均").prior == pytest.approx(0.55)
 
 
 def test_靠谱度账本_落盘再读回(tmp_path):
-    led = PriorLedger(values={"ESMM": 0.7})
+    led = PriorLedger(values={"SWA权重平均": 0.7})
     path = tmp_path / "prior_ledger.json"
     led.dump(path)
-    assert PriorLedger.load(path).values == {"ESMM": 0.7}
+    assert PriorLedger.load(path).values == {"SWA权重平均": 0.7}
     assert PriorLedger.load(tmp_path / "没有.json").values == {}
 
 
@@ -596,8 +596,8 @@ def test_靠谱度账本_落盘再读回(tmp_path):
 
 
 def test_失败信号读进来了但不给军师看(cards):
-    card = cards.get("ESMM")
-    assert "损失接错" in card.failure_signals          # 复盘官要用
+    card = cards.get("SWA权重平均")
+    assert "BN 统计量" in card.failure_signals          # 复盘官要用
     assert card.failure_signals not in card.as_prompt_block()   # 军师不许看到
 
 
@@ -1076,44 +1076,44 @@ def test_方案打了几个病就得逐个交代(vocab):
     剩下两个就永远没人验证 —— 这是最容易漏掉的一种"没做完"。
     """
     data = _reflection("猜对了", "是", 0.004,
-                       items=[_resolved("冷门商品学不动")])
+                       items=[_resolved("冷门视频排不上去")])
     with pytest.raises(SchemaViolation, match="没有交代"):
-        _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+        _reflect_validate(vocab, data, targets=["冷门视频排不上去", "新用户不会做"])
 
 
 def test_逐个交代了就放行(vocab):
     data = _reflection("猜对了", "是", 0.004, items=[
-        _resolved("冷门商品学不动", "是"),
+        _resolved("冷门视频排不上去", "是"),
         _resolved("新用户不会做", "部分", before=0.05, after=0.04),
     ])
-    _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+    _reflect_validate(vocab, data, targets=["冷门视频排不上去", "新用户不会做"])
 
 
 def test_多个目标里有一个好转就算数(vocab):
     """两个目标，一个治好了一个没有 —— 这仍然可以判「猜对了」。"""
     data = _reflection("猜对了", "是", 0.004, items=[
-        _resolved("冷门商品学不动", "是"),
+        _resolved("冷门视频排不上去", "是"),
         _resolved("新用户不会做", "否", before=0.05),
     ])
-    _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+    _reflect_validate(vocab, data, targets=["冷门视频排不上去", "新用户不会做"])
 
 
 def test_全部目标都没好转就不许判猜对了(vocab):
     data = _reflection("猜对了", "否", 0.004, items=[
-        _resolved("冷门商品学不动", "否"),
+        _resolved("冷门视频排不上去", "否"),
         _resolved("新用户不会做", "否", before=0.05),
     ])
     with pytest.raises(SchemaViolation, match="所有目标毛病都没有改善"):
-        _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+        _reflect_validate(vocab, data, targets=["冷门视频排不上去", "新用户不会做"])
 
 
 def test_多个目标里任何一个自我申报对不上数字都打回(vocab):
     data = _reflection("猜对了", "是", 0.004, items=[
-        _resolved("冷门商品学不动", "是"),
+        _resolved("冷门视频排不上去", "是"),
         _resolved("新用户不会做", "是", before=0.05, after=0.05),   # 没动却说治好了
     ])
     with pytest.raises(SchemaViolation, match="自我申报必须跟数字一致"):
-        _reflect_validate(vocab, data, targets=["冷门商品学不动", "新用户不会做"])
+        _reflect_validate(vocab, data, targets=["冷门视频排不上去", "新用户不会做"])
 
 
 # ────────────────── 筛卡：按严重度加权 ──────────────────
@@ -1123,12 +1123,12 @@ def test_筛卡_一个重病优先于两个轻病(cards):
     """医生本来就给了 severity，以前这一步只做集合求交，把它扔了。
 
     同样三个病，只是权重不同，选出来的第一张卡就该不一样：
-      治「冷门商品学不动 + 新用户不会做」的卡 → 0.2 + 0.2 = 0.4
+      治「冷门视频排不上去 + 新用户不会做」的卡 → 0.2 + 0.2 = 0.4
       治「在背题」的卡                      → 0.9
     """
-    症状 = ["冷门商品学不动", "新用户不会做", "在背题"]
+    症状 = ["冷门视频排不上去", "新用户不会做", "在背题"]
 
-    加权 = cards.match(症状, severity={"冷门商品学不动": 0.2,
+    加权 = cards.match(症状, severity={"冷门视频排不上去": 0.2,
                                      "新用户不会做": 0.2,
                                      "在背题": 0.9})
     assert "在背题" in 加权[0].treats                      # 重病的卡排第一
@@ -1139,7 +1139,7 @@ def test_筛卡_一个重病优先于两个轻病(cards):
 
 
 def test_筛卡_不给severity跟以前完全一致(cards):
-    症状 = ["冷门商品学不动", "新用户不会做"]
+    症状 = ["冷门视频排不上去", "新用户不会做"]
     assert [c.id for c in cards.match(症状)] == [c.id for c in cards.match(症状, severity={})]
 
 
@@ -1182,15 +1182,15 @@ def _prop(card_id, targets, rank=1):
 
 def test_待议架_只收没被挑中的():
     shelf = Shelf()
-    a, b, c = _prop("类目兜底", ["冷门商品学不动"]), _prop("ESMM", ["转化样本偏差"]), _prop("AITM", ["转化样本偏差"])
+    a, b, c = _prop("类目兜底", ["冷门视频排不上去"]), _prop("SWA权重平均", ["排序损失不匹配"]), _prop("AITM", ["排序损失不匹配"])
     shelf.shelve(1, [a, b, c], chosen=a)
-    assert {e["card_id"] for e in shelf.entries} == {"ESMM", "AITM"}
+    assert {e["card_id"] for e in shelf.entries} == {"SWA权重平均", "AITM"}
 
 
 def test_待议架_理由只留个引子():
     """存整段推理没意义 —— 军师需要的是"我想过这个"，不是把当时的话再读一遍。"""
     shelf = Shelf()
-    long = _prop("ESMM", ["转化样本偏差"])
+    long = _prop("SWA权重平均", ["排序损失不匹配"])
     shelf.shelve(1, [long], chosen=None)
     assert len(shelf.entries[0]["当时的理由"]) <= 120
     assert len(long["rationale"]) > 120
@@ -1198,23 +1198,23 @@ def test_待议架_理由只留个引子():
 
 def test_待议架_试过的卡不再摆出来():
     shelf = Shelf()
-    shelf.shelve(1, [_prop("ESMM", ["转化样本偏差"]), _prop("AITM", ["转化样本偏差"])], chosen=None)
-    活着的 = shelf.relevant(["转化样本偏差"], exclude_ids={"ESMM"})
+    shelf.shelve(1, [_prop("SWA权重平均", ["排序损失不匹配"]), _prop("AITM", ["排序损失不匹配"])], chosen=None)
+    活着的 = shelf.relevant(["排序损失不匹配"], exclude_ids={"SWA权重平均"})
     assert [e["card_id"] for e in 活着的] == ["AITM"]
 
 
 def test_待议架_病没了药也不留():
     """最重要的过期规则：陈旧方案会把军师往回带，让它照着三轮前的诊断开药。"""
     shelf = Shelf()
-    shelf.shelve(1, [_prop("ESMM", ["转化样本偏差"])], chosen=None)
-    assert shelf.relevant(["转化样本偏差"])            # 这轮还在报这个病 → 留
+    shelf.shelve(1, [_prop("SWA权重平均", ["排序损失不匹配"])], chosen=None)
+    assert shelf.relevant(["排序损失不匹配"])            # 这轮还在报这个病 → 留
     assert shelf.relevant(["在背题"]) == []            # 这轮不报了 → 丢
 
 
 def test_待议架_同一张卡只留最近一次():
     shelf = Shelf()
-    shelf.shelve(1, [_prop("ESMM", ["转化样本偏差"])], chosen=None)
-    shelf.shelve(5, [_prop("ESMM", ["转化样本偏差"])], chosen=None)
+    shelf.shelve(1, [_prop("SWA权重平均", ["排序损失不匹配"])], chosen=None)
+    shelf.shelve(5, [_prop("SWA权重平均", ["排序损失不匹配"])], chosen=None)
     assert len(shelf.entries) == 1
     assert shelf.entries[0]["提出于第几轮"] == 5
 
@@ -1223,13 +1223,13 @@ def test_待议架_有上限():
     """喂给军师的上下文不能越滚越大，否则省下的 token 还不够多花的。"""
     shelf = Shelf()
     for i in range(20):
-        shelf.shelve(i, [_prop(f"卡{i}", ["转化样本偏差"])], chosen=None)
-    assert len(shelf.relevant(["转化样本偏差"])) == SHELF_KEEP
+        shelf.shelve(i, [_prop(f"卡{i}", ["排序损失不匹配"])], chosen=None)
+    assert len(shelf.relevant(["排序损失不匹配"])) == SHELF_KEEP
 
 
 def test_待议架_落盘再读回(tmp_path):
     shelf = Shelf()
-    shelf.shelve(1, [_prop("ESMM", ["转化样本偏差"])], chosen=None)
+    shelf.shelve(1, [_prop("SWA权重平均", ["排序损失不匹配"])], chosen=None)
     path = tmp_path / "shelf.json"
     shelf.dump(path)
     assert Shelf.load(path).entries == shelf.entries
@@ -1244,7 +1244,7 @@ def test_待议架_真的摆到军师面前了(tmp_path):
         def _医生(self, schema):
             # 每轮报同一个病 —— 病变了架子本来就该清空（见「病没了药也不留」）
             self._last_findings = [{
-                "symptom": "转化样本偏差", "severity": 0.8, "confidence": "高",
+                "symptom": "Top5排不上去", "severity": 0.8, "confidence": "高",
                 "evidence": "购买模型只用了 click=1 的样本，占比 3.4%", "affects": ["购买AUC"],
             }]
             return {"findings": [dict(self._last_findings[0])],
@@ -2661,7 +2661,7 @@ def test_深度路径_epoch类训练策略不再被拒():
 
 
 def _提案(card_id="类目兜底", how_to="在 features 下新开一块，206 做兜底键"):
-    return {"rank": 1, "card_id": card_id, "targets": ["冷门商品学不动"],
+    return {"rank": 1, "card_id": card_id, "targets": ["冷门视频排不上去"],
             "rationale": "冷门桶 0.552 比热门桶 0.638 低 0.086",
             "expected": {"点击AUC": 0.0, "购买AUC": 0.003},
             "cost": {"代码难度": "简单", "训练时间倍数": 1.0},
@@ -2679,7 +2679,7 @@ def _军师校验(vocab, cards, data):
             return data
 
     候选 = [cards.get("类目兜底")]
-    roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门商品学不动"}], 候选)
+    roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门视频排不上去"}], 候选)
     captured["validate"](data)
 
 
@@ -2739,7 +2739,7 @@ def test_噪声带_分桶实测为0时退回理论带():
 
 
 def test_噪声带_医生拿到的分桶门槛不是0():
-    """医生判「冷门商品学不动」「新用户不会做」用的就是这个数。
+    """医生判「冷门视频排不上去」「新用户不会做」用的就是这个数。
     给他 0，等于告诉他任何差距都算病。"""
     bands = {"单指标噪声带": 0.09, "分指标噪声带": {"点击AUC": 0.001, "购买AUC": 0.09},
              "分组": {"按商品出现次数分组": {
@@ -2867,7 +2867,7 @@ def test_schema_只用接口吃得下的关键字(vocab, cards):
     """maxItems / minimum / maximum / oneOf 这些写了会让整个请求 400。"""
     for 名字, s in (
         ("医生", schemas.doctor_schema(vocab)),
-        ("军师", schemas.strategist_schema(vocab, ["类目兜底", "ESMM"])),
+        ("军师", schemas.strategist_schema(vocab, ["类目兜底", "SWA权重平均"])),
         ("工兵", schemas.implementer_schema()),
         ("复盘官", schemas.reflector_schema(vocab)),
     ):
@@ -3228,7 +3228,7 @@ def test_军师能拿到最近几轮的历史(vocab, cards):
             看到的["user"] = kw["user"]
             return {"proposals": [_提案()]}
 
-    roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门商品学不动"}],
+    roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门视频排不上去"}],
                   [cards.get("类目兜底")],
                   history_brief=[{"轮次": 1, "结论": "没跑起来",
                                   "出了什么错": "这些多值列读不进内存"}])
@@ -3246,7 +3246,7 @@ def test_没历史时不塞空块(vocab, cards):
             看到的["user"] = kw["user"]
             return {"proposals": [_提案()]}
 
-    roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门商品学不动"}],
+    roles.propose(_FakeLLM(), vocab, [{"symptom": "冷门视频排不上去"}],
                   [cards.get("类目兜底")])
     assert "最近几轮发生了什么" not in 看到的["user"]
 
