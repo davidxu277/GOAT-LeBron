@@ -45,6 +45,8 @@ env/
 # ── 密钥：API key 绝对不要提交 ──
 .env
 .env.*
+# 模板例外：里面只有占位符，没有真密钥，要进仓库给队友照着填
+!.env.example
 *.key
 secrets.*
 
