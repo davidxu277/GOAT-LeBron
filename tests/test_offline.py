@@ -3314,3 +3314,57 @@ def test_契约写明了要接config():
     assert "__init__" in 模型段 and "config" in 模型段
     # predict 的第二个参数是编码好的张量，不是 DataFrame —— 契约以前写反了
     assert "不是 DataFrame" in 模型段 or "LongTensor" in 模型段
+
+
+def test_危险信号_训练验证差太大时医生不许说没病(vocab):
+    """CLAUDE.md 危险信号：训练集与验证集 AUC 差 > 0.15 = 严重过拟合或数据切分错了。
+
+    这道守卫在 08-31 那次合并里差点被丢掉（它藏在被整页替换的文件里，
+    而且没有测试盖着）。补上测试，下次合并谁再丢它就会红。
+    """
+    captured = {}
+
+    class _FakeLLM:
+        ledger = Ledger()
+
+        def call(self, **kw):
+            captured["validate"] = kw["validate"]
+            return {}
+
+    # 训练 0.78 / 验证 0.56，差 0.22，远超 0.15
+    roles.diagnose(_FakeLLM(), vocab,
+                   {"训练集": {"点击分": 0.78}, "验证集": {"点击分": 0.56}})
+    validate = captured["validate"]
+
+    with pytest.raises(SchemaViolation, match="不能返回 no_finding"):
+        validate({"findings": [], "no_finding": True, "reason_if_none": "看着正常"})
+
+    def _病(symptom, severity):
+        return {"findings": [{"symptom": symptom, "severity": severity,
+                              "confidence": "高", "evidence": "训练 0.78 验证 0.56，差 0.22",
+                              "affects": ["点击AUC"]}],
+                "no_finding": False, "reason_if_none": ""}
+
+    with pytest.raises(SchemaViolation, match="必须报告"):
+        validate(_病("训练太慢", 0.9))          # 报了别的病，绕不过去
+
+    with pytest.raises(SchemaViolation, match="severity 不得低于"):
+        validate(_病("在背题", 0.3))            # 病名对了但轻描淡写，也绕不过去
+
+    validate(_病("在背题", 0.8))                # 如实报告才放行
+
+
+def test_危险信号_差距不大时不干涉(vocab):
+    """没撞上危险信号时，医生该说没病就说没病 —— 别把守卫变成硬编病的理由。"""
+    captured = {}
+
+    class _FakeLLM:
+        ledger = Ledger()
+
+        def call(self, **kw):
+            captured["validate"] = kw["validate"]
+            return {}
+
+    roles.diagnose(_FakeLLM(), vocab,
+                   {"训练集": {"点击分": 0.57}, "验证集": {"点击分": 0.56}})
+    captured["validate"]({"findings": [], "no_finding": True, "reason_if_none": "都在噪声带内"})

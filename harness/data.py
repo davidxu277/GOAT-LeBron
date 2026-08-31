@@ -111,7 +111,6 @@ def read_any(path: str | pathlib.Path, columns: list[str] | None = None) -> pd.D
     return pd.read_csv(p, usecols=columns)
 
 
-<<<<<<< HEAD
 def _read_parquet_flat(f: pathlib.Path, columns: list[str] | None) -> pd.DataFrame:
     """读一个 parquet 文件，顺手把单值的多值列在 Arrow 层压成标量。
 
@@ -122,16 +121,6 @@ def _read_parquet_flat(f: pathlib.Path, columns: list[str] | None) -> pd.DataFra
 
     table = pq.read_table(f, columns=columns)
     return flatten_single_valued_lists(table).to_pandas()
-=======
-def available_columns(path: str | pathlib.Path) -> list[str]:
-    """只读首个分片的 schema，返回列名，不加载任何数据行。"""
-    p = pathlib.Path(path)
-    first = ((sorted(p.glob("*.parquet")) or sorted(p.glob("*.csv")))[0]
-             if p.is_dir() else p)
-    if first.suffix == ".parquet":
-        import pyarrow.parquet as pq
-        return list(pq.ParquetFile(first).schema_arrow.names)
-    return list(pd.read_csv(first, nrows=0).columns)
 
 
 def read_training_sample(path: str | pathlib.Path, negative_fraction: float,
@@ -174,7 +163,6 @@ def read_training_sample(path: str | pathlib.Path, negative_fraction: float,
 
     result = pd.concat(sampled, ignore_index=True)
     return result.sample(frac=1.0, random_state=seed).reset_index(drop=True)
->>>>>>> ea775fc92de615fd942806d60582a14a414979b0
 
 
 def count_rows(path: str | pathlib.Path) -> int:

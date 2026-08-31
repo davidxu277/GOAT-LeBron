@@ -27,7 +27,7 @@ from sklearn.metrics import log_loss, roc_auc_score
 
 from agent.events import emit
 from agent.loop import RunResult
-from .data import available_columns, guard_features, read_any, read_training_sample
+from .data import guard_features, read_any
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -480,7 +480,6 @@ class RealExecutor:
 
     # ── 数据 ──
 
-<<<<<<< HEAD
     def _read(self, path: pathlib.Path,
               columns: list[str] | None = None) -> pd.DataFrame:
         """读单个文件或整个分片目录（见 harness.data.read_any）。
@@ -566,14 +565,6 @@ class RealExecutor:
                 return None
             cols |= {str(c) for c in (needs() or [])}
         return sorted(cols)
-=======
-    def _read(self, path: pathlib.Path, columns: list[str] | None = None) -> pd.DataFrame:
-        """读单个文件或整个分片目录（见 harness.data.read_any）。"""
-        key = f"{path}|{','.join(columns or [])}"
-        if key not in self._cache:
-            self._cache[key] = read_any(path, columns=columns)
-        return self._cache[key]
->>>>>>> ea775fc92de615fd942806d60582a14a414979b0
 
     # ── Executor 协议 ──
 
@@ -653,7 +644,6 @@ class RealExecutor:
         bundle = self._fit(fidelity)
         features = bundle["features"]
 
-<<<<<<< HEAD
         # 按训练时定下的**同一份**列清单读目标数据 —— 两边列不一致，
         # 就等于拿另一套输入去喂同一个模型
         目标 = eval_path or self.val_features_path
@@ -662,12 +652,6 @@ class RealExecutor:
         # （小训练集 + 大验证集是完全合理的配法），护一边等于没护。
         self._guard_memory(目标, 需要的列)
         val_x = self._read(目标, 需要的列)
-=======
-        target_path = eval_path or self.val_features_path
-        target_available = set(available_columns(target_path))
-        val_columns = [c for c in bundle["input_columns"] if c in target_available]
-        val_x = self._read(target_path, columns=val_columns)
->>>>>>> ea775fc92de615fd942806d60582a14a414979b0
         # 标签来源二选一：单独的私藏文件，或验证集自带（分片数据集常见）
         有标签 = {"click", "conversion"} <= set(val_x.columns)
         if eval_path is not None:
@@ -676,10 +660,7 @@ class RealExecutor:
                 raise ValueError(f"锁定集 {eval_path} 里没有标签，无法当裁判")
             val_y = val_x[["sample_id", "click", "conversion"]].copy()
         elif self.val_labels_path is not None:
-            label_available = set(available_columns(self.val_labels_path))
-            label_columns = [c for c in ("sample_id", "click", "conversion")
-                             if c in label_available]
-            val_y = self._read(self.val_labels_path, columns=label_columns)
+            val_y = self._read(self.val_labels_path)
         elif 有标签:
             val_y = val_x[["sample_id", "click", "conversion"]].copy()
         else:
@@ -715,7 +696,6 @@ class RealExecutor:
         # 交付物 #4 是最终提交物，这种"看起来正常但其实不对"最要命。
         check_supported(self.config)
 
-<<<<<<< HEAD
         # 零件提前实例化：它只读配置、不碰数据，而**该读哪些列要靠它算**。
         # 顺带好处是「启用了却没写 impl」这类配置错误在读几个 G 之前就炸掉。
         ops = load_feature_ops(self.config)
@@ -731,37 +711,16 @@ class RealExecutor:
                 f"这不是方法不行，是这条流水线读不下这么多列 —— "
                 f"换小一档的训练数据，或者让零件按分片把多值字段压成标量。"
             ) from exc
-=======
-        wanted = (self.config.get("features") or {}).get("base_fields") or BASE_FEATURES
-        available = available_columns(self.train_path)
-        candidates = {"sample_id", "click", "conversion", *map(str, wanted)}
-
-        # 启用的 FeatureOp 可能还需要 base_fields 之外的原始列。只收集配置里确实
-        # 出现在数据 schema 中的字段名；关闭的零件不应白白占用十几 GB 内存。
-        def collect_configured_columns(value: Any) -> None:
-            if isinstance(value, str) and value in available:
-                candidates.add(value)
-            elif isinstance(value, dict):
-                for nested in value.values():
-                    collect_configured_columns(nested)
-            elif isinstance(value, (list, tuple)):
-                for nested in value:
-                    collect_configured_columns(nested)
-
-        for block in (self.config.get("features") or {}).values():
-            if isinstance(block, dict) and block.get("enabled"):
-                collect_configured_columns(block)
-        input_columns = [c for c in available if c in candidates]
-
->>>>>>> ea775fc92de615fd942806d60582a14a414979b0
         frac = FIDELITY_FRAC.get(fidelity, 1.0)
-        # 分片数据必须先在每片里抽样再合并；先 read_any 全量解压，16GB 内存会在
-        # “小份”抽样开始前就耗尽。规则仍是正样本全留、负样本按 fidelity 比例抽。
-        train = read_training_sample(self.train_path, frac, self.seed,
-                                     columns=input_columns)
+        if frac < 1.0:
+            # 分层抽样：正样本全留，负样本按比例抽，保证小份数据也有正样本可学
+            pos = train[train["click"] == 1]
+            neg = train[train["click"] == 0].sample(frac=frac, random_state=self.seed)
+            train = pd.concat([pos, neg]).sample(frac=1.0, random_state=self.seed)
 
         # 特征清单从配置读（R7）—— 工兵改 features.base_fields 才真的生效。
         # 写死在代码里的话，医生诊断出「特征没用上」也没人能修。
+        wanted = (self.config.get("features") or {}).get("base_fields") or BASE_FEATURES
         # 装上配置里启用的加特征零件 —— 以前工兵写的零件文件躺在 modules/ 下
         # 从来没有被 import 过，训练结果纹丝不动却被记成"这个方案没用"
         # （实例化提前到读数据之前了，见上面：该读哪些列要问它们）
@@ -855,8 +814,7 @@ class RealExecutor:
             op, model, 训练记录 = train_deep(self.config, train, 裁判, features, self.seed)
             vocab = 训练记录.pop("_vocab")
             return {
-                "features": features, "input_columns": input_columns,
-                "flatten_cols": flatten_cols, "ops": ops,
+                "features": features, "flatten_cols": flatten_cols, "ops": ops,
                 "keep_ratio": keep_ratio, "train": train,
                 "ctr_model": None, "cvr_model": None, "cvr_fallback": 0.0,
                 "ctr_kw": 训练记录["超参数"], "cvr_kw": 训练记录["超参数"],
@@ -920,8 +878,7 @@ class RealExecutor:
                           categorical_feature=features, **cvr_extra)
 
         return {
-            "features": features, "input_columns": input_columns,
-            "flatten_cols": flatten_cols, "ops": ops,
+            "features": features, "flatten_cols": flatten_cols, "ops": ops,
             "keep_ratio": keep_ratio, "train": train,
             "ctr_model": ctr_model, "cvr_model": cvr_model,
             "cvr_fallback": float(clicked["conversion"].mean() or 0.005),
