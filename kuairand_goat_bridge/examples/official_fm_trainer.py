@@ -11,11 +11,36 @@ train 拟合，validation/test 只应用 train 统计量。
 
 from __future__ import annotations
 
+import copy
 import pathlib
 import sys
 from typing import Any
 
 import numpy as np
+import yaml
+
+
+# 工兵能调的参数：键路径 → (下限, 上限)。
+#
+# 上限是**护栏不是建议**：epochs 一个 500 就能把整场的算力预算烧光，
+# 而 Agent 自己看不出这是它干的 —— 它只会看到"这一轮特别久"。
+# 越界不静默夹回，直接报错说清楚，让复盘官知道这是"提案不合法"
+# 而不是"这个方法没用"（两者对卡片信任分的处置完全不同）。
+AGENT_PARAM_BOUNDS = {
+    ("model", "k"): (1, 64),
+    ("model", "learning_rate"): (1e-5, 0.5),
+    ("train", "epochs"): (1, 60),
+    ("train", "batch_size"): (32, 65536),
+    ("train", "early_stopping_patience"): (1, 20),
+    ("train", "min_delta"): (0.0, 0.05),
+}
+
+# 工兵只准动这两棵子树。data / evaluation 之类一旦被改，
+# 跑出来的分数就没法跟前几轮比了 —— 那等于偷偷换了考卷。
+AGENT_CONFIG_ROOTS = {"model", "train"}
+
+# apply_agent_patch 攒下来的覆盖值。fit() 会把它合并到任务配置之上。
+_AGENT_OVERRIDES: dict[str, Any] = {}
 
 
 BRIDGE_ROOT = pathlib.Path(
@@ -86,11 +111,89 @@ def _require_keys(
         )
 
 
+def _merge(dst: dict, src: dict) -> None:
+    """深度合并 —— 浅层赋值会把整棵子树冲掉，
+    工兵只想改一个 learning_rate，结果把 k 也抹了。"""
+    for key, value in (src or {}).items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            _merge(dst[key], value)
+        else:
+            dst[key] = value
+
+
+def _check_bounds(config: dict[str, Any]) -> None:
+    """越界当场报错，别等训练跑到天亮才发现。"""
+    for (root, key), (lo, hi) in AGENT_PARAM_BOUNDS.items():
+        value = (config.get(root) or {}).get(key)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{root}.{key} 写成了 {value!r}，不是数字"
+            ) from None
+        if not lo <= number <= hi:
+            raise ValueError(
+                f"{root}.{key} = {value}，超出允许区间 [{lo}, {hi}]。"
+                f"这是提案不合法，不是这个方法没用。"
+            )
+
+
+def apply_agent_patch(patch, output_dir) -> None:
+    """接收 Agent 的配置补丁 —— Bridge 在每轮训练前调用它。
+
+    没有这个函数时，Bridge 会抛 NotImplementedError（它不肯静默忽略修改），
+    于是工兵只要产出任何补丁，整轮就作废 —— 这条路以前一轮都跑不成。
+
+    补丁是**累积重放**的：每轮拿 history 从初始配置重新叠一遍，
+    而不是在上一轮结果上继续改。这样任何一轮的配置都能从日志完整复现，
+    也不会因为中间某轮被回滚而留下脏状态。
+    """
+    global _AGENT_OVERRIDES
+    _AGENT_OVERRIDES = {}
+
+    for item in patch.get("history") or [patch]:
+        if item.get("new_files"):
+            raise NotImplementedError(
+                "官方 FM Trainer 只接受配置实验 —— 它训的是 baseline.FM，"
+                "没有加载 Agent 自己写的模型/特征代码的机制。"
+                "要做代码实验，得换一个实现了 new_files 的 Trainer。"
+            )
+        raw = item.get("config_patch") or ""
+        parsed = yaml.safe_load(raw) if isinstance(raw, str) else raw
+        if not parsed:
+            continue
+        if not isinstance(parsed, dict):
+            raise ValueError("config_patch 必须是 YAML 键值对")
+        unknown = set(parsed) - AGENT_CONFIG_ROOTS
+        if unknown:
+            raise ValueError(
+                f"config_patch 想改 {sorted(unknown)}，"
+                f"只准动 {sorted(AGENT_CONFIG_ROOTS)} 这两棵子树。"
+            )
+        _merge(_AGENT_OVERRIDES, parsed)
+
+    _check_bounds(_AGENT_OVERRIDES)
+
+    # 把这一轮真正生效的覆盖值落盘 —— 日志里看得见，才查得出问题
+    out = pathlib.Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "agent_overrides.yaml").write_text(
+        yaml.safe_dump(_AGENT_OVERRIDES, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
 def _read_config(
     config: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """读取并验证 FM 配置。"""
-    config = dict(config or {})
+    # 任务配置打底，Agent 的补丁盖在上面 —— 这一步以前不存在，
+    # 所以工兵改的东西根本到不了训练那里
+    config = copy.deepcopy(dict(config or {}))
+    _merge(config, _AGENT_OVERRIDES)
+    _check_bounds(config)
 
     model_config = _require_section(
         config,
