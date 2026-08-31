@@ -1,89 +1,74 @@
 ## Challenges we ran into
 
+We expected the hard part to be making the agent clever. It wasn't. Every problem that
+actually cost us time had the same shape: it looked like one thing and turned out to be
+another. A cautious agent that was really a blind one. A limit on its knowledge that was
+really a decision we had made. And a success that was really nothing at all.
+
 **The doctor kept saying it couldn't tell.**
 
-We started the first real run in the evening and came back expecting to read arguments.
-Instead we read the same sentence twenty times. No findings this round. No findings this
-round. No findings this round.
+We came back to the first real run expecting to read arguments. We read the same sentence
+twenty times. *No findings this round.* The session had converged having written nothing,
+and the two roles that do the actual work had never been woken up.
 
-The session had converged. It had written nothing. The strategist and the engineer — the
-two roles that actually do the work — had never once been woken up.
-
-Our first instinct was that the doctor was too cautious, and that the fix was to tell it
-to try harder. Before doing that we read what it had actually written, which we should
-have done first. It had been explaining the problem to us, patiently, every round:
+Our instinct was that the doctor was too timid. Before loosening it we read what it had
+written, which we should have done first:
 
 *Needs the training-set score. Not here.*
 *Needs the per-bucket numbers. Not here.*
 *Needs users split into seen and unseen. Not here.*
 
-It was right. Almost nothing a doctor diagnoses is the total score. Overfitting is the
-distance between training and validation. Cold start is one bucket held against another.
-New users are one group held against another. Our scorecard had three validation numbers
-on it and nothing else. We had handed it a thermometer and asked for a diagnosis.
+It was right. Almost nothing a doctor diagnoses is the total score — overfitting is a
+distance, cold start is one bucket against another. Our scorecard had three validation
+numbers on it. We had handed it a thermometer and asked for a diagnosis.
 
-So we rebuilt the scorecard and left the doctor alone. It now gets the training score,
-the score for each exposure bucket, seen users against unseen ones, a number for every
-day, and the shape of the user base. On the next run it found two real problems, ruled
-out four others, and gave numbers for all six. Not a word of the doctor changed.
+So we rebuilt the scorecard and left the doctor alone. Next run: two real problems found,
+four ruled out, numbers for all six. Not a word of the doctor changed.
 
-The lesson stuck. When the agent says it cannot tell, that is information about us.
+When the agent says it cannot tell, that is information about us.
 
 **A library of methods always runs out.**
 
-Every technique we knew went onto a card: what it treats, why it works, how to build it,
-and what it looks like when it goes wrong. That library is what the agent prescribes
-from — which means, on the face of it, the agent can never be smarter than our reading
-list.
+Every technique we knew went onto a card — what it treats, why it works, how to build it,
+what failure looks like. Which means, on the face of it, the agent can never be smarter
+than our reading list.
 
-The obvious answer is to hand it the papers. Fill the context with literature and let it
-think. We decided that was worse. It would have to re-read the whole shelf every round
-and decide by feel what applied — slow, expensive, and a fresh opportunity each time to
-invent a connection that isn't there.
+The obvious answer is to hand it the papers. We think that is worse: it would re-read the
+shelf every round and decide by feel what applied, with a fresh chance each time to invent
+a connection that isn't there.
 
-We did two other things.
+So we distilled instead of dumping. A card is a paper reduced to the four things you need
+at the moment of choosing, labelled with the problems it treats — using the same fixed
+vocabulary the doctor is restricted to. Finding the right card is then not a judgement at
+all. It is an intersection of two sets: free, instant, and unable to invent a match.
 
-First, we distilled instead of dumping. A card is a paper reduced to the four things you
-need at the moment of choosing, and it carries a label: which problems it treats. Those
-labels come from the same fixed list the doctor is restricted to. So finding the right
-card is not a judgement at all. It is an intersection of two sets. It costs nothing, it
-takes no time, and it cannot invent a match — the doctor is physically unable to name a
-problem that no card treats.
-
-Second, we gave the strategist a way out of the library. When nothing fits the
-diagnosis, or everything that fits has already failed, it may propose something that
-exists on no card. It sketches the implementation itself, defends it like any other
-proposal, and faces exactly the same review afterwards.
-
-That path gets used. Some of its inventions came from reading the error message of
-something that had broken two rounds earlier — it went back, worked out why that attempt
-had failed, and went around it.
+Then we gave the strategist a way out of the library. When nothing fits, or everything
+that fits has already failed, it may propose something that exists on no card — it just
+has to sketch the implementation itself and face the same review afterwards. That path
+gets used. Some of its inventions came from reading the error message of something that
+had broken two rounds earlier.
 
 The library turned out to be the floor, not the ceiling.
 
 **The score went up and it meant nothing.**
 
-This is the failure we were most afraid of, because it arrives dressed as success.
+This is the failure we feared most, because it arrives dressed as success.
 
-Say the agent decides cold-start items are the problem. It picks a fix, writes it,
-trains, and the score improves. Everybody is pleased. Except the cold-start bucket never
-moved — the gain came from somewhere else entirely.
+The agent decides cold-start items are the problem, writes a fix, and the score improves.
+Except the cold-start bucket never moved — the gain came from somewhere else. Write that
+down as "it worked" and it reaches for the same fix next time, and the card's trust score
+climbs. Twenty rounds later you have a rising number and a completely wrong picture of
+your own model.
 
-Write that down as "the fix worked" and the damage starts. It reaches for the same fix
-next time. The trust score on that card goes up. Twenty rounds later you have a system
-with a rising number and a completely wrong picture of its own model.
+It is the maths tutor problem. The child is bad at maths, you hire a maths tutor, the term
+score goes up three points — and maths is unchanged, the gain came from an easy literature
+paper. Now you will hire that tutor again.
 
-It is the maths tutor problem. The child is bad at maths, so you hire a maths tutor, and
-the term score goes up three points. Maths is unchanged; the gain came from an easy
-literature paper. And now you will hire that tutor again.
-
-So the reviewer is not allowed to look at the total. It has to name the number it was
-aiming at, and report what that number did.
-
-We wrote those rules as checks that fail, not as instructions that ask. It cannot claim
-success while admitting nothing improved. It cannot say a problem is fixed while its own
-before and after are identical. It cannot claim a win smaller than the noise. If a
-proposal promised to treat three problems, it accounts for all three or it is sent back.
+So the reviewer may not look at the total. It has to name the number it was aiming at and
+report what that number did. And we wrote those rules as checks that fail, not
+instructions that ask: it cannot claim success while admitting nothing improved, cannot
+call a problem fixed while its own before and after are identical, cannot claim a win
+smaller than the noise, and cannot promise to treat three problems and account for one.
 
 Every rule we wrote as an instruction was eventually ignored. Every rule we wrote as a
 check held.
