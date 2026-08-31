@@ -58,7 +58,17 @@ Two decisions did most of the work.
 
 **The scorecard carries evidence, not just a score.** Six of the twelve symptoms are judged on *grouped* numbers rather than the total: overfitting needs a train-set score, cold-start needs per-exposure-bucket scores, new-user needs a seen/unseen split. When the scorecard held only three validation numbers, the doctor correctly and repeatedly answered "I cannot tell" — and the strategist and implementer were never even invoked. Adding the grouped evidence is what turned the loop on.
 
-**The official baseline is deliberately withheld from the agent.** The competition ranks by delta over that baseline — the judges' ruler, not the agent's input. Given the number, the agent degenerates into tuning against a constant: above it, "no findings"; below it, a vague "underfitting". It stops reading the train/validation gap, the buckets, the user composition — the evidence that actually localises a cause. The baseline is recorded end-to-end for humans in `final_summary.json`, and a test asserts that none of those figures can reach anything the agent reads.
+**The agent builds its own codebase, not just its own config.** An agent limited to hyperparameters is a knob-turner, and the track explicitly rewards going past that. So we gave it three places to write real Python, behind three protocols in `modules/base.py`:
+
+- `FeatureOp` — feature engineering. `needs()` declares which raw columns it reads, `fit()` learns from the training split only, `transform()` applies. Any new column it produces is appended to the feature table automatically, so a feature the agent invented in round 6 is simply part of the model from round 6 onward.
+- `ModelOp` — network architecture. `build()` receives the feature spec and returns a model; `predict()` defines how to score.
+- `TrainOp` — training strategy, as callbacks on `on_train_begin` / `on_epoch_end` / `on_train_end`. Early stopping, weight averaging and schedules are written as ordinary code hooked into the loop.
+
+The modules the agent writes are imported by path at run time and dropped into a real deep training path: ID vocabularies built from the training split only, embedding tables, an epoch loop, per-epoch validation, TrainOp callbacks fired between epochs, and a rollback to the best epoch's weights at the end.
+
+The freedom is bounded by the same rules a human contributor follows, enforced in code rather than requested in a prompt. It may create files under `modules/` and nothing else — a path containing `..`, or one that would overwrite existing human code, is rejected outright. Every statistic is fitted on the training split; a module that computes target statistics is driven through an out-of-fold path so a row can never be encoded using its own label.
+
+This is the difference between an agent that reports "I raised the learning rate" and one that reports "I wrote a video-popularity bucketing feature, here is the file, here is what it changed." After a session, the new `.py` files in the repository are its work, and they are in the log with full diffs.
 
 ## Development tools
 
