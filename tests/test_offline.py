@@ -846,6 +846,61 @@ def test_模型拒绝与截断是两种不同的错():
         llm.call(role="医生", system="", user="", schema={})
 
 
+def test_Claude请求转换不支持的约束但不改原Schema():
+    """Claude 不接受长度和数值范围等约束；只能转换发出的副本。
+
+    原 Schema 还会被其他后端和本地校验使用，不能为兼容 API 就地删掉。
+    """
+    from agent.llm import LLM
+
+    收到的参数 = {}
+
+    class _Client:
+        def __init__(self):
+            def create(*args, **kwargs):
+                收到的参数.update(kwargs)
+                return _FakeResp("end_turn", '{"items": []}')
+
+            self.messages = type("M", (), {"create": create})()
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 3,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "nested": {"type": "array", "maxItems": 2},
+                        "score": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                },
+            }
+        },
+    }
+
+    LLM(client=_Client()).call(
+        role="医生", system="", user="", schema=schema, max_tokens=100
+    )
+
+    sent = 收到的参数["output_config"]["format"]["schema"]
+    # minItems is supported and therefore remains; maxItems is transformed.
+    assert sent["properties"]["items"]["minItems"] == 1
+    assert "maxItems" not in sent["properties"]["items"]
+    assert "maxItems" not in sent["properties"]["items"]["items"]["properties"]["nested"]
+    sent_score = sent["properties"]["items"]["items"]["properties"]["score"]
+    assert "minimum" not in sent_score
+    assert "maximum" not in sent_score
+    assert schema["properties"]["items"]["minItems"] == 1
+    assert schema["properties"]["items"]["maxItems"] == 3
+    assert schema["properties"]["items"]["items"]["properties"]["nested"]["maxItems"] == 2
+    score = schema["properties"]["items"]["items"]["properties"]["score"]
+    assert score["minimum"] == 0
+    assert score["maximum"] == 1
+
+
 def test_max_tokens大时必须走流式():
     """SDK 规定预估超 10 分钟的请求必须流式，非流式会直接抛 ValueError。
 
@@ -880,6 +935,39 @@ def test_max_tokens大时必须走流式():
     llm.call(role="医生", system="", user="", schema={},
              max_tokens=_STREAM_THRESHOLD - 1)
     assert not 用了流式, "小请求不必流式，非流式更简单"
+
+
+def test_Haiku输出预算自动限制为64000且仍走流式():
+    """工兵通用预算是 96k，但 Haiku 4.5 的 API 硬上限是 64k。"""
+    from agent.llm import LLM, _HAIKU_45_MAX_OUTPUT_TOKENS
+
+    收到的上限 = []
+    走了流式 = []
+
+    class _Stream:
+        def __init__(self, kwargs):
+            收到的上限.append(kwargs["max_tokens"])
+        def __enter__(self):
+            走了流式.append(True)
+            return self
+        def __exit__(self, *args):
+            return False
+        def get_final_message(self):
+            return _FakeResp("end_turn", '{"ok": 1}')
+
+    class _Client:
+        def __init__(self):
+            self.messages = type("M", (), {
+                "create": lambda *args, **kwargs: pytest.fail("64k 请求必须走流式"),
+                "stream": lambda *args, **kwargs: _Stream(kwargs),
+            })()
+
+    LLM(client=_Client()).call(
+        role="工兵", system="", user="", schema={}, big=False, max_tokens=96000
+    )
+
+    assert 收到的上限 == [_HAIKU_45_MAX_OUTPUT_TOKENS]
+    assert 走了流式
 
 
 # ────────────────── 配置：白名单与深度合并 ──────────────────
@@ -2178,6 +2266,73 @@ def test_分批读取_内存预算够大时一批读完(tmp_path):
     assert len(批次[0]) == 5 * 20
 
 
+def test_训练分片_合并前先抽样且正样本全留(tmp_path):
+    pd = pytest.importorskip("pandas")
+    from harness.data import read_training_sample
+
+    path = tmp_path / "train_shards"
+    path.mkdir()
+    for i in range(3):
+        pd.DataFrame({
+            "sample_id": range(i * 100, i * 100 + 100),
+            "click": [1] * 10 + [0] * 90,
+            "conversion": [0] * 100,
+            "101": range(100),
+        }).to_parquet(path / f"part-{i}.parquet")
+
+    out = read_training_sample(path, negative_fraction=0.2, seed=7)
+    assert int(out["click"].sum()) == 30                 # 三片全部正样本都保留
+    assert int((out["click"] == 0).sum()) == 54          # 每片 90 × 20%
+    assert len(out) == 84
+
+
+def test_训练分片_相同种子结果完全一致(tmp_path):
+    pd = pytest.importorskip("pandas")
+    from harness.data import read_training_sample
+
+    path = tmp_path / "deterministic_shards"
+    path.mkdir()
+    for i in range(2):
+        pd.DataFrame({"sample_id": range(i * 50, i * 50 + 50),
+                      "click": [1] * 5 + [0] * 45,
+                      "conversion": [0] * 50}).to_parquet(path / f"part-{i}.parquet")
+    first = read_training_sample(path, 0.25, seed=20260827)
+    second = read_training_sample(path, 0.25, seed=20260827)
+    assert first["sample_id"].tolist() == second["sample_id"].tolist()
+
+
+def test_训练分片_全量比例不丢任何行(tmp_path):
+    pd = pytest.importorskip("pandas")
+    from harness.data import read_training_sample
+
+    path = tmp_path / "full_shards"
+    path.mkdir()
+    for i in range(2):
+        pd.DataFrame({"sample_id": range(i * 20, i * 20 + 20),
+                      "click": [0, 1] * 10,
+                      "conversion": [0] * 20}).to_parquet(path / f"part-{i}.parquet")
+    out = read_training_sample(path, 1.0, seed=3)
+    assert len(out) == 40
+    assert set(out["sample_id"]) == set(range(40))
+
+
+def test_训练分片_只读取模型需要的列(tmp_path):
+    pd = pytest.importorskip("pandas")
+    from harness.data import read_training_sample
+
+    path = tmp_path / "wide_shards"
+    path.mkdir()
+    pd.DataFrame({
+        "sample_id": range(20), "click": [0, 1] * 10,
+        "conversion": [0] * 20, "101": range(20),
+        "巨大未启用对象列": [[str(i)] * 100 for i in range(20)],
+    }).to_parquet(path / "part-0.parquet")
+    columns = ["sample_id", "click", "conversion", "101"]
+    out = read_training_sample(path, 0.5, seed=3, columns=columns)
+    assert list(out.columns) == columns
+    assert "巨大未启用对象列" not in out
+
+
 def test_分批读取_预算小就拆成多批(tmp_path):
     from harness.executor import read_in_batches
 
@@ -2342,6 +2497,36 @@ def test_深度路径_超参数越界被夹回():
     assert deep_kwargs({"epochs": "很多"})["epochs"] == 5       # 写歪了退回默认
 
 
+def test_深度路径_设备选择可配置():
+    need("torch")
+    import torch
+    from harness.deep import select_device
+
+    assert select_device(torch, "cpu").type == "cpu"
+    assert select_device(torch, "auto").type in {"cpu", "cuda"}
+    with pytest.raises(ValueError, match="auto / cpu / cuda"):
+        select_device(torch, "显卡")
+
+
+def test_深度路径_CUDA真实训练并记录设备(tmp_path):
+    need("torch")
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("这台机器没有 CUDA")
+    from harness.executor import RealExecutor
+
+    train, val = _造数据(tmp_path, 400, 200)
+    cfg = _深度配置(epochs=1, device="cuda", batch_size=128,
+                    predict_batch_size=128)
+    r = RealExecutor(train, val, seed=7, config=cfg).run(
+        {"new_files": [], "config_patch": ""}, "全量")
+    assert r.ok, r.error
+    dt = r.health_report["深度训练"]
+    assert dt["训练设备"] == "cuda"
+    assert "RTX 4060" in dt["GPU名称"]
+    assert dt["GPU峰值显存_MB"] > 0
+
+
 def test_深度路径_缺impl当场炸而不是悄悄换模型(tmp_path):
     """静默无视是最坑的形态：一切看起来都跑了，结论却是假的。"""
     need("torch")
@@ -2368,6 +2553,20 @@ def test_深度路径_ID词表只在训练集上建():
     v = Vocab().fit(train, ["101"])
     assert v.sizes() == {"101": 4}                 # 3 个 ID + 1 个 OOV 槽
     assert v.encode(val)[1][0] == OOV
+
+
+def test_深度路径_category缺失值和未知值都落OOV():
+    """真实执行器会先把特征转 category；0 不是其 category 时也必须能填 OOV。"""
+    need("torch")
+    pd = pytest.importorskip("pandas")
+    from harness.deep import OOV, Vocab
+
+    train = pd.DataFrame({"101": pd.Series([1, 2, None], dtype="category")})
+    val = pd.DataFrame({"101": pd.Series([2, 999, None], dtype="category")})
+    vocab = Vocab().fit(train, ["101"])
+    encoded = vocab.encode(val)[:, 0].tolist()
+    assert encoded[0] != OOV
+    assert encoded[1:] == [OOV, OOV]
 
 
 def test_深度路径_导出预测走同一条路(tmp_path):

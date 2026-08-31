@@ -36,6 +36,7 @@ DEEP_PARAMS = {
     "learning_rate": (1e-5, 0.1, 1e-3),
     "embed_dim":     (4, 128, 16),
     "weight_decay":  (0.0, 0.1, 1e-5),
+    "predict_batch_size": (64, 262144, 16384),
 }
 
 OOV = 0          # 训练集里没见过的 ID 一律落到 0 号槽位
@@ -53,6 +54,17 @@ def deep_kwargs(cfg: dict[str, Any] | None) -> dict[str, Any]:
             value = default                      # 写成 "多跑几轮" 这种，退回默认
         out[key] = min(hi, max(lo, value))
     return out
+
+
+def select_device(torch, requested: str) -> Any:
+    """按配置选择训练设备；auto 优先 CUDA，不可用时安全退回 CPU。"""
+    name = str(requested or "auto").strip().lower()
+    if name not in {"auto", "cpu", "cuda"}:
+        raise ValueError("model.deep.device 只能是 auto / cpu / cuda")
+    if name == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("配置要求使用 CUDA，但 PyTorch 没检测到可用的 NVIDIA GPU")
+    return torch.device("cuda" if name == "cuda" or (
+        name == "auto" and torch.cuda.is_available()) else "cpu")
 
 
 class Vocab:
@@ -75,8 +87,11 @@ class Vocab:
         return {f: len(m) + 1 for f, m in self.maps.items()}
 
     def encode(self, df: pd.DataFrame) -> np.ndarray:
-        cols = [df[f].map(self.maps[f]).fillna(OOV).astype("int64").to_numpy()
-                for f in self.maps]
+        # executor 会把离散特征转成 pandas category。直接在 category 上 map 后
+        # fillna(OOV) 会报“Cannot setitem on a Categorical with a new category (0)”；
+        # 先转 object，映射结果就是普通数值 Series，缺失值/未见 ID 才能安全落 OOV。
+        cols = [df[f].astype("object").map(self.maps[f]).fillna(OOV)
+                .astype("int64").to_numpy() for f in self.maps]
         return np.stack(cols, axis=1) if cols else np.zeros((len(df), 0), dtype="int64")
 
 
@@ -148,7 +163,12 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    kw = deep_kwargs((config.get("model") or {}).get("deep"))
+    deep_cfg = (config.get("model") or {}).get("deep") or {}
+    kw = deep_kwargs(deep_cfg)
+    device = select_device(torch, deep_cfg.get("device", "auto"))
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+        torch.cuda.reset_peak_memory_stats(device)
     op = load_model_op(config)
     train_ops = load_train_ops(config)
 
@@ -159,15 +179,20 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
         raise TypeError(f"model.impl 的 build() 要返回一个 torch.nn.Module，"
                         f"拿到的是 {type(model).__name__}")
 
+    model = model.to(device)
+    # AliCCP 很大：完整训练张量留在 CPU，每个 batch 才送入显卡，避免 8GB 显存 OOM。
     x = torch.tensor(vocab.encode(train), dtype=torch.long)
     click = torch.tensor(train["click"].to_numpy(), dtype=torch.float32)
     conv = torch.tensor(train["conversion"].to_numpy(), dtype=torch.float32)
+    model._goat_predict_batch_size = kw["predict_batch_size"]
     opt = torch.optim.Adam(model.parameters(), lr=kw["learning_rate"],
                            weight_decay=kw["weight_decay"])
     loss_fn = getattr(op, "loss", None)
 
+    device_name = (torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU")
+    emit("phase", name="训练设备", detail=f"{device.type} · {device_name}")
     context = {"config": config, "seed": seed, "epochs": kw["epochs"],
-               "features": features, "spec": spec}
+               "features": features, "spec": spec, "device": str(device)}
     for _, top in train_ops:
         if hasattr(top, "on_train_begin"):
             top.on_train_begin(context)
@@ -182,15 +207,19 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
         总损失 = 0.0
         for start in range(0, n, kw["batch_size"]):
             idx = order[start:start + kw["batch_size"]]
-            out = model(x[idx])
-            loss = (loss_fn(out, click[idx], conv[idx]) if loss_fn is not None
-                    else _default_loss(out, click[idx], conv[idx], torch))
+            batch_x = x[idx].to(device, non_blocking=True)
+            batch_click = click[idx].to(device, non_blocking=True)
+            batch_conv = conv[idx].to(device, non_blocking=True)
+            out = model(batch_x)
+            loss = (loss_fn(out, batch_click, batch_conv) if loss_fn is not None
+                    else _default_loss(out, batch_click, batch_conv, torch))
             opt.zero_grad()
             loss.backward()
             opt.step()
-            总损失 += float(loss.detach()) * len(idx)
+            总损失 += float(loss.detach().cpu()) * len(idx)
 
-        metrics = _eval_epoch(op, model, vocab, val, torch)
+        metrics = _eval_epoch(op, model, vocab, val, torch,
+                              batch_size=kw["predict_batch_size"])
         metrics["loss"] = round(总损失 / max(1, n), 6)
         history.append({"轮": epoch, **metrics})
         emit("phase", name=f"第 {epoch} 轮",
@@ -212,19 +241,25 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
         if hasattr(top, "on_train_end"):
             top.on_train_end(model)
 
+    peak_mb = (round(torch.cuda.max_memory_allocated(device) / 1024 ** 2, 1)
+               if device.type == "cuda" else 0.0)
     return op, model, {
         "训练轮数": len(history), "最佳轮次": best["epoch"],
         "每轮": history, "超参数": kw,
+        "训练设备": device.type,
+        "GPU名称": device_name if device.type == "cuda" else "",
+        "GPU峰值显存_MB": peak_mb,
         "装上的训练零件": [name for name, _ in train_ops],
         "_vocab": vocab,
     }
 
 
-def _eval_epoch(op: Any, model: Any, vocab: Vocab, val: pd.DataFrame, torch) -> dict[str, float]:
+def _eval_epoch(op: Any, model: Any, vocab: Vocab, val: pd.DataFrame, torch,
+                batch_size: int) -> dict[str, float]:
     """每轮结束在验证集上算一次分 —— TrainOp 拿它决定要不要停（R3：绝不碰锁定集）。"""
     from sklearn.metrics import roc_auc_score
 
-    ctr, cvr = predict_deep(op, model, vocab, val, torch)
+    ctr, cvr = predict_deep(op, model, vocab, val, torch, batch_size=batch_size)
     out = {"点击分": 0.5, "购买分": 0.5}
     if val["click"].nunique() > 1:
         out["点击分"] = float(roc_auc_score(val["click"], ctr))
@@ -234,13 +269,24 @@ def _eval_epoch(op: Any, model: Any, vocab: Vocab, val: pd.DataFrame, torch) -> 
     return {k: round(v, 6) for k, v in out.items()}
 
 
-def predict_deep(op: Any, model: Any, vocab: Vocab, df: pd.DataFrame, torch=None):
+def predict_deep(op: Any, model: Any, vocab: Vocab, df: pd.DataFrame, torch=None,
+                 batch_size: int | None = None):
     """让零件出预测，并把结果整成两个 numpy 数组。"""
     if torch is None:
         import torch
     model.eval()
+    device = next(model.parameters()).device
+    size = int(batch_size or getattr(model, "_goat_predict_batch_size", len(df) or 1))
+    ctr_parts, cvr_parts = [], []
     with torch.no_grad():
-        got = op.predict(model, torch.tensor(vocab.encode(df), dtype=torch.long))
-    ctr, cvr = got["ctr"], got["cvr"]
+        encoded = vocab.encode(df)
+        for start in range(0, len(encoded), size):
+            x = torch.tensor(encoded[start:start + size], dtype=torch.long,
+                             device=device)
+            got = op.predict(model, x)
+            ctr_parts.append(got["ctr"].detach().cpu())
+            cvr_parts.append(got["cvr"].detach().cpu())
+    ctr = torch.cat(ctr_parts) if ctr_parts else torch.empty(0)
+    cvr = torch.cat(cvr_parts) if cvr_parts else torch.empty(0)
     to_np = lambda t: (t.detach().cpu().numpy() if hasattr(t, "detach") else np.asarray(t))
     return to_np(ctr).reshape(-1), to_np(cvr).reshape(-1)

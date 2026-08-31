@@ -76,8 +76,7 @@ model:
     hidden: [128, 64]
     tower: [32]
     dropout: 0.1
-    aitm:
-      attention_hidden: [16]
+  embed_dim: 16                    # 深度模型的 embedding 维度
   lightgbm:
     n_estimators: 120
     num_leaves: 31
@@ -98,18 +97,6 @@ train:
   # ⚠️ 下面每一块，执行器要么真的兑现，要么**启用时当场报错**。
   #    绝不接受了却无视 —— 那会让工兵白改一轮、分数纹丝不动，
   #    复盘官据此判「猜错了」，把一张好卡片拉黑。见 harness/executor.py:check_supported
-
-  # 训练开始前先过硬闸门：R1、R8 和两种购买 AUC 口径配置不对就直接终止。
-  compliance_gate:
-    enabled: true
-    impl: modules/train/compliance_gate.py
-    forbidden_fields: [sample_id, common_id, click, conversion, ctcvr]
-    # noise 命令会有意覆盖单次运行种子来完成 R12 的三种子验证；每次实际种子仍写日志。
-    require_config_seed_match: false
-    required_eval:
-      ctr_scope: all_impressions
-      cvr_scope: clicked_only
-      also_report_cvr_on_all: true
 
   # ✅ 生效：LightGBM 原生早停
   early_stopping:

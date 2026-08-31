@@ -100,7 +100,7 @@ class EarlyStopping:
     def summary(self) -> dict[str, Any]:
         """训练循环把这个写进本轮日志（R10）。
 
-        `best_epoch == 总轮数 - 1` 是「学得不够」这个病的判定依据之一
+        `best_epoch == 总轮数 - 1` 是"学得不够"这个病的判定依据之一
         （说明还没学完就到头了），所以这个字段必须记。
         """
         return {

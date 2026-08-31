@@ -39,6 +39,10 @@ ALLOWED_CONFIG_ROOTS = ("features", "model", "train")
 # 测过噪声带之后（agent/noise.py）用实测值顶掉它，取两者较大的那个。
 MIN_REAL_GAIN = 0.0005
 
+# AGENTS.md 危险信号：训练集与验证集 AUC 差距超过该值时，
+# 不许让医生用“没有 baseline”或“可能是分布差异”将它判为正常。
+DANGEROUS_TRAIN_VAL_AUC_GAP = 0.15
+
 
 def _prompt(name: str, **subs: str) -> str:
     text = (PROMPTS / f"{name}.md").read_text(encoding="utf-8")
@@ -95,6 +99,15 @@ def diagnose(
     health_report: dict[str, Any],
     history_brief: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    train_auc = (health_report.get("训练集") or {}).get("点击分")
+    val_auc = (health_report.get("验证集") or {}).get("点击分")
+    dangerous_gap: float | None = None
+    if train_auc is not None and val_auc is not None:
+        try:
+            dangerous_gap = abs(float(train_auc) - float(val_auc))
+        except (TypeError, ValueError):
+            dangerous_gap = None
+
     def validate(data: dict[str, Any]) -> None:
         # 数量上限和数值范围以前写在 schema 里，但结构化输出接口不支持
         # maxItems / minimum / maximum（写了整个请求 400），所以搬到这里。
@@ -117,6 +130,30 @@ def diagnose(
             raise SchemaViolation("no_finding 为 true 时 findings 必须为空")
         if not data["no_finding"] and not data["findings"]:
             raise SchemaViolation("findings 为空时必须把 no_finding 置为 true 并说明原因")
+
+        if (dangerous_gap is not None
+                and dangerous_gap > DANGEROUS_TRAIN_VAL_AUC_GAP):
+            if data["no_finding"]:
+                raise SchemaViolation(
+                    f"训练与验证点击AUC差值 {dangerous_gap:.4f} 超过 "
+                    f"{DANGEROUS_TRAIN_VAL_AUC_GAP:.2f}，触发危险信号，"
+                    "不能返回 no_finding"
+                )
+            danger_findings = [
+                finding for finding in data["findings"]
+                if finding["symptom"] in ("在背题", "数据对不上")
+            ]
+            if not danger_findings:
+                raise SchemaViolation(
+                    f"训练与验证点击AUC差值 {dangerous_gap:.4f} 超过 "
+                    f"{DANGEROUS_TRAIN_VAL_AUC_GAP:.2f}，必须报告「在背题」"
+                    "或「数据对不上」"
+                )
+            if max(float(finding["severity"]) for finding in danger_findings) < 0.7:
+                raise SchemaViolation(
+                    f"训练与验证点击AUC差值 {dangerous_gap:.4f} 超过 "
+                    f"{DANGEROUS_TRAIN_VAL_AUC_GAP:.2f}，危险信号 severity 不得低于 0.7"
+                )
 
     user = (
         f"## 本轮成绩单\n\n{_dump(health_report)}\n\n"
@@ -270,18 +307,57 @@ def implement(
                 raise SchemaViolation(
                     f"{path} 里有 `..`。用它可以从 modules/ 爬出去改主程序，一律打回。"
                 )
+            existing = PROMPTS.parent.parent / path
+            if (existing.exists()
+                    and existing.read_text(encoding="utf-8") != f["content"]):
+                raise SchemaViolation(
+                    f"{path} 已经存在，而工兵交付的内容不同。"
+                    "R5 只允许在 modules/ 下新建零件，不许覆盖已有文件。"
+                    "如果真需要新实现，请换一个未使用的新文件名。"
+                )
             for bad in FORBIDDEN_FIELDS:
                 if re.search(rf"""["']{bad}["']""", f["content"]):
                     raise SchemaViolation(
                         f"{path} 里出现了禁用字段 {bad}（CLAUDE.md R1）。"
                         f"这五个字段永远不许进入模型输入。"
                     )
+<<<<<<< HEAD
         _check_config_patch(data.get("config_patch") or "")
         # 接口的 minItems 只认 0 和 1，所以"至少 3 条"只能在这里卡
         if len(data["self_check"]) < schemas.MIN_SELF_CHECKS:
             raise SchemaViolation(
                 f"self_check 只写了 {len(data['self_check'])} 条，"
                 f"至少要 {schemas.MIN_SELF_CHECKS} 条。")
+=======
+        patch_text = data.get("config_patch") or ""
+        _check_config_patch(patch_text)
+        parsed_patch = yaml.safe_load(patch_text) or {}
+
+        # 深度训练每轮真正产出的指标名只有这三个。工兵曾反复写
+        # ctr_auc / cvr_auc / mean_auc，直到烧完一次真训练才 KeyError。
+        monitor = parsed_patch.get("train.early_stopping.monitor")
+        train_patch = parsed_patch.get("train")
+        if monitor is None and isinstance(train_patch, dict):
+            early_patch = train_patch.get("early_stopping")
+            if isinstance(early_patch, dict):
+                monitor = early_patch.get("monitor")
+        allowed_monitors = {"点击分", "购买分", "loss"}
+        if monitor is not None and str(monitor) not in allowed_monitors:
+            raise SchemaViolation(
+                f"train.early_stopping.monitor 写成了 {monitor!r}，"
+                f"但训练循环只产出 {sorted(allowed_monitors)}。"
+                "请改用「点击分」、「购买分」或 loss。"
+            )
+
+        mlp_patch = ((parsed_patch.get("model") or {}).get("mlp")
+                     if isinstance(parsed_patch.get("model"), dict) else None)
+        if ("model.mlp.epochs" in parsed_patch
+                or isinstance(mlp_patch, dict) and "epochs" in mlp_patch):
+            raise SchemaViolation(
+                "epochs 写在 model.mlp 下不会生效；"
+                "深度训练轮数必须写在 model.deep.epochs。"
+            )
+>>>>>>> ea775fc92de615fd942806d60582a14a414979b0
         blob = " ".join(data["self_check"])
         if not any(x in blob for x in FORBIDDEN_FIELDS) and "禁用" not in blob:
             raise SchemaViolation("self_check 里必须有一条确认没有使用禁用字段")
@@ -350,6 +426,31 @@ def reflect(
     """
     floor = max(MIN_REAL_GAIN, float(noise_floor))
 
+    def report_scores(report: dict[str, Any]) -> dict[str, float]:
+        """从成绩单里取评估分，只用来校验复盘官申报的 delta。"""
+        for section in ("验证集", "总分"):
+            block = report.get(section)
+            if isinstance(block, dict) and block.get("点击分") is not None:
+                return {
+                    "点击AUC": float(block["点击分"]),
+                    "购买AUC": float(block.get("购买分") or 0.0),
+                }
+        return {}
+
+    result_scores = report_scores(result)
+    parent_scores = report_scores(parent_result)
+    expected_gains = ({
+        metric: result_scores[metric] - parent_scores[metric]
+        for metric in schemas.METRICS
+    } if all(metric in result_scores and metric in parent_scores
+             for metric in schemas.METRICS) else {})
+
+    def threshold(metric: str) -> float:
+        if noise_bands_by_metric:
+            return max(MIN_REAL_GAIN,
+                       float(noise_bands_by_metric.get(metric, 0.0) or 0.0))
+        return floor
+
     def 够不够(gains: dict[str, float]) -> bool:
         """有没有哪一项越过了**它自己**的噪声带。"""
         if not gains:
@@ -376,6 +477,24 @@ def reflect(
                 f"超过 ±{schemas.PRIOR_DELTA_CAP}。一次实验不足以把一张卡捧上天或打死。")
         verdict = data["verdict"]
         gains = data["actual"]
+        if expected_gains:
+            mismatches = {
+                metric: {"应为": expected_gains[metric], "实际填写": gains[metric]}
+                for metric in schemas.METRICS
+                if abs(float(gains[metric]) - expected_gains[metric]) > 1e-6
+            }
+            if mismatches:
+                raise SchemaViolation(
+                    f"actual 必须填“本轮分数 - 上一版分数”，数字对不上："
+                    f"{mismatches}"
+                )
+
+        significant_up = any(
+            float(gains[metric]) >= threshold(metric) for metric in schemas.METRICS
+        )
+        significant_down = any(
+            float(gains[metric]) <= -threshold(metric) for metric in schemas.METRICS
+        )
         best = max(abs(v) for v in gains.values()) if gains else 0.0
         # CLAUDE.md R11：提升小于门槛（或小于该指标自己的实测噪声带）判「说不清」
         if verdict == "猜对了" and not 够不够(gains):
@@ -417,6 +536,11 @@ def reflect(
         if verdict == "猜对了" and all(v <= 0 for v in gains.values()):
             raise SchemaViolation(
                 f"两个指标都没有上涨（{gains}），不能判「猜对了」。"
+            )
+        if verdict == "说不清" and significant_down and not significant_up:
+            raise SchemaViolation(
+                f"没有指标显著上涨，却有指标下降超过自己的噪声带（{gains}），"
+                "必须判「猜错了」，不能判「说不清」。"
             )
         # 判错了还给卡片加分 = 记忆被污染，下次还会挑中这张卡
         if verdict == "猜错了" and data["card_update"]["prior_delta"] > 0:

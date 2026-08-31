@@ -43,6 +43,7 @@ _EFFORT_CAPABLE = ("claude-opus-", "claude-sonnet-5", "claude-fable-")
 # （"Streaming is required for operations that may take longer than 10 minutes"）
 _STREAM_THRESHOLD = 20000
 
+<<<<<<< HEAD
 # 每个模型的输出上限。要超了不是被截断，是整个请求 400 ——
 # 真撞过：工兵按 roles.py 给的 96000 去调 Haiku 4.5（上限 64000），
 # 主方案和两个备胎连着三次全挂，整轮作废，而 token 一个没花、
@@ -63,6 +64,25 @@ def cap_max_tokens(model: str, want: int) -> int:
     而不是"少于 96000 就别跑"。真被截断了另有 stop_reason 会说。
     """
     return min(want, _MAX_OUTPUT.get(model, _MAX_OUTPUT_DEFAULT))
+=======
+# Claude Haiku 4.5 rejects requests above 64k output tokens.  Implementer calls
+# ask for a larger generic budget, so clamp only the API request for this model.
+_HAIKU_45_MAX_OUTPUT_TOKENS = 64000
+
+def _schema_for_anthropic(value: Any) -> Any:
+    """Return the SDK's compatible wire copy without mutating our source schema.
+
+    Claude structured outputs supports only a JSON Schema subset.  The SDK
+    removes unsupported constraints (array lengths, numeric bounds, and so on)
+    and records them in descriptions while role validators keep enforcing our
+    local semantic rules.
+    """
+    # A few unit-test clients intentionally use an empty placeholder schema.
+    # Production role schemas always have a root type.
+    if not value:
+        return value
+    return anthropic.transform_schema(value)
+>>>>>>> ea775fc92de615fd942806d60582a14a414979b0
 
 
 @dataclass
@@ -151,13 +171,22 @@ class LLM:
                   不合格时抛 SchemaViolation 并附带说明，我们会把说明喂回去重试一次。
         """
         model = BIG_MODEL if big else SMALL_MODEL
+<<<<<<< HEAD
         max_tokens = cap_max_tokens(model, max_tokens)
+=======
+        request_max_tokens = max_tokens
+        if model.startswith("claude-haiku-4-5"):
+            request_max_tokens = min(max_tokens, _HAIKU_45_MAX_OUTPUT_TOKENS)
+>>>>>>> ea775fc92de615fd942806d60582a14a414979b0
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
+            "max_tokens": request_max_tokens,
             "system": system,
             "output_config": {
-                "format": {"type": "json_schema", "schema": schema}
+                "format": {
+                    "type": "json_schema",
+                    "schema": _schema_for_anthropic(schema),
+                }
             },
         }
         if model.startswith(_EFFORT_CAPABLE):
@@ -170,7 +199,7 @@ class LLM:
             # SDK 规定：预估耗时可能超 10 分钟的请求必须走流式，
             # 而 max_tokens 一大就会撞上这条线（工兵要写整个文件，给的是 96k）。
             # 非流式在那种情况下会直接抛 ValueError，一个字都拿不到。
-            if max_tokens > _STREAM_THRESHOLD:
+            if request_max_tokens > _STREAM_THRESHOLD:
                 with self.client.messages.stream(**kwargs, messages=messages) as stream:
                     resp = stream.get_final_message()
             else:
@@ -186,7 +215,7 @@ class LLM:
             if resp.stop_reason == "max_tokens":
                 self.ledger.add(role, model, inp, out, retries=1)
                 raise SchemaViolation(
-                    f"{role}：输出撞上 max_tokens={max_tokens} 被截断"
+                    f"{role}：输出撞上 max_tokens={request_max_tokens} 被截断"
                     f"（已输出 {out} token），JSON 不完整。"
                     f"这是输出预算不够，不是模型不听话 —— 调大限制，"
                     f"或让方案产出更短的代码。"
