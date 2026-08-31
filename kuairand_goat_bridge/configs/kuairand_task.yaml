@@ -12,6 +12,9 @@ patience: 3
 max_wall_seconds: 21600
 token_budget: 2000000
 generate_test_after_convergence: true
+# GOAT MLP 与官方 FM 是不同模型，默认只把官方分数作为对照基线，
+# 不要求第 0 轮在 ±0.003 内复现 FM。切回 official_fm_trainer.py 时可设为 true。
+require_baseline_reproduction: false
 
 trainer_config:
   # goat_trainer 的键名。想换回 official_fm_trainer 的话，
@@ -29,6 +32,7 @@ trainer_config:
       tower: [32]
       dropout: 0.1
     deep:
+      device: auto                    # 有 CUDA 就用 CUDA，否则安全退回 CPU（Mac 可运行）
       epochs: 12
       batch_size: 8192
       learning_rate: 0.003

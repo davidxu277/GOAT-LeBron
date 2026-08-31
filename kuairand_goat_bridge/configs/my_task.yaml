@@ -12,12 +12,24 @@ patience: 3
 max_wall_seconds: 21600
 token_budget: 2000000
 generate_test_after_convergence: true
+require_baseline_reproduction: true
+
+trainer_config:
+  model:
+    name: fm
+    k: 16
+    learning_rate: 0.001
+  train:
+    epochs: 40
+    batch_size: 8192
+    early_stopping_patience: 4
+    min_delta: 0.00001
 
 official_baseline:
   validation:
     GAUC: 0.6674
     nDCG@5: 0.5357
-    primary: 0.6016
+    primary: 0.60155
   hidden_test:
     GAUC: 0.6610
     nDCG@5: 0.5282

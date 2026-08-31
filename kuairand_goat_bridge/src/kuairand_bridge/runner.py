@@ -70,6 +70,11 @@ def _load_trainer(
     return trainer
 
 
+def validate_trainer(path: str | pathlib.Path) -> None:
+    """在 dry-run 阶段真实导入 Trainer，提前暴露缺失依赖和接口错误。"""
+    _load_trainer(path)
+
+
 def _normalize_patch(
     agent_patch: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -251,92 +256,97 @@ def run_trainer(
         agent_patch
     )
 
-    _apply_agent_patch(
-        trainer,
-        patch,
-        work_dir,
-    )
+    try:
+        _apply_agent_patch(
+            trainer,
+            patch,
+            work_dir,
+        )
 
-    model = _fit_trainer(
-        trainer,
-        dataset,
-        seed=int(seed),
-        trainer_config=dict(
-            trainer_config or {}
-        ),
-    )
-
-    valid_scores = _predict(
-        trainer,
-        model,
-        dataset.valid,
-        split_name="validation",
-    )
-
-    valid_path = _save_scores(
-        work_dir / "valid_scores.npy",
-        valid_scores,
-    )
-
-    result: dict[str, Any] = {
-        "validation": evaluate_predictions(
+        model = _fit_trainer(
+            trainer,
             dataset,
-            valid_path,
-            split="valid",
+            seed=int(seed),
+            trainer_config=dict(
+                trainer_config or {}
+            ),
+        )
+
+        valid_scores = _predict(
+            trainer,
+            model,
+            dataset.valid,
+            split_name="validation",
+        )
+
+        valid_path = _save_scores(
+            work_dir / "valid_scores.npy",
+            valid_scores,
+        )
+
+        result: dict[str, Any] = {
+            "validation": evaluate_predictions(
+                dataset,
+                valid_path,
+                split="valid",
+                output_dir=work_dir,
+            )
+        }
+
+        if not make_test:
+            return result
+
+        if dataset.test is None:
+            raise RuntimeError(
+                "make_test=True，但数据加载器没有返回 test"
+            )
+
+        if dataset.test.expose_labels:
+            raise PermissionError(
+                "test SplitView 不得暴露标签"
+            )
+
+        for row_index, row in enumerate(
+            dataset.test.rows
+        ):
+            if len(row) <= 6:
+                raise ValueError(
+                    f"test 第 {row_index} 行结构不完整"
+                )
+
+            if row[6] is not None:
+                raise PermissionError(
+                    "test 标签没有清除："
+                    f"第 {row_index} 行标签不是 None"
+                )
+
+        test_scores = _predict(
+            trainer,
+            model,
+            dataset.test,
+            split_name="test",
+        )
+
+        test_path = _save_scores(
+            work_dir / "test_scores.npy",
+            test_scores,
+        )
+
+        result["test"] = evaluate_predictions(
+            dataset,
+            test_path,
+            split="test",
             output_dir=work_dir,
         )
-    }
 
-    if not make_test:
+        if "metrics" in result["test"]:
+            raise RuntimeError(
+                "test 结果意外包含 metrics；"
+                "隐藏测试集不能在本地评分"
+            )
+
         return result
-
-    if dataset.test is None:
-        raise RuntimeError(
-            "make_test=True，但数据加载器没有返回 test"
-        )
-
-    if dataset.test.expose_labels:
-        raise PermissionError(
-            "test SplitView 不得暴露标签"
-        )
-
-    for row_index, row in enumerate(
-        dataset.test.rows
-    ):
-        if len(row) <= 6:
-            raise ValueError(
-                f"test 第 {row_index} 行结构不完整"
-            )
-
-        if row[6] is not None:
-            raise PermissionError(
-                "test 标签没有清除："
-                f"第 {row_index} 行标签不是 None"
-            )
-
-    test_scores = _predict(
-        trainer,
-        model,
-        dataset.test,
-        split_name="test",
-    )
-
-    test_path = _save_scores(
-        work_dir / "test_scores.npy",
-        test_scores,
-    )
-
-    result["test"] = evaluate_predictions(
-        dataset,
-        test_path,
-        split="test",
-        output_dir=work_dir,
-    )
-
-    if "metrics" in result["test"]:
-        raise RuntimeError(
-            "test 结果意外包含 metrics；"
-            "隐藏测试集不能在本地评分"
-        )
-
-    return result
+    finally:
+        cleanup = getattr(trainer, "cleanup_agent_patch", None)
+        if callable(cleanup):
+            cleanup()

@@ -190,6 +190,9 @@ def load_task(
             True,
         )
     )
+    config["require_baseline_reproduction"] = bool(
+        config.get("require_baseline_reproduction", False)
+    )
 
     if not (
         1
@@ -287,6 +290,11 @@ def validate_task(
             f"trainer不存在："
             f"{config['trainer']}"
         )
+
+    # dry-run 不能只检查文件存在：真实导入一次，提前暴露 pandas/torch 等
+    # 运行依赖缺失，以及 fit/predict 接口不完整的问题。
+    from .runner import validate_trainer
+    validate_trainer(config["trainer"])
 
     _goat_root()
     return config
@@ -411,7 +419,7 @@ def run(
         <= tolerance
     )
 
-    if not baseline_passed:
+    if config["require_baseline_reproduction"] and not baseline_passed:
         raise RuntimeError(
             "官方baseline复现失败："
             f"expected={expected_primary:.5f}, "

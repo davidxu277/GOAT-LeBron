@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import copy
+import atexit
 import pathlib
 import sys
 from typing import Any
@@ -65,6 +66,7 @@ BASE_FIELDS = ["user_id", "video_id", "author_id", "tab", "duration_bucket"]
 AGENT_CONFIG_ROOTS = {"features", "model", "train"}
 
 _AGENT_OVERRIDES: dict[str, Any] = {}
+_GENERATED_FILES: set[pathlib.Path] = set()
 
 
 # ────────────────────────── 数据翻译层 ──────────────────────────
@@ -141,8 +143,13 @@ def apply_agent_patch(patch, output_dir) -> None:
             if not rel.startswith("modules/") or ".." in rel.split("/"):
                 raise ValueError(f"非法写入路径：{rel}（只能写 modules/ 下，R5）")
             target = GOAT_ROOT / rel
+            # R5 只允许新建零件。绝不覆盖仓库里已经存在的用户代码；同一轮
+            # history 对刚由本次运行创建的文件做后续版本覆盖则是合法的。
+            if target.exists() and target not in _GENERATED_FILES:
+                raise FileExistsError(f"Agent 想覆盖已有文件：{rel}；只允许新建零件")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f["content"], encoding="utf-8")
+            _GENERATED_FILES.add(target)
 
         raw = item.get("config_patch") or ""
         parsed = yaml.safe_load(raw) if isinstance(raw, str) else raw
@@ -162,6 +169,19 @@ def apply_agent_patch(patch, output_dir) -> None:
     (out / "agent_overrides.yaml").write_text(
         yaml.safe_dump(_AGENT_OVERRIDES, allow_unicode=True, sort_keys=False),
         encoding="utf-8")
+
+
+def cleanup_agent_patch() -> None:
+    """删除本次 Trainer 进程新建的零件，避免实验文件被误 push。
+
+    只处理 ``apply_agent_patch`` 确认由本进程创建的文件；已有仓库文件永不删除。
+    每轮的 patch history 会在下一轮重新生成所需零件，因此清理不影响复现。
+    """
+    while _GENERATED_FILES:
+        _GENERATED_FILES.pop().unlink(missing_ok=True)
+
+
+atexit.register(cleanup_agent_patch)
 
 
 # ────────────────────────── Bridge 契约 ──────────────────────────

@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import pathlib
+import yaml
 
 from .dataset import load_dataset
 from .evaluator import evaluate_predictions
@@ -23,6 +24,8 @@ def main(argv=None):
     q = sub.add_parser("run-trainer")
     q.add_argument("--data-dir", required=True); q.add_argument("--trainer", required=True)
     q.add_argument("--output-dir", default="output"); q.add_argument("--seed", type=int, default=0)
+    q.add_argument("--trainer-config",
+                   help="传给 Trainer.fit(config=...) 的 YAML 配置文件")
     q.add_argument("--make-test", action="store_true")
     q = sub.add_parser("goat-run")
     q.add_argument("--config", required=True)
@@ -31,19 +34,29 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     if a.command == "run-trainer":
-        print(json.dumps(run_trainer(a.data_dir, a.trainer, a.output_dir, a.seed, a.make_test),
+        trainer_config = {}
+        if a.trainer_config:
+            config_path = pathlib.Path(a.trainer_config).expanduser().resolve()
+            trainer_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(trainer_config, dict):
+                raise ValueError("--trainer-config 必须指向顶层为对象的 YAML 文件")
+        print(json.dumps(run_trainer(a.data_dir, a.trainer, a.output_dir, a.seed, a.make_test,
+                                     trainer_config=trainer_config),
                          ensure_ascii=False, indent=2)); return
     if a.command == "goat-run":
         from .goat_run import run
         print(json.dumps(run(a.config, a.dry_run), ensure_ascii=False, indent=2)); return
-    dataset = load_dataset(a.data_dir)
     if a.command == "preflight":
+        # preflight 要核对三份官方切分的行数，因此读取 test 的非标签字段；
+        # load_dataset 会强制 expose_test_labels=False，标签仍然锁定。
+        dataset = load_dataset(a.data_dir, include_test=True)
         report = {"status": "ok", "data_dir": str(dataset.data_dir),
                   "rows": {x: len(dataset.split(x)) for x in ("train", "valid", "test")},
                   "test_labels_exposed": False}
         expected = {"train": 1141112, "valid": 124909, "test": 170588}
         report["official_row_counts_match"] = report["rows"] == expected
         print(json.dumps(report, ensure_ascii=False, indent=2)); return
+    dataset = load_dataset(a.data_dir)
     if a.command == "template":
         path = pathlib.Path("prediction_template_valid.csv")
         with path.open("w", newline="") as fh:
