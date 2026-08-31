@@ -21,7 +21,8 @@ from typing import Any
 
 import numpy as np
 
-from .dataset import DatasetBundle, FIDELITY_FRACTIONS, load_dataset
+from . import diagnostics
+from .dataset import DatasetBundle, FIDELITY_FRACTIONS, SplitView, load_dataset
 from .evaluator import evaluate_predictions
 
 
@@ -263,6 +264,72 @@ def _training_diagnostics(model: Any, dataset: DatasetBundle, fidelity: str,
     return diagnostics
 
 
+
+def _train_self_evaluation(
+    trainer: ModuleType,
+    model: Any,
+    train: SplitView,
+    *,
+    seed: int,
+    max_rows: int = diagnostics.DEFAULT_TRAIN_EVAL_ROWS,
+) -> dict[str, Any] | None:
+    """在训练集上再出一次预测，用来判「在背题」。
+
+    没有这一块，医生手里只有验证集一个数字，训练/验证差算不出来，
+    CLAUDE.md 写死的那道「差值 > 0.15 必须报病」的闸门也永远不会响。
+
+    只做 predict，绝不重新 fit。按整个用户抽样（GAUC/nDCG 是用户内指标，
+    随机抽行会把用户的曝光列表撕碎，算出来跟验证集不可比）。
+
+    失败不许把整轮拖垮 —— 它是诊断证据，不是成绩。拿不到就返回 None，
+    成绩单里这一块直接不出现，医生看到"没有"比看到一个假数字安全。
+    """
+    try:
+        rows = diagnostics.sample_rows_by_user(
+            train.rows,
+            max_rows,
+            seed,
+        )
+        view = SplitView("train", rows, True)
+
+        scores = _predict(
+            trainer,
+            model,
+            view,
+            split_name="train-self-eval",
+        )
+
+        metrics = diagnostics._evaluate(
+            [row[diagnostics.ROW_USER] for row in rows],
+            [int(row[diagnostics.ROW_LABEL]) for row in rows],
+            scores,
+        )
+
+    except Exception as exc:                      # noqa: BLE001
+        return {
+            "取不到": f"{type(exc).__name__}: {exc}",
+            "说明": "训练集自评失败，本轮无法判断「在背题」",
+        }
+
+    return {
+        "GAUC": round(float(metrics["GAUC"]), 4),
+        "nDCG@5": round(float(metrics["nDCG@5"]), 4),
+        "主分": round(float(metrics["primary"]), 4),
+        "总行数": len(rows),
+        "用户数": int(metrics["users"]),
+        "抽样说明": (
+            f"训练集全部 {len(rows):,} 行；只做预测，没有重新训练"
+            if len(rows) == len(train.rows) else
+            f"从训练集 {len(train.rows):,} 行里按整个用户抽了 {len(rows):,} 行；"
+            "只做预测，没有重新训练"
+        ),
+        "口径提醒": (
+            "走的是推理路径（零件的 transform）。训练时若用过折外编码，"
+            "这个分数会比模型真正见过的略高"
+        ),
+    }
+
+
 def run_trainer(
     data_dir: str | pathlib.Path,
     trainer_path: str | pathlib.Path,
@@ -342,6 +409,26 @@ def run_trainer(
                 len(full_dataset.train),
             ),
         }
+
+        # 医生判 6 个病靠的是分组之后的数字，不是验证集总分。
+        # 这一块失败不能拖垮整轮 —— 分数已经拿到了，证据缺就缺，明说。
+        try:
+            result["diagnostics"] = diagnostics.build(
+                train_rows=dataset.train.rows,
+                valid_rows=dataset.valid.rows,
+                valid_scores=valid_scores,
+                train_eval=_train_self_evaluation(
+                    trainer,
+                    model,
+                    dataset.train,
+                    seed=int(seed),
+                ),
+            )
+        except Exception as exc:                  # noqa: BLE001
+            result["diagnostics"] = {
+                "取不到": f"{type(exc).__name__}: {exc}",
+                "说明": "分组证据生成失败，本轮医生只能看验证集总分",
+            }
 
         if not make_test:
             return result

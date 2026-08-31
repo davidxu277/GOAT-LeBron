@@ -94,14 +94,35 @@ def _check_config_patch(text: str) -> None:
 # ────────────────────────────── ① 医生 ──────────────────────────────
 
 
+# 训练集与验证集的主指标名 —— 按顺序试，第一个两边都有的就用它。
+_MAIN_METRIC_KEYS = ("主分", "点击分")
+
+
+def _main_metric_pair(health_report: dict[str, Any]
+                      ) -> tuple[Any | None, Any | None]:
+    """从成绩单里取出训练集和验证集**同一个**指标，用来算过拟合差值。
+
+    两边必须是同一个指标名，否则拿训练集的主分减验证集的点击分，
+    差值毫无意义却会照样触发闸门。
+    """
+    train = health_report.get("训练集") or {}
+    val = health_report.get("验证集") or {}
+    for key in _MAIN_METRIC_KEYS:
+        if train.get(key) is not None and val.get(key) is not None:
+            return train[key], val[key]
+    return None, None
+
+
 def diagnose(
     llm: LLM,
     vocab: SymptomVocab,
     health_report: dict[str, Any],
     history_brief: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    train_auc = (health_report.get("训练集") or {}).get("点击分")
-    val_auc = (health_report.get("验证集") or {}).get("点击分")
+    # KuaiRand 的成绩单用「主分」，AliCCP 用「点击分」。这道闸门是
+    # CLAUDE.md 写死的危险信号，不能因为换了数据集就静默失效 ——
+    # 08-31 那场真跑就是这样：成绩单里连训练集都没有，闸门一次没响过。
+    train_auc, val_auc = _main_metric_pair(health_report)
     dangerous_gap: float | None = None
     if train_auc is not None and val_auc is not None:
         try:

@@ -507,9 +507,11 @@ def run(
         epsilon=config["epsilon"],
         patience=config["patience"],
         start_fidelity=initial_fidelity,
+        # 键名必须跟 read_scores 读出来的一致，否则「相对官方基线」
+        # 这一栏取不到交集，结果表上是一片空白。
         baseline={
-            "点击AUC": official["GAUC"],
-            "购买AUC": official["nDCG@5"],
+            "GAUC": official["GAUC"],
+            "nDCG@5": official["nDCG@5"],
         },
         logs_dir=logs,
     )

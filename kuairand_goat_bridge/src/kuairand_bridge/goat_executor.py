@@ -266,6 +266,7 @@ class KuaiRandGoatExecutor:
         remaining_seconds: float,
         official_baseline: dict[str, Any] | None = None,
         training: dict[str, Any] | None = None,
+        group_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         gauc = float(metrics["GAUC"])
         ndcg = float(metrics["nDCG@5"])
@@ -302,6 +303,22 @@ class KuaiRandGoatExecutor:
             else "显著低于官方基线" if primary_delta < -KuaiRandGoatExecutor.OFFICIAL_EPSILON
             else "与官方基线差异未超过 epsilon"
         )
+
+        # 医生判 12 个病里有 6 个靠分组之后的数字（训练集自评、曝光分桶、
+        # 新老用户、用户构成、日期分段、预测健康）。摊平到顶层，跟「验证集」
+        # 平级 —— 藏在一层嵌套里，医生读成绩单时容易整块略过。
+        # 摊平是为了让医生一眼看到，不是给下游一个改写分数的口子 ——
+        # 证据块里如果冒出一个「验证集」，它会把真分数盖掉，而且不报错。
+        保留字段 = {
+            "数据集", "任务", "保真度", "随机种子", "验证集",
+            "官方Validation基线", "相对官方基线", "训练诊断",
+            "运行预算", "官方结果目录", "最终提交",
+        }
+        evidence = {
+            key: value
+            for key, value in (group_evidence or {}).items()
+            if key not in 保留字段
+        }
 
         return {
             "数据集": "KuaiRand-Pure",
@@ -341,6 +358,7 @@ class KuaiRandGoatExecutor:
                 "判断": comparison,
             },
             "训练诊断": dict(training or {}),
+            **evidence,
             "运行预算": {
                 "训练尝试编号": (
                     training_attempt
@@ -491,6 +509,7 @@ class KuaiRandGoatExecutor:
                 ),
                 official_baseline=self.official_baseline,
                 training=result.get("training") or {},
+                group_evidence=result.get("diagnostics") or {},
             )
 
             return BridgeRunResult(
@@ -628,6 +647,7 @@ class KuaiRandGoatExecutor:
                 ),
                 official_baseline=self.official_baseline,
                 training=result.get("training") or {},
+                group_evidence=result.get("diagnostics") or {},
             )
 
             report["最终提交"] = (
