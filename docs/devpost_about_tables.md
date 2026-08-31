@@ -136,9 +136,17 @@ All four say the same thing, and it shaped the codebase: **the dangerous failure
 
 **A metric that can only ever be zero is not a measurement.** The manual-intervention count is scored, so reporting "0" only means something if non-zero was reachable. Ours wasn't — the command wrote to one file and the run read another — until we fixed it.
 
-## What's next
+## What's next for GOAT-LeBron
 
-Move symptom judgement from the LLM into deterministic code, leaving the doctor to rank, weigh confidence, and spot what the rules do not cover. Rewrite the noise-band measurement for a within-user ranking metric. Detect human intervention automatically instead of relying on self-reporting. Attempt the bonus benchmarks, KuaiRand-1k and KuaiRand-27k.
+Every direction below has the same shape: move work that the model is doing badly into code, so the model can spend its budget on the one thing only it can do — deciding what is worth trying next.
+
+**Let the agent debug its own code.** Today it can repair a module that fails validation, because the validator hands back the exact violation. But a module that passes validation and then *crashes at run time* costs a whole round: the error becomes a hint for the next round, and a different remedy may be chosen entirely. The fix is a three-stage preflight before the expensive training starts — parse, import, then run the module against a hundred rows — and, when something still breaks, one repair attempt with the full traceback and the offending source, charged to the same round. Writing code is only half of autonomy; the other half is fixing it.
+
+**Make diagnosis deterministic.** The detection rules are currently passed to the doctor as text, and it does the arithmetic. The same scorecard can therefore yield different findings twice, and the arithmetic can simply be wrong. Computing the rules in code makes diagnosis reproducible and leaves the doctor to do what a model is actually good at: weighing confidence, ranking severity, and noticing the thing no rule anticipated. The same move fixes measurement — the noise bands need rewriting for a within-user ranking metric, and once thresholds are computed rather than described, they can be enforced rather than suggested.
+
+**Let it write its own method cards.** The card library is the ceiling on what the agent can propose, and today every card was written by a human. When the agent invents a remedy that survives reflection — the hypothesis held, the target symptom actually moved, the gain cleared the noise band — it has already produced everything a card needs: what it treats, why it should work, how it was implemented, and what failure looked like. Writing that back as a new card is the difference between an agent that solves a task and an agent whose library grows every time it runs. The trust ledger already persists across sessions; the knowledge should too.
+
+**Measure autonomy instead of asking for it.** The manual-intervention count is self-reported: a human is trusted to run a command after touching a live run. Since we know exactly which files the agent wrote each round, any other change to the config or to `modules/` is, by elimination, a human's. Detecting that automatically turns the autonomy number from a promise into an observation — which is the same standard we already hold the agent to everywhere else.
 
 ## Results
 
