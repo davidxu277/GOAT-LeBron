@@ -52,3 +52,5 @@ secrets.*
 .DS_Store
 .idea/
 .vscode/
+docs/DEVPOST*
+docs/devpost_*

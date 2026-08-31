@@ -469,7 +469,6 @@ about rather than cleaned. Both live on the retired dataset path.
 | File | What it covers |
 |---|---|
 | [CLAUDE.md](CLAUDE.md) | The 12 hard rules, danger signals, pre-commit checklist |
-| [docs/DEVPOST.md](docs/DEVPOST.md) | Submission copy |
 | [docs/开发日志.md](docs/开发日志.md) | Development log — one line per change, newest first |
 | [docs/四个角色接口.md](docs/四个角色接口.md) | The input/output contract of the four roles |
 | [knowledge/symptoms.yaml](knowledge/symptoms.yaml) | The 12 symptoms and their detection rules |
