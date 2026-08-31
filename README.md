@@ -1,447 +1,477 @@
 # GOAT-LeBron
 
-TikTok TechJam · 赛道二：面向推荐系统的自主机器学习研究智能体
+**TikTok TechJam · Track 2 — An autonomous ML research agent for recommender systems**
 
-> **我们做的不是模型，是造模型的机器人。**
+> We didn't build a recommender. We built the machine that builds recommenders — and
+> it has to explain, in writing, why each experiment was worth running.
 
----
-
-## 一、这个项目是什么
-
-算法工程师平时干活是这样一个圈：
-
-> 拿到数据和评分标准 → 试一个想法 → 写代码 → 训练 → 看分数 → 想下一步该改什么 → 再试一遍
-
-一轮一轮转，直到分数不再涨。
-
-**我们造的是一个能代替人转这个圈的机器人。** 把数据和评分规则交给它，然后**人不碰键盘**，
-看它自己看数据、自己判断哪里差、自己写代码、自己训练、自己复盘、自己决定下一步。
-
-跑完之后，它交出两样东西：一个训练好的推荐模型，和一份完整记录了它每一步在想什么的日志。
+*[中文版 README](README.zh-CN.md)*
 
 ---
 
-## 二、整个流程
+## 1. Project overview
 
-### 一场是这样跑的
+An ML engineer's day is a loop:
+
+> read the metrics → guess what's wrong → write code → train → look at the score →
+> decide what to try next → repeat until the score stops moving
+
+**This project automates that loop, including the guessing.** You hand it a dataset
+and a scoring rule; then nobody touches the keyboard. It reads its own scorecard,
+names what is wrong, picks a remedy and argues for it, writes the code, trains,
+and judges whether its own hypothesis held.
+
+It produces two things: a trained ranking model, and a complete record of what it was
+thinking at every step.
+
+### Why not just mutate code and keep what scores higher?
+
+Because of a failure mode that is quieter than "the score didn't improve":
+
+> The doctor says the kid is bad at maths → you hire a maths tutor → the term score
+> goes up 3 points → **but maths is unchanged**; the gain came from an easy
+> literature paper. Record that as "tutoring works" and you will keep buying maths
+> tutoring — and keep getting further from the actual problem.
+
+An agent that cannot separate those two cases accumulates confident nonsense. So this
+agent must state a hypothesis *before* each experiment, and afterwards **code** —
+not a prompt — checks whether the specific number it pointed at actually moved.
+
+---
+
+## 2. How it works
+
+### One session
 
 ```
-  人只给两样东西：数据 + 评分规则
+  Human provides two things: the data + the scoring rule
       ↓
-  第 0 轮 · 先原样跑一次，拿到第一份「成绩单」
+  Round 0 · run as-is, obtain the first scorecard
       ↓
-  ┌─→ 一轮 · 诊断 → 开药 → 写代码 → 训练 → 复盘   （下一小节展开）
+  ┌─→ One round · diagnose → prescribe → implement → train → reflect
   │       ↓
-  │   产出新成绩单
+  │   new scorecard
   │       ↓
-  │   还能接着改吗？
+  │   anything left to improve?
   │       │
-  └───────┤ 能 —— 新成绩单交给下一轮的医生
+  └───────┤ yes — the new scorecard becomes the next doctor's input
           │
-          │ 不能 —— 满足任一条就停：
-          │           · 连续 N 轮提升小于 ε
-          │           · token 预算烧完了
-          │           · 在最大数据上也查不出病了
+          │ no — stop on any of:
+          │        · no gain above ε for N consecutive rounds
+          │        · token budget exhausted
+          │        · nothing diagnosable even at full data
           ↓
-  挑出「验证集分数最高」的那一轮 → 它的配方就是我们要交的东西
+  Select the round with the best validation score → that recipe is what we submit
 ```
 
-**关键：轮和轮之间是连着的。** 这一轮跑出的成绩单，就是下一轮医生的输入；
-试失败的方案会被拉黑；已经生效的方案不会再提第二遍。
+Rounds are chained. Failed cards are blacklisted; already-applied cards are never
+proposed again; unchosen proposals are shelved and re-offered while still relevant.
 
-### 一轮里发生什么：四个角色接力
+### One round: four roles in relay
 
 ```
-  成绩单  →  ① 医生  →  筛卡片  →  ② 军师  →  调度器
-              查出病     对暗号     挑 3 个    挑 1 个
-              排优先级   找对症卡   讲清为什么  算性价比
-                                                  ↓
-  下一轮  ←  ④ 复盘官  ←  训练  ←  ③ 工兵  ←─────┘
-              猜对了吗    出成绩单   写代码
+  scorecard →  ① Doctor  →  match cards  →  ② Strategist →  scheduler
+                symptoms      set intersect     3 remedies     pick 1
+                + severity    (no LLM)          + reasoning    (no LLM)
+                                                                   ↓
+  next round ← ④ Reflector ←   train    ←   ③ Implementer ←────────┘
+                did it hold?   scorecard      writes code
 ```
 
-| | 角色 | 干什么 | 说人话 |
-|---|---|---|---|
-| ① | **医生** | 看成绩单，说出模型现在有什么毛病，按严重程度排序 | 体检 |
-| | *筛卡片* | *按病名从 26 张方法卡里找对症的（纯代码，不花钱）* | *对暗号* |
-| ② | **军师** | 从对症的卡里挑 3 个方案，每个写清楚：治哪个病、预计提多少、要花多久、可能出什么问题 | 开药方 |
-| | *调度器* | *算性价比挑 1 个，并决定跑在多大的数据上（纯代码，不花钱）* | *掂量值不值* |
-| ③ | **工兵** | 把方案变成实际代码 —— 改配置，或在 `modules/` 下写一个新零件 | 动手改 |
-| | *训练* | *真的训练、真的评分，产出新成绩单* | *考试* |
-| ④ | **复盘官** | 判断当初那个假设**猜没猜对**，并更新这张卡的可信度 | 对答案 |
+| | Role | What it does |
+|---|---|---|
+| ① | **Doctor** | Reads the scorecard, names the symptoms, ranks them by severity |
+| | *card matcher* | *pure code — intersects symptoms with the card library* |
+| ② | **Strategist** | Picks 3 remedies; each states which symptom, expected gain, cost, failure signals |
+| | *scheduler* | *pure code — picks 1 by cost/benefit and chooses the data fidelity* |
+| ③ | **Implementer** | Turns it into code — a config change, or a new module under `modules/` |
+| | *training* | *real training, real scoring, new scorecard* |
+| ④ | **Reflector** | Judges whether the hypothesis held; updates the card's trust score |
 
-**中间那三行斜体的是纯代码，不调用大模型。** 大模型只在四个决策点被叫醒 ——
-这是省钱的关键（赛题按 token 总量给"可行性"打分）。
+**The three italic steps call no model.** The LLM is woken at four decision points
+only. That is what keeps the token budget small — and token usage is scored.
 
 ---
 
-## 三、我们和别人不一样在哪
+## 3. What makes it different
 
-### 1️⃣ 先诊断，再开药 —— 不是瞎试
+### 3.1 Diagnose, then prescribe
 
-同类系统（如 AIDE）本质是在代码空间里**盲目搜索**：不停改代码、看分数涨没涨，
-**但它不知道模型到底哪里差**。
-
-我们的做法是先体检再开药：
+Code-mutation agents search blindly: change something, see if the number moved. They
+never form a view of *what is actually wrong*.
 
 ```
-体检：冷门商品桶 0.552，热门商品桶 0.638，差 0.086，而冷门桶占了 34% 的样本
-  ↓
-诊断：「冷门商品学不动」（严重度 0.8，确定度 高）
-  ↓
-开药：从治这个病的卡里挑 → 「类目兜底」
-      理由：冷门商品自己的 ID 出现次数太少学不到东西，用它所属类目的
-            统计量兜底，能把这部分样本救回来
+Evidence   train primary 0.6909 vs validation 0.6015 — a gap of 0.0894
+             ↓
+Diagnosis  "memorising the training set" (severity 0.6, confidence high)
+             ↓
+Remedy     from the cards that treat it → e.g. user-level normalisation
+           Reason: the model is fitting per-user rating scale rather than
+           within-user preference order, which is what GAUC actually measures
 ```
 
-每一步都必须写下**为什么**。赛题原话是：「评审关注 Agent 识别出**什么值得尝试的、
-以及为什么** —— 而不是具体实现方式」。一个只会调学习率的机器人，创新分是零。
+The link between doctor and cards is a **12-entry symptom vocabulary**
+(`knowledge/symptoms.yaml`). The doctor's output schema enum-locks it, so the doctor
+*physically cannot* emit a symptom that no card treats. Card matching is therefore a
+set intersection — free, deterministic, and it never hallucinates a match.
 
-### 2️⃣ 它骗不了自己
+### 3.2 It cannot lie to itself
 
-最容易出的问题不是分数不涨，而是**分数涨了，但不是因为你以为的那个原因**：
-
-> 医生说「这孩子数学差」→ 补了数学课 → 期末总分涨了 3 分
-> 但翻开成绩单一看，**数学还是那个分，涨的是语文**（那天卷子简单）
-> 如果记成「补数学有用」，下学期还会继续补数学 —— **越补越偏**
-
-所以复盘官不能只看分数，必须回答「当初指着的**那个数**动了没」。这条**用代码强制**，
-不是写在提示词里靠自觉（`agent/roles.py`）：
+These are validators in `agent/roles.py`, not sentences in a prompt:
 
 ```python
-# 承认没治好，还敢判「猜对了」
-if 所有目标病都没改善 and verdict == "猜对了": 打回
+# claims the hypothesis held, while admitting no target symptom improved
+if all_targets_unresolved and verdict == "correct":        reject
 
-# 更隐蔽的一种：说治好了，可它自己给的 before / after 一模一样
-if resolved in ("是","部分") and before == after: 打回
+# subtler: claims a symptom is resolved, but its own before/after are identical
+if resolved in ("yes", "partly") and before == after:      reject
 
-# 变化量还没有随机种子的抖动大
-if 最大变化 < 噪声带 and verdict == "猜对了": 打回
+# the change is smaller than the seed-to-seed wobble
+if max_change < noise_band and verdict == "correct":       reject
 
-# 方案声称治 3 个病，就得逐个交代 —— 少报一个，那个病就没人验证
-if 有目标病没被交代: 打回
+# a proposal claiming to treat 3 symptoms must account for all 3
+if any target symptom is unaccounted for:                  reject
 ```
 
-打回不是丢掉，而是**把错处原文喂回去重问一次**。
+Rejection is not discarding — the exact violation is quoted back and the role is
+asked again.
 
-### 3️⃣ 它知道自己的测量误差有多大
+> **Prompts are signs on the wall. Validators are the wall.** Every constraint we
+> wrote as an instruction was eventually violated; every constraint we wrote as a
+> validator held.
 
-「冷门桶比热门桶低 0.03」算不算有病？取决于**这个数自己抖多少**。
+### 3.3 It knows its own measurement error
 
-```
-小份数据、冷门桶（47 条正样本） → AUC 本身就抖 ±0.086
-全量数据、热门桶（4 万条正样本）→ 只抖 ±0.003
-```
+Is "the cold bucket is 0.03 below the hot bucket" a finding? Only if 0.03 is larger
+than how much that number wobbles by itself.
 
-同一个阈值，在小数据上**把噪声当病报**，在大数据上**把真病漏掉**。
+We measure it: same config, different random seeds, N runs — and cross-check against
+the Hanley–McNeil analytic standard error computed from the positive/negative counts
+(`agent/noise.py`). Anything below the band may not be reported as a symptom, and may
+not be claimed as a gain.
 
-所以我们专门量一次：同一份配置只换随机种子跑 N 遍，看每个数自己抖多少
-（`agent/noise.py`，再用 Hanley-McNeil 公式从正负样本数算一个理论值交叉验证）。
-量出来的噪声带会自动喂给医生和复盘官 —— **小于它的差距，一律不算数**。
+The band is also **per-metric**. Two metrics whose wobble differs by an order of
+magnitude cannot share one threshold: a real gain in the stable one gets drowned by
+the noisy one's band, while the noisy one's pure jitter clears the shared threshold
+and earns undeserved trust.
+
+### 3.4 The official baseline is deliberately withheld from the agent
+
+The competition ranks by delta over the official baseline. **That is the judges'
+ruler, not the agent's input.**
+
+Given the number, the agent degenerates into tuning against a constant: above it,
+"no findings"; below it, a vague "underfitting". It stops reading the train/validation
+gap, the buckets, the user composition — the evidence that actually localises a cause.
+
+We learned this the expensive way. The symptom table once hard-coded
+"official baseline GAUC 0.6016". That figure is the **primary**, not the GAUC; the
+real GAUC baseline is 0.6674. Our model scored 0.6638 — *below* baseline on all three
+metrics — and the doctor, reading our wrong constant, concluded "clearly above
+baseline" and reported nothing. Nothing crashed. A wrong constant inverted a
+conclusion in perfect silence.
+
+The baseline is still recorded end to end, in `final_summary.json`, for humans. A test
+asserts that none of those figures can appear in anything the agent reads.
 
 ---
 
-## 四、它怎么保证不跑崩
+## 4. Staying alive
 
-赛题原话：「我们不看你失败几次，看你失败之后怎么办」。所以这部分是主动去挣的分。
+Robustness is scored, so it is engineered rather than hoped for.
 
-| 出什么事 | 怎么处理 |
+| Failure | Response |
 |---|---|
-| 某个角色抽风（格式错、网络断） | 五个环节各包一层保险丝，**作废这一轮，不作废整场** |
-| 工兵代码写失败 | 自动换备胎方案，把完整报错喂回去重写 |
-| 训练崩了 / 超时 | 复盘结论由**纯代码合成**，不浪费一次大模型调用 |
-| 翻来覆去提同一个想法 | 试过的卡拉黑；已生效的卡不再提 |
-| 连着几轮查不出病 | 升一档数据再看；最大数据上还查不出 → 判收敛 |
-| 中途断电 | 日志和三个账本每轮落盘，重启接着跑 |
+| A role misbehaves (bad format, network drop) | Each of the five stages has its own fuse — **the round is wasted, never the session** |
+| The implementer's code fails validation | Retry with the error fed back; then fall through to backup proposals |
+| Training crashes or times out | The reflection is synthesised **in code** — no LLM call wasted on a run with no result |
+| The same idea keeps coming back | Tried cards blacklisted; applied cards never re-proposed |
+| Several rounds with nothing diagnosable | Escalate one data fidelity; if already at full data, declare convergence |
+| Process dies mid-session | Logs and all three ledgers are flushed every round; restart resumes |
 
-每一次「摔倒 + 爬起来」都完整记进日志 —— 那是评委看鲁棒性的依据。
-
----
-
-## 五、任务与评分口径
-
-**数据集**：AliCCP（淘宝电商，曝光 → 点击 → 转化漏斗）
-
-**要预测**：每条曝光记录输出两个概率 —— 会不会点击、点击后会不会转化
-
-| 指标 | 在哪些记录上算 | 正样本 |
-|---|---|---|
-| CTR AUC | 全部曝光 | click = 1 |
-| CVR AUC | **仅 click = 1 的记录** | conversion = 1 |
-
-**排名依据**：相对官方基线（NISE）的绝对提升，两个指标等权平均。
-最终只在隐藏测试集上评估一次，用的是收敛时**验证集最佳**的那一版。
-
-> ⚠️ 评分不是只看分数。分数占 35%，另外 55% 看的是**这个机器人本身**：
-> 推理有没有道理（创新 20%）、人插手了几次（自主 20%）、烧了多少 token 和
-> GPU 小时（可行性 15%）。**这也是为什么日志本身就是分数。**
+Training runs in a spawned subprocess with a hard wall-clock timeout (`terminate`,
+escalating to `kill`), so a hung trainer cannot consume the session budget. Every
+stumble and recovery is written to the log — that is the evidence of robustness.
 
 ---
 
-## 六、仓库地图
+## 5. Task and scoring
+
+**Dataset** — KuaiRand-Pure. Label `long_view`. Within-user ranking over logged
+impressions; no full-corpus retrieval.
+
+| | |
+|---|---|
+| Metrics | **GAUC** and **nDCG@5**; primary = their mean |
+| GAUC scope | users with `0 < positives < impressions`, weighted by positives |
+| nDCG scope | all users; zero-positive users score 0 |
+| Split | train 2022-04-08→04-21 · validation 04-22→04-28 · test 04-29→05-08 |
+| Convergence | ε = 0.002 on primary, patience = 3 |
+| Budget | ≤ 50 training attempts, ≤ 6 h wall-clock |
+
+**Official baseline** (starter kit): a factorization machine, k=16, lr=0.001, five
+categorical fields, NumPy only.
+
+| | GAUC | nDCG@5 | primary |
+|---|---|---|---|
+| Validation | 0.6674 | 0.5357 | 0.6016 |
+| Hidden test | 0.6610 | 0.5282 | 0.5946 |
+
+Ranking uses the absolute delta over that baseline, taken from the **validation-best**
+round. The scoring also weighs the agent itself — the quality of its reasoning, how
+few times a human intervened, and the compute and tokens it consumed. **The log is
+part of the score.**
+
+---
+
+## 6. Repository map
 
 ```
-CLAUDE.md / AGENTS.md   ← 12 条红线。写任何代码前必读，AI 工具会自动读
-prep/                   ← 原始数据解析、分层采样、切分
-harness/                ← 真执行器：训练 / 评分 / 分桶指标 / 数据预检
-config/pipeline.yaml    ← 流水线配置（Agent 就是靠改这里做实验）
-modules/                ← 可替换零件（Agent 只能往这里写新文件）
-agent/                  ← Agent 大脑
-  roles.py              ←   四个角色 + 每个角色的强制校验（防自欺的墙在这）
-  loop.py               ←   一轮 run_round + 一整场 run_session + 三个账本
-  knowledge.py          ←   读病名词表与药方卡；按病名筛卡
-  schemas.py            ←   四个角色的输出结构（用 enum 卡死病名）
-  noise.py              ←   噪声带：量出测量误差有多大
-  offline.py            ←   假模型 + 假执行器，不花钱演习整场
-  prompts/              ←   四段提示词
-knowledge/              ← 方法知识库
-  symptoms.yaml         ←   12 个病名 —— 医生与卡片之间的「暗号」
-  cards/                ←   26 张药方卡
-logs/                   ← 逐轮日志、三个账本、每轮快照（内容不入库）
-deliverables/           ← finalize 整理出来的提交包（这个入库）
+CLAUDE.md / AGENTS.md       12 hard rules — leakage, train-only statistics, holdout
+                            discipline, write scope, no magic numbers
+agent/                      the agent core
+  roles.py                    four roles + the validators (the anti-self-deception wall)
+  loop.py                     one round, one session, three ledgers, the shelf
+  knowledge.py                loads the vocabulary and cards; matches by symptom
+  schemas.py                  structured-output schemas; symptom names enum-locked
+  noise.py                    noise bands: multi-seed empirical + Hanley–McNeil
+  offline.py                  fake model + fake executor — rehearse a session for $0
+  prompts/                    the four role prompts
+knowledge/
+  symptoms.yaml               12 symptoms — the doctor↔card vocabulary
+  cards/                      14 method cards
+harness/                    training path: op loading, deep loop, R2/R5 guards
+modules/                    replaceable parts — the ONLY place the agent may write
+config/pipeline.yaml        pipeline config — the other thing the agent may change
+kuairand_goat_bridge/       KuaiRand adapter
+  official_starter_kit/       vendored, unmodified: data.py, evaluate.py, submit.py
+  src/kuairand_bridge/        dataset views, runner, evaluator, diagnostics,
+                              subprocess sandbox, session entry point
+  examples/goat_trainer.py    research trainer — the agent CAN write modules
+  examples/official_fm_trainer.py  baseline trainer — config-only, by design
+  configs/kuairand_task.yaml  ← the real run
+  configs/fm_baseline.yaml    ← baseline reproduction only
+logs/ · deliverables/       per-round logs, ledgers, snapshots; the submission bundle
 ```
 
-**为什么要有「病名词表」这个东西**：它是医生和药方卡之间唯一的共同语言。
-医生说出的病名被 schema 的 enum 卡死，**物理上说不出词表以外的词**；
-卡片贴了词表外的标签，启动时直接报错不许运行。对上暗号，筛卡才是一次集合求交，
-不需要花一分钱去问大模型。
+The starter kit is **vendored unmodified and called directly**. We never reimplement
+the metric — a metric that is "almost the official one" only reveals itself at
+submission time.
 
 ---
 
-## 七、跑起来
+## 7. Setup and installation
+
+Requires Python ≥ 3.9.
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
+git clone https://github.com/davidxu277/GOAT-LeBron.git
+cd GOAT-LeBron
+
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt          # Windows: .venv\Scripts\pip
+.venv/bin/pip install -e kuairand_goat_bridge      # makes `python -m kuairand_bridge` work
 ```
 
-### 不花钱的三条（不联网、不调用模型）
+Without the editable install, prefix bridge commands with
+`PYTHONPATH=kuairand_goat_bridge/src`.
+
+Download **KuaiRand-Pure** and point the config at the directory containing the CSVs:
+
+```yaml
+# kuairand_goat_bridge/configs/kuairand_task.yaml
+data_dir: /absolute/path/to/KuaiRand-Pure/data
+```
+
+Verify the data before spending anything:
 
 ```bash
-.venv/bin/python -m agent.cli check                       # 词表与卡片是否自洽
-.venv/bin/python -m pytest tests/ -q                      # 全部离线测试（不联网、不花钱）
-.venv/bin/python -m agent.cli run --offline --rounds 8    # 假模型演习整场
+.venv/bin/python -m kuairand_bridge preflight --data-dir /path/to/KuaiRand-Pure/data
+# verified: train 1,141,112 · valid 124,909 · test 170,588
+# `official_row_counts_match: true` means the split matches the starter kit exactly
 ```
 
-演习模式用**假模型 + 假执行器**把整条链路从头跑到尾，专门验证**接线**：
-状态有没有在轮与轮之间传下去、角色炸了能不能恢复、不涨了会不会自己停。
-还能按需制造事故：
+LLM credentials (the agent roles; not needed for the offline checks below):
+
+```bash
+export AGENT_PROVIDER=deepseek DEEPSEEK_API_KEY=...
+# or: export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+---
+
+## 8. Steps to reproduce our results
+
+### Step 0 — free checks (no network, no cost)
+
+```bash
+.venv/bin/python -m agent.cli check                      # vocabulary ↔ cards consistent
+.venv/bin/python -m pytest tests/ kuairand_goat_bridge/tests/ -q
+.venv/bin/python -m agent.cli run --offline --rounds 8   # rehearse a whole session
+```
+
+The rehearsal uses a fake model and a fake executor to exercise the **wiring**: does
+state carry across rounds, does a crashed role recover, does it stop when it should.
+Failures can be injected on demand:
 
 ```bash
 .venv/bin/python -m agent.cli run --offline --rounds 8 --fail-round 3 --fail-role-call 2
 ```
 
-演习日志写在 `logs/offline/`，**不会污染**交付用的 `logs/rounds.jsonl`。
+Rehearsal logs go to `logs/offline/` and never contaminate the deliverable logs.
 
-### 真跑（需要凭据 + 数据）
-
-```bash
-export AGENT_PROVIDER=deepseek DEEPSEEK_API_KEY=...   # 或 ANTHROPIC_API_KEY=sk-ant-...
-
-# ① 先量一次噪声带：同配置换 3 个种子，看分数自己抖多少
-.venv/bin/python -m agent.cli noise --seeds 3 --train data/train --val-features data/val
-
-# ② 自主迭代，中途不需要人碰键盘
-.venv/bin/python -m agent.cli run --rounds 20 \
-    --train data/train --val-features data/val \
-    --baseline-ctr 0.xxxx --baseline-cvr 0.xxxx      # 官方基线分，等 Starter Kit
-```
-
-也可以开网页控制台，边跑边看四个角色在说什么：
+### Step 1 — reproduce the official baseline (~30 s)
 
 ```bash
-.venv/bin/python web/server.py        # → http://127.0.0.1:8770
+.venv/bin/python -m kuairand_bridge goat-run \
+    --config kuairand_goat_bridge/configs/fm_baseline.yaml --dry-run
 ```
 
-### 只调单个环节
+This config sets `require_baseline_reproduction: true`, so round 0 must land within
+0.003 of the official primary or the run aborts. **Do this first** — it proves the
+harness reproduces the official number, so any later gain is attributable to the agent
+rather than to a harness discrepancy.
+
+### Step 2 — noise band: **not available on this dataset yet**
+
+`agent.cli noise` still requires the previous dataset's file layout
+(`--train` / `--val-features`) and its analytic fallback assumes a plain AUC rather
+than a within-user GAUC. It has never been run on KuaiRand.
+
+Nothing needs doing here — but be aware of what it means: every "is this a real
+improvement?" threshold falls back to a fixed floor of **0.0005**, which is a guess,
+not a measurement of this data. The session announces this at startup rather than
+pretending otherwise:
+
+```
+⚠️ Noise band never measured — using the R11 fallback floor 0.0005
+   (a guessed number, not one measured on this data)
+```
+
+This is limitation 2, and it is the first thing we would fix with more time.
+
+### Step 3 — the autonomous run (nobody touches the keyboard)
 
 ```bash
-.venv/bin/python -m agent.cli doctor --all      # 5 份假成绩单对照标准答案
-.venv/bin/python -m agent.cli round 正常起步     # 只跑一轮，看四个角色各说了什么
+.venv/bin/python -m kuairand_bridge goat-run \
+    --config kuairand_goat_bridge/configs/kuairand_task.yaml
 ```
 
----
+> ⚠️ `configs/kuairand_task.yaml` must point at `examples/goat_trainer.py`. The other
+> trainer only accepts six hyperparameters and rejects new files by design — pointing
+> the real run at it silently reduces the agent to a knob-turner. `tests/test_configs.py`
+> guards this.
 
-## 八、交付物
+If you intervene at any point, record it — the autonomy score depends on this number
+being a real observation rather than a hard-coded zero:
 
-### 最后一天：一条命令
+```bash
+.venv/bin/python -m agent.cli intervene "round 7 hit OOM, reduced batch size" --round 7
+```
+
+### Step 4 — package the deliverables
 
 ```bash
 .venv/bin/python -m agent.cli finalize
 ```
 
-把最后那一场的产物整理进 `deliverables/`（这个目录**不受 .gitignore 挡**，可直接提交）。
-
-只取**一场**的记录 —— 日志是追加的、轮次每场都从 1 重数，几个人各跑几次混在一起，
-评委读到的会是 `[1,2,3,1,2,3,4]` 这么一串。每一场有自己的 `run_id`，
-`--run <id>` 可以指定要哪一场。
-
-### 出来的东西对应哪个交付物
-
-| 文件 | 是什么 |
+| Output | Deliverable |
 |---|---|
-| `rounds.jsonl` | **#3 逐轮日志**：假设 / 代码全文 / 指标 / 错误恢复 / 干预 |
-| `narrative.md` | **#3 的人话版**：一整场压成一条故事线 |
-| `session_summary.json` | **#5 结果表**：最佳分、与基线的差值、token 总量、GPU 小时 |
-| `dashboard.html` | 评委可读的看板（逐轮回放） |
-| `best_pipeline/` | 最佳那一轮的**配方**（配置 + 零件代码） |
-| `best_report.json` | 最佳那轮的**分数记录**。是佐证，**不是提交物** |
+| `rounds.jsonl` | **#3** per-iteration log: hypothesis, full code diff, metrics, errors and recoveries |
+| `narrative.md` | **#3** human-readable: the whole session as one storyline |
+| `session_summary.json` | **#4** results table: best scores, delta over baseline, tokens, wall-clock, GPU-hours, interventions |
+| `best_pipeline/` | the **recipe** of the best round (config + module code) |
+| `dashboard.html` | round-by-round replay for reviewers |
 
-### ⚠️ 交付物 #4 是**模型本身**
+> **Deliverable #4 is the model output, not the score.** The agent's edits are
+> *cumulative*: by round 20 the disk holds only the final stack, and round 5's state
+> was overwritten long ago. `best_pipeline/` is how the best round is reconstructed
+> and re-run to produce the actual submission file.
 
-赛题要的是「最终模型输出 / checkpoint」—— **不是分数，不是配置，不是日志**。
-一场跑完，`logs/` 下**没有一样是它**：
+### What counts as a manual intervention
 
-```
-best_pipeline/ 的配方  →  照着重跑一次  →  预测结果 / checkpoint  ← 这个才是 #4
-```
+Fixed before the run, not adjusted afterwards:
 
-`best_pipeline/` 之所以关键：工兵的改动是**叠加**在同一份配置上的，跑到第 20 轮时
-磁盘上只剩最后那个叠加态 —— **第 5 轮的样子早被盖掉了，没有它就永远交不出来**。
-
-导出预测已经能做：
-
-```bash
-.venv/bin/python -m agent.cli predict \
-    --train data/train --test data/public_test \
-    --config deliverables/best_pipeline/config/pipeline.yaml \
-    --out submissions/prediction.parquet
-```
-
-跟评分走**同一条训练路径**，不是另外复制一份——避免"两条路慢慢走岔，
-交上去的预测跟验证时评的不是同一个模型"这种极难发现的错误。
-输出 `sample_id / ctr / cvr / ctcvr` 四列（`cvr` 是 P(购买|点击) 条件概率，
-`ctcvr = ctr × cvr` 才是 P(点击且购买)）。
-
-> ⏳ 官方提交格式（列名、CSV 还是 parquet）还没定，等 Starter Kit 的 Schema。
-> 到时候用 `--columns` 选列即可，不用再改代码。
-
-### 什么算「人工干预」
-
-赛题按「达到收敛所需的人工干预次数」评自主性。这个数只有边界说清楚才有意义，
-所以我们把线划在这里 —— **跑之前定好，跑完不改**：
-
-| 不算干预（准备与搭建） | 算干预（跑起来之后插手） |
+| Not an intervention (setup) | An intervention (touching a live run) |
 |---|---|
-| 下载与预处理数据、切分数据集 | 中途改配置或改代码 |
-| 写药方卡、写提示词、定病名词表 | 手动杀掉某一轮、手动重启进程 |
-| 决定跑几轮、给多少预算、选起步档位 | 手动指定提交哪一版 |
-| 装环境、跑之前修我们自己的 bug | 跑到一半修 bug 然后接着跑 |
-
-插了手当场记一条：
-
-```bash
-.venv/bin/python -m agent.cli intervene "第 7 轮撞 OOM，手动把 batch 调小了" --round 7
-```
-
-**"非零"随手可得，报出来的 0 才是一个观测值，而不是写死的常量。**
+| Downloading and preprocessing data | Changing config or code mid-run |
+| Writing cards, prompts, the vocabulary | Killing a round, restarting the process |
+| Choosing round count, budget, starting fidelity | Manually choosing which version to submit |
+| Installing the environment; fixing our own bugs beforehand | Fixing a bug mid-run and continuing |
 
 ---
 
-## 九、局限性与改进方向
+## 9. Limitations, and what we would improve with more time
 
-以下都是我们**自己知道**的问题，不是评委指出来才承认的。
+These are problems we know about, stated before anyone had to point them out.
 
-### 1. 转化样本太少，购买 AUC 的读数不可信
+**1. Symptom judgement is done by the LLM, not by code.** The detection rules are
+passed as text and the model does the arithmetic. This is not reproducible — the same
+scorecard can yield different findings on two runs — and the arithmetic can be wrong.
+*Improvement:* compute the rules deterministically in code and leave the doctor to
+weigh confidence, rank severity, and notice what the rules do not cover. Diagnosis
+should be deterministic; the innovation is in the strategist's reasoning, not in the
+doctor's subtraction.
 
-开发集 21.8 万行里只有 **38 条转化**。这个量级算出来的购买 AUC，
-换个随机种子就能抖出比"提升"还大的差距 —— 拿它判断改动有没有效，基本是掷骰子。
+**2. Noise bands have never been measured on this dataset.** `agent/noise.py` is still
+shaped for the previous dataset's click/conversion funnel — it reads fields KuaiRand
+does not have, and its analytic fallback assumes a plain AUC rather than a within-user
+GAUC. Until it is rewritten, every threshold falls back to a fixed floor of 0.0005,
+which is a guess. The system says so out loud at startup rather than pretending
+otherwise. *Improvement:* rewrite the measurement for within-user ranking metrics.
 
-**改进方向**：把训练/验证从 9:1 重切成 8:2，或把采样率从 5% 提到 10–20%
-（都在官方训练切分内，合规）。这是当前**最该先解决**的问题。
+**3. The reflector's before/after numbers are still self-reported.** Code checks that
+they are *mutually consistent* with the reflector's own verdict — claiming a symptom
+is resolved while reporting identical before/after is rejected — but cannot verify
+they were copied from the scorecard rather than invented. Fixing this properly
+requires limitation 1.
 
-### 2. Agent 真正能动手的范围，比它的知识库小得多
+**4. The train-set score uses the inference path.** The "memorising the training set"
+diagnosis compares train and validation scores, but the train score is produced with
+each module's `transform` rather than the out-of-fold path used during fitting. For
+target-encoding-style modules this makes the train score slightly optimistic. The
+scorecard carries an explicit caveat so the doctor discounts marginal gaps.
 
-方法库有 26 张卡，但执行器走的是 LightGBM 这条路，而 `ModelOp`（改模型）和
-`TrainOp`（改训练过程）两类零件**还没有加载机制** —— `TrainOp` 的接口是按
-epoch 回调 + `state_dict()` 设计的，跟 LightGBM 结构上就对不上（它没有 epoch
-循环可以挂回调）。按环节数一下：
+**5. One change per round.** This is deliberate: two changes in one round and a score
+increase cannot be attributed, which would defeat the entire "did the symptom
+actually improve" mechanism. Combinations are handled by *composite cards* — a single
+card that packages changes which must ship together. The cost is slower coverage.
 
-| 环节 | 卡片数 | 现在能不能真的生效 |
-|---|---|---|
-| 特征 | 3 | ✅ |
-| 训练策略 | 4 | 部分（早停、负采样可以） |
-| 模型 / 损失函数 / 多任务 | 19 | ❌ 需要深度模型训练路径 |
+**6. Prompt quality is validated on very few samples.** The test suite covers the
+*enforcement* layer thoroughly (does the evidence contain numbers, are forbidden
+fields blocked, can the reflector deceive itself, does state carry across rounds).
+Whether the prompts elicit good reasoning can only be judged by reading real runs, and
+we have read few.
 
-**我们没有把这件事藏起来**：配置里要一个兑现不了的东西，执行器会**当场报错**
-（`harness/executor.py: check_supported`），而不是接受了却无视。
-后者才是最贵的失败 —— 工兵改完、训练跑完、分数纹丝不动，复盘官据此判「猜错了」，
-一张好卡被拉黑、信任分被扣，错误结论还会顺着黑名单和升档决策传染下去。
-为此还把「执行器兑现不了」和「方法本身不行」分成两种记账（`UnsupportedByExecutor`）：
-前者不扣卡片的信任分，否则一场跑下来会把 ESMM、DeepFM 这些好方法全扣成低分，
-下一场军师就再也不提它们了 —— 一个纯属自己造成的错误结论被固化进账本。
+**7. Bonus benchmarks not attempted.** Only the required KuaiRand-Pure. Attempting
+KuaiRand-1k and 27k in the available time would most likely have compromised both.
 
-**改进方向**：补 `ModelOp` 的加载与一个 epoch 式训练循环（PyTorch），
-那 19 张卡才谈得上被验证。这是这套系统离"通用"最远的一段距离。
-
-### 3. 判病是大模型在做，不是代码在做
-
-现在的实现是把判定规则当文本塞进提示词，让模型自己读数字、做减法、比大小。
-后果是**不可复现**（同样数据两次可能报不同的病），而且算术可能出错。
-
-**改进方向**：代码先按规则精确算，医生只负责复核可信度、排优先级、发现规则外的异常。
-判病本来就该是确定性的 —— 创新分看的是军师的推理，不是医生的减法。
-
-### 4. 复盘官的 before/after 仍然是它自己报的
-
-代码能检查这两个数跟它自己的结论**互相**自洽（说治好了就不许两个数一模一样），
-但没法验证它们真是从成绩单里抄来的。彻底解决要走第 2 条那条路。
-
-### 5. `symptoms.yaml` 里的阈值仍是拍的
-
-0.03、0.04、0.002 这些数字没有依据。噪声带现在**已经在真数据上量过**
-（3 个种子 · 小份）：点击 AUC 0.00106、购买 AUC 0.08981 —— 但 `symptoms.yaml`
-里那几个判病阈值还没换成实测值，医生判病用的仍是拍的数。
-
-量的过程本身还暴露了一个方法上的坑，值得写下来：换种子测出来的**购买分噪声带是
-0.0000**。不是它稳，是这个测法**扰动不到它** —— 保真度抽样只抽负样本、正样本全留，
-所以 `click=1` 子集在每个种子下完全相同，购买塔训的是同一批数据。
-照单全收的话，购买分任何抖动都能越过 0 门槛被记成「猜对了」。
-现在测出 0 就退回 Hanley-McNeil 理论带（38 个正样本 → ±0.09），
-一个诚实的「现在测不出来」。门槛也改成**分指标**各判各的 ——
-两个指标的抖动差一个数量级，一个标量管两个必然出错。
-
-### 6. 提示词质量只在少量样本上验证过
-
-138 个测试全在测**代码强制**那一层（证据里有没有数字、禁用字段有没有拦住、
-复盘官会不会自欺、状态有没有传下去）。提示词写得好不好，只能靠人拿真模型
-跑那 5 份假成绩单去看 —— 样本量太小。
-
-### 7. 评估口径还有一处待确认
-
-官方基线 NISE 的代码在**全部曝光**上算购买 AUC，而赛题写的是**点击子集**。
-我们两种口径都算都记，报分用点击子集，等 Starter Kit 的评测脚本最终确认。
-
-### 8. 没做加分数据集
-
-只做了必选的 AliCCP，跳过了 KuaiRand。一周时间做两个数据集，
-大概率两个都做砸；赛题也明确写了跳过它不扣分。
-
-### 9. 一轮只落地一个方案
-
-这是**有意的**：一轮同时上两个改动，分涨了就分不清是哪个起的作用，
-整套"分涨了但病没治好"的归因机制会失效。需要组合时靠**复合卡**
-（一张卡本身打包多个必须一起上的改动）解决。代价是覆盖速度慢一些。
+**8. Two AliCCP-era items remain unfixed** because they cannot affect this task: a
+purchase-AUC field naming mismatch, and rows with `click=0, conversion=1` being warned
+about rather than cleaned. Both live on the retired dataset path.
 
 ---
 
-## 十、分工
+## 10. Team member contributions
 
-| | 负责 |
+| Member | Contribution |
 |---|---|
-| 成员1 | 数据与评估：原始数据解析、分层采样、切分、AUC 与分组指标 |
-| 成员2 | 模型与方法库：基线复现、真执行器、26 张药方卡、提示词、网页控制台 |
-| 成员3 | Agent 大脑：四个角色、外层循环、三个账本、噪声带、交付物整理 |
-| 成员4 | 执行与可靠性：运行沙箱、错误恢复、调度器、预算与收敛判定 |
-| 全员 | 各自记录自己的实验，最后统一整理 |
+| **Wang Jingjie** | Method library and modelling — baseline reproduction, the real executor, method cards, role prompts, web console, noise-band methodology |
+| **许叔尧 (David Xu)** | Agent core — the four roles and their validators, the outer loop, the three ledgers, the shelf, scorecard diagnostics, deliverable packaging |
+| **HYF** | Dataset bridges — KuaiRand and AliCCP adapters, official starter-kit integration, preflight and data checks |
+| **Stephen Zhu** | Bridge and modules — official FM trainer integration, baseline reproduction config, per-round training diagnostics, fidelity sampling |
+| *All* | Each member logs their own changes in `docs/开发日志.md`, one line per change |
 
-## 十一、往下读什么
+---
 
-| 文件 | 讲什么 | 谁必读 |
-|---|---|---|
-| [CLAUDE.md](CLAUDE.md) | **12 条红线 + 5 个危险信号 + 自查清单** | **全员，动手前** |
-| [docs/评审说明.md](docs/评审说明.md) | 现状、已知弱点、待决策的设计 | **reviewer 从这里开始** |
-| [docs/baseline笔记.md](docs/baseline笔记.md) | 官方基线长什么样、洞在哪 | 全员，动手前 |
-| [docs/四个角色接口.md](docs/四个角色接口.md) | 四个角色的输入输出契约 | 成员3、4 |
-| [knowledge/symptoms.yaml](knowledge/symptoms.yaml) | 12 个病名及判定规则 | 成员1、2、3 |
-| [knowledge/卡片格式.md](knowledge/卡片格式.md) | 药方卡的栏目规范 + 样例 | 成员2 |
-| [docs/开发日志.md](docs/开发日志.md) | 一行一条，谁改了什么 | 全员，每次提交顺手加一行 |
+## 11. Further reading
+
+| File | What it covers |
+|---|---|
+| [CLAUDE.md](CLAUDE.md) | The 12 hard rules, danger signals, pre-commit checklist |
+| [docs/DEVPOST.md](docs/DEVPOST.md) | Submission copy |
+| [docs/开发日志.md](docs/开发日志.md) | Development log — one line per change, newest first |
+| [docs/四个角色接口.md](docs/四个角色接口.md) | The input/output contract of the four roles |
+| [knowledge/symptoms.yaml](knowledge/symptoms.yaml) | The 12 symptoms and their detection rules |
+| [knowledge/卡片格式.md](knowledge/卡片格式.md) | Method card format and an annotated example |
+| [README.zh-CN.md](README.zh-CN.md) | Chinese README |
