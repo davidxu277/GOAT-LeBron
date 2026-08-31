@@ -1,4 +1,4 @@
-data_dir: /path/to/KuaiRand-Pure/data
+data_dir: D:/GOAT-LeBron/dataset/KuaiRand-Pure/KuaiRand-Pure/data
 trainer: examples/official_fm_trainer.py
 output_dir: output/full_run
 

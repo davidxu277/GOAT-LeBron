@@ -514,7 +514,7 @@ class KuaiRandGoatExecutor:
                 remaining_seconds=(
                     self.remaining_seconds
                 ),
-                executor_round=executor_round
+                executor_round=executor_round,
                 official_baseline=self.official_baseline,
                 training=result.get("training") or {},
                 group_evidence=result.get("diagnostics") or {},
