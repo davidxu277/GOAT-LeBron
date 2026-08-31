@@ -1,5 +1,8 @@
 data_dir: D:/GOAT-LeBron/dataset/KuaiRand-Pure/KuaiRand-Pure/data
-trainer: examples/official_fm_trainer.py
+# 用 GOAT Trainer：它把 harness/ 那套「Agent 自己写代码」的能力接了进来
+# （FeatureOp / ModelOp / TrainOp 加载 + embedding 表 + epoch 循环 + 最佳权重回滚）。
+# 想只做超参数实验、或要一条纯净的官方基线，换回 examples/official_fm_trainer.py。
+trainer: examples/goat_trainer.py
 output_dir: output/full_run
 
 seed: 0
@@ -11,16 +14,32 @@ token_budget: 2000000
 generate_test_after_convergence: true
 
 trainer_config:
+  # goat_trainer 的键名。想换回 official_fm_trainer 的话，
+  # 这一段要改成它那套（model.k / model.learning_rate / train.epochs …）
+  features:
+    # Agent 写的加特征零件挂在这里：
+    #   <名字>: {enabled: true, impl: modules/features/xxx.py, ...参数}
+    # 启用了却没写 impl 会直接报错 —— 静默无效是最坑的形态
+
   model:
-    name: fm
-    k: 16
-    learning_rate: 0.001
+    name: goat_mlp
+    impl: modules/models/mlp.py       # Agent 可以改成自己写的模型零件
+    mlp:
+      hidden: [128, 64]
+      tower: [32]
+      dropout: 0.1
+    deep:
+      epochs: 12
+      batch_size: 8192
+      learning_rate: 0.003
+      embed_dim: 16
+      weight_decay: 0.00001
 
   train:
-    epochs: 40
-    batch_size: 8192
-    early_stopping_patience: 4
-    min_delta: 0.00001
+    # Agent 写的训练过程零件（早停 / SWA / 学习率调度）挂在这里：
+    #   <名字>: {enabled: true, impl: modules/train/xxx.py, ...参数}
+    early_stopping:
+      inner_holdout_frac: 0.1
 
 official_baseline:
   validation:

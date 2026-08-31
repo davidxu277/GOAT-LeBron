@@ -153,10 +153,19 @@ def load_train_ops(config: dict[str, Any]) -> list[tuple[str, Any]]:
 
 
 def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
-               features: list[str], seed: int) -> tuple[Any, Any, dict[str, Any]]:
+               features: list[str], seed: int,
+               task_loss: Any = None, task_metric: Any = None,
+               ) -> tuple[Any, Any, dict[str, Any]]:
     """训一个深度模型，返回 (模型零件, 训好的模型, 训练过程记录)。
 
     整个循环归我们管，模型长什么样归零件管 —— 这就是考场和考生的分界。
+
+    task_loss / task_metric 让这套循环脱离具体任务：
+        task_loss(out, batch_df, torch)          -> 标量张量
+        task_metric(op, model, vocab, val_df)    -> {"指标名": 值, ...}（第一个是主指标）
+    不给就用默认的双塔口径，行为跟以前完全一致。
+    换任务（比如 KuaiRand 的用户内排序）只需换这两个函数 ——
+    ID 词表、embedding 表、epoch 循环、TrainOp 回调、最佳权重回滚，全部照用。
     """
     import torch
 
@@ -182,8 +191,13 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
     model = model.to(device)
     # AliCCP 很大：完整训练张量留在 CPU，每个 batch 才送入显卡，避免 8GB 显存 OOM。
     x = torch.tensor(vocab.encode(train), dtype=torch.long)
-    click = torch.tensor(train["click"].to_numpy(), dtype=torch.float32)
-    conv = torch.tensor(train["conversion"].to_numpy(), dtype=torch.float32)
+    # 双塔标签只有默认损失才用得上。给了任务级损失就跳过 ——
+    # 别的任务（KuaiRand 只有一个 long_view）根本没有这两列。
+    if task_loss is None:
+        click = torch.tensor(train["click"].to_numpy(), dtype=torch.float32)
+        conv = torch.tensor(train["conversion"].to_numpy(), dtype=torch.float32)
+    else:
+        click = conv = torch.zeros(len(train), dtype=torch.float32)
     model._goat_predict_batch_size = kw["predict_batch_size"]
     opt = torch.optim.Adam(model.parameters(), lr=kw["learning_rate"],
                            weight_decay=kw["weight_decay"])
@@ -211,23 +225,30 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
             batch_click = click[idx].to(device, non_blocking=True)
             batch_conv = conv[idx].to(device, non_blocking=True)
             out = model(batch_x)
-            loss = (loss_fn(out, batch_click, batch_conv) if loss_fn is not None
-                    else _default_loss(out, batch_click, batch_conv, torch))
+            if task_loss is not None:                 # 调用方给的任务级损失
+                loss = task_loss(out, train.iloc[idx.numpy()], torch)
+            elif loss_fn is not None:                 # 零件自带的损失（ESMM 那类）
+                loss = loss_fn(out, batch_click, batch_conv)
+            else:
+                loss = _default_loss(out, batch_click, batch_conv, torch)
             opt.zero_grad()
             loss.backward()
             opt.step()
             总损失 += float(loss.detach().cpu()) * len(idx)
 
-        metrics = _eval_epoch(op, model, vocab, val, torch,
-                              batch_size=kw["predict_batch_size"])
+        metrics = (task_metric(op, model, vocab, val) if task_metric is not None
+                   else _eval_epoch(op, model, vocab, val, torch,
+                                    batch_size=kw["predict_batch_size"]))
         metrics["loss"] = round(总损失 / max(1, n), 6)
+        # 评分函数返回的第一个指标就是主指标 —— 换任务只换评分函数，这里不用动
+        主指标 = next(k for k in metrics if k != "loss")
         history.append({"轮": epoch, **metrics})
         emit("phase", name=f"第 {epoch} 轮",
-             detail=f"loss {metrics['loss']:.4f} · 点击 {metrics['点击分']:.4f}")
+             detail=f"loss {metrics['loss']:.4f} · {主指标} {metrics[主指标]:.4f}")
 
         # 验证集最好的那一版权重留着 —— 这是 epoch 层面的"最佳 checkpoint"
-        if metrics["点击分"] > best["auc"]:
-            best = {"auc": metrics["点击分"], "epoch": epoch,
+        if metrics[主指标] > best["auc"]:
+            best = {"auc": metrics[主指标], "epoch": epoch,
                     "weights": copy.deepcopy(model.state_dict())}
 
         # TrainOp 的回调点：早停、学习率调度、权重平均都挂在这里
