@@ -136,6 +136,10 @@ def apply_agent_patch(patch, output_dir) -> None:
     """
     global _AGENT_OVERRIDES
     _AGENT_OVERRIDES = {}
+    # 覆盖配置是整份重置的，生成的文件也必须一起重置 —— 只重置一半会出现
+    # 这种局面：上一轮写的零件还躺在磁盘上，而 _GENERATED_FILES 已经空了，
+    # 于是这一轮 history 重放到同一个路径时被当成"想覆盖用户代码"直接拒掉。
+    cleanup_agent_patch()
 
     for item in patch.get("history") or [patch]:
         for f in item.get("new_files") or []:

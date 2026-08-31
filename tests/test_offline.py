@@ -541,7 +541,7 @@ def test_预计提升限幅不在schema层_因为接口不支持(vocab):
     test_军师_预计提升超过上限会被打回。这里只钉住"别再写回 schema 里"。
     """
     prop = schemas.strategist_schema(vocab, ["SWA权重平均"])["properties"]["proposals"]["items"]
-    for m in ("点击AUC", "购买AUC"):
+    for m in schemas.METRICS:
         字段 = prop["properties"]["expected"]["properties"][m]
         assert "maximum" not in 字段 and "minimum" not in 字段
         assert str(schemas.EXPECTED_CAP) in 字段["description"]   # 但要告诉模型上限是多少
@@ -3597,9 +3597,11 @@ def test_病名表_不许再写死官方基线数字():
     正文 = "\n".join(
         行 for 行 in 原文.splitlines() if not 行.lstrip().startswith("#")
     )
-    assert "0.6016" not in 正文
+    for 数字 in ("0.6016", "0.6674", "0.5357", "0.5946", "0.6610", "0.5282"):
+        assert 数字 not in 正文, f"病名表里还写着官方基线数字 {数字}"
     assert "baseline_scores.json" not in 正文
-    assert "官方Validation基线" in 正文
+    # 判据只许用 Agent 自己够得着的信号
+    assert "上一版" in 正文
 
 
 def test_病名表_每个病都写明去看成绩单哪个字段():
@@ -3613,6 +3615,103 @@ def test_病名表_每个病都写明去看成绩单哪个字段():
     )
     没指路 = [
         s["id"] for s in 表["symptoms"]
-        if "成绩单" not in str(s.get("needs", "")) and s["id"] != "结果不稳"
+        if "成绩单" not in str(s.get("needs", ""))
+        and s["id"] not in ("结果不稳", "Top5排不上去", "学得不够")
     ]
     assert not 没指路, f"这些病没写明去看成绩单哪个字段：{没指路}"
+
+
+# ─────────── 08-31 深夜：官方基线不给 Agent + 指标名对齐 ───────────
+
+
+class 偷看提示词的假模型:
+    """把喂给大模型的 system / user 原样存下来，用来断言"没漏出去什么"。"""
+
+    def __init__(self, 回答):
+        self.回答 = 回答
+        self.看到的 = []
+
+    def call(self, *, role, system, user, schema, **kw):
+        self.看到的.append({"role": role, "system": system,
+                          "user": user, "schema": schema})
+        return dict(self.回答)
+
+
+KUAIRAND成绩单 = {
+    "验证集": {"GAUC": 0.6638, "nDCG@5": 0.5344, "主分": 0.5991},
+    "训练集": {"GAUC": 0.6979, "nDCG@5": 0.5933, "主分": 0.6456},
+    "官方Validation基线": {"GAUC": 0.6674, "nDCG@5": 0.5357, "Primary": 0.60155},
+    "相对官方基线": {"GAUC": -0.0036, "Primary": -0.0025, "判断": "显著低于官方基线"},
+    "用户构成": {"GAUC参与用户占比": 0.5778},
+}
+
+
+def test_屏蔽基线_带基线字样的块全部摘掉():
+    干净 = roles.strip_baseline(KUAIRAND成绩单)
+    assert "官方Validation基线" not in 干净
+    assert "相对官方基线" not in 干净
+    # 真正的证据一个都不能少
+    assert 干净["验证集"]["主分"] == 0.5991
+    assert 干净["训练集"]["主分"] == 0.6456
+    assert 干净["用户构成"]["GAUC参与用户占比"] == 0.5778
+
+
+def test_屏蔽基线_医生的提示词里一个基线数字都不许有(vocab):
+    """赛题按「相对官方基线的提升」排名 —— 那是评委的尺子，不是 Agent 的输入。
+
+    给了它，Agent 会退化成对着一个固定数字调参：超过就判"没病"、低于就笼统
+    报"学得不够"，而不去看训练/验证差、分桶、用户构成这些真正指得出病因的证据。
+    """
+    llm = 偷看提示词的假模型({"findings": [], "no_finding": True,
+                       "reason_if_none": "训练验证差 0.0465"})
+    roles.diagnose(llm, vocab, KUAIRAND成绩单)
+
+    喂进去的 = llm.看到的[0]["user"] + llm.看到的[0]["system"]
+    for 数字 in ("0.6674", "0.5357", "0.60155", "0.6016"):
+        assert 数字 not in 喂进去的, f"官方基线 {数字} 漏进医生的提示词了"
+    assert "基线" not in llm.看到的[0]["user"]
+    # 但成绩单本身要完整送到
+    assert "0.6456" in 喂进去的 and "0.5778" in 喂进去的
+
+
+def test_屏蔽基线_原始成绩单不动_人这边照样看得到():
+    """只改喂给模型的那一份；日志和交付物要留全。"""
+    roles.strip_baseline(KUAIRAND成绩单)
+    assert KUAIRAND成绩单["官方Validation基线"]["GAUC"] == 0.6674
+
+
+def test_指标名_复盘官被要求填的是成绩单里真有的字段(vocab):
+    """08-31 那场：成绩单里是 GAUC / nDCG@5，而 schema 还写着点击AUC/购买AUC。
+
+    复盘官被要求填两个数据里根本不存在的指标名，填出来的数还会拿去跟噪声带
+    比、拿去更新卡片信任分。这种错不报错，只会安静地污染账本。
+    """
+    assert schemas.metric_names(KUAIRAND成绩单) == ["GAUC", "nDCG@5"]
+    schema = schemas.reflector_schema(vocab, schemas.metric_names(KUAIRAND成绩单))
+    assert set(schema["properties"]["actual"]["properties"]) == {"GAUC", "nDCG@5"}
+
+
+def test_指标名_AliCCP成绩单还是老那套(vocab):
+    老报告 = {"验证集": {"点击分": 0.55, "购买分": 0.58}}
+    assert schemas.metric_names(老报告) == ["点击AUC", "购买AUC"]
+    schema = schemas.reflector_schema(vocab, schemas.metric_names(老报告))
+    assert set(schema["properties"]["actual"]["properties"]) == {"点击AUC", "购买AUC"}
+
+
+def test_指标名_医生和军师和复盘官用的是同一套(vocab):
+    """三个角色各认一套名字的话，军师说要涨的那个指标，复盘官根本没在验。"""
+    名字 = schemas.metric_names(KUAIRAND成绩单)
+    医生 = schemas.doctor_schema(vocab, 名字)["properties"]["findings"]["items"]
+    军师 = schemas.strategist_schema(vocab, ["SWA权重平均"], 名字)
+    复盘 = schemas.reflector_schema(vocab, 名字)
+
+    assert 医生["properties"]["affects"]["items"]["enum"] == 名字
+    assert list(军师["properties"]["proposals"]["items"]
+                ["properties"]["expected"]["properties"]) == 名字
+    assert list(复盘["properties"]["actual"]["properties"]) == 名字
+
+
+def test_指标名_跑崩时合成的复盘也用当前任务的名字():
+    合成 = loop._crashed_reflection({"card_id": "x", "targets": ["在背题"]},
+                                  "OOM", ["GAUC", "nDCG@5"])
+    assert set(合成["actual"]) == {"GAUC", "nDCG@5"}

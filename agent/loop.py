@@ -22,7 +22,7 @@ import yaml
 from .events import emit
 from .knowledge import Card, CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
-from . import noise, roles
+from . import noise, roles, schemas
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -328,18 +328,10 @@ def beats_noise(gains: dict[str, float],
     )
 
 
-# 每套任务的两个分指标在成绩单里叫什么。KuaiRand 在前 —— 当前任务是它。
-# b35cbff 把 KuaiRand 成绩单里的「点击分/购买分」兼容字段删掉了（本来就
-# 没有购买任务，留着是误导），只认旧名字的话这里会一路返回空 dict：
-# 收敛判定走「主分」不受影响，但 best_scores、锁定集分数、叙事里每轮的
-# 分数会全是空的 —— 交付物 #3/#5 上直接看得见。
-# 左边是成绩单里的字段名，右边是对外报的指标名。
-# AliCCP 那两个名字沿用原样（点击分 → 点击AUC），别顺手改 —— 结果表、
-# 噪声带、复盘官的 actual 全都按那套名字对齐。
-_METRIC_NAMING = (
-    (("GAUC", "nDCG@5"), ("GAUC", "nDCG@5")),
-    (("点击分", "购买分"), ("点击AUC", "购买AUC")),
-)
+# 指标叫什么由 schemas.METRIC_PAIRS 一处说了算 —— 复盘官的 actual、
+# 军师的 expected、结果表、噪声带门槛全按同一套名字对齐。
+# 两处各维护一张表，迟早会走岔，而走岔时不报错。
+_METRIC_NAMING = schemas.METRIC_PAIRS
 
 
 def read_scores(report: dict[str, Any]) -> dict[str, float]:
@@ -489,7 +481,8 @@ def _guard(log: RoundLog, what: str, fn, *args, **kwargs):
         return None
 
 
-def _crashed_reflection(chosen: dict[str, Any] | None, error: str) -> dict[str, Any]:
+def _crashed_reflection(chosen: dict[str, Any] | None, error: str,
+                        metrics: list[str] | None = None) -> dict[str, Any]:
     """执行失败时的复盘结论 —— 纯代码合成，不花一分钱去问大模型。
 
     跑都没跑起来，没有任何结果可复盘。这时候调大模型是纯浪费。
@@ -498,7 +491,9 @@ def _crashed_reflection(chosen: dict[str, Any] | None, error: str) -> dict[str, 
     targets = chosen.get("targets") or []
     return {
         "verdict": "没跑起来",
-        "actual": {"点击AUC": 0.0, "购买AUC": 0.0},
+        # 指标名跟着当前任务走 —— 写死 AliCCP 那两个名字的话，
+        # 这条合成结论跟真实复盘的结论字段对不上，结果表拼不起来
+        "actual": {m: 0.0 for m in (metrics or schemas.METRICS)},
         "vs_expected": f"代码没跑通，拿不到结果：{error}",
         # 方案声称要治的病，逐个记「否」—— 跑都没跑起来，一个都没治
         "symptom_resolved": [
@@ -589,6 +584,7 @@ def run_round(
         tried_before=tried_before, shelved=shelved,
         budget_left=budget_left, pipeline_state=current_config,
         history_brief=history_brief,
+        metrics=schemas.metric_names(health_report),
     )
     if log.proposals is None:
         return finish()
@@ -654,7 +650,8 @@ def run_round(
 
     if not result.ok:
         log.recoveries.append(f"执行失败：{result.error}")
-        log.reflection = _crashed_reflection(log.chosen, result.error)
+        log.reflection = _crashed_reflection(
+            log.chosen, result.error, schemas.metric_names(health_report))
         # 执行器兑现不了 ≠ 这张卡不靠谱 —— 前者是我们的流水线缺能力。
         # 照扣的话，一场跑下来会把 ESMM、DeepFM 这些好方法全扣成低信任分，
         # 下一场军师就再也不提它们了，一个自己造成的错误结论被固化进账本。
@@ -1058,6 +1055,21 @@ def run_session(
             print(f"  ↳ {summary.noise_note}")
         else:
             summary.noise_note = f"带子量在「{量在}」档，与起步档位一致"
+
+        # 带子的指标名要跟这一场的成绩单对得上。对不上时 reflect 里
+        # `noise_bands_by_metric.get(k, 0)` 会静默退回 R11 兜底门槛 ——
+        # 结果不会错，但"我们量过带子了"这个印象是错的：分指标门槛
+        # 一条都没生效。这种事必须写进结果表，不能只在代码里默默降级。
+        本场指标 = set(schemas.metric_names(cur))
+        带子指标 = set((noise_bands.get("分指标噪声带") or {}))
+        if 带子指标 and not (本场指标 & 带子指标):
+            summary.noise_note += (
+                f"；⚠️ 带子量的是 {sorted(带子指标)}，这一场的指标是 "
+                f"{sorted(本场指标)} —— 对不上，分指标门槛全部失效，"
+                f"实际用的是 R11 兜底 {max(noise_floor, roles.MIN_REAL_GAIN):.4f}。"
+                f"`agent.cli noise` 还没在这个任务上跑过")
+            noise_bands = {**noise_bands, "分指标噪声带": {}}
+            print(f"  ⚠️ {summary.noise_note}")
     else:
         summary.noise_note = (
             f"没测过噪声带，全程用 R11 的兜底门槛 {max(noise_floor, roles.MIN_REAL_GAIN):.4f}"
