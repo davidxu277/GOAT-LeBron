@@ -39,6 +39,11 @@ AGENT_PARAM_BOUNDS = {
 # 跑出来的分数就没法跟前几轮比了 —— 那等于偷偷换了考卷。
 AGENT_CONFIG_ROOTS = {"model", "train"}
 
+# 这个 Trainer 训的就是官方 baseline 那个 FM，没有加载 Agent 自写代码的机制。
+# ⚠️ 这是**我们这份文件**的限制，不是主办方的规定 —— 赛题恰恰奖励
+# 「超越简单基线调参」。要让 Agent 写特征/写模型，换 goat_trainer.py。
+AGENT_SUPPORTS_NEW_FILES = False
+
 # apply_agent_patch 攒下来的覆盖值。fit() 会把它合并到任务配置之上。
 _AGENT_OVERRIDES: dict[str, Any] = {}
 

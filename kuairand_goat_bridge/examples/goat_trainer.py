@@ -65,6 +65,10 @@ BASE_FIELDS = ["user_id", "video_id", "author_id", "tab", "duration_bucket"]
 
 AGENT_CONFIG_ROOTS = {"features", "model", "train"}
 
+# 这个 Trainer 接了 harness/ 那套零件加载能力：Agent 可以往 modules/ 下
+# 写 FeatureOp / ModelOp / TrainOp，写完自动进流水线（R5 路径守卫仍然生效）。
+AGENT_SUPPORTS_NEW_FILES = True
+
 _AGENT_OVERRIDES: dict[str, Any] = {}
 _GENERATED_FILES: set[pathlib.Path] = set()
 

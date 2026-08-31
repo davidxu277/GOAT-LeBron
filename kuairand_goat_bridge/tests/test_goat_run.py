@@ -503,3 +503,64 @@ def test_最佳轮编号不能拿Agent轮次顶替():
     报告 = {"运行预算": {"执行器轮次": 7}}
     assert _best_executor_round(报告, pathlib.Path("x")) != 5
     assert _best_executor_round(报告, pathlib.Path("x")) == 7
+
+
+# ─────────── 09-01：军师在对着一份假的流水线做规划 ───────────
+
+
+def _造执行器(tmp, trainer_name, trainer_config):
+    from kuairand_bridge.goat_executor import KuaiRandGoatExecutor
+    return KuaiRandGoatExecutor(
+        tmp,
+        f"kuairand_goat_bridge/examples/{trainer_name}",
+        tmp,
+        trainer_config=trainer_config,
+    )
+
+
+def test_流水线文本来自真正生效的配置(tmp_path):
+    """以前读的是 configs/pipeline.yaml —— 那是**另一个文件**。
+
+    实测那份写着 `model: item_popularity, prior: 20.0`，
+    而真跑的是 FM（k=16, lr=0.001）。军师整轮整轮地推理一个
+    根本不存在的模型：该不该给 item_popularity 上 SWA、
+    prior 能不能调到 200 —— 那个键在 FM Trainer 里压根没有。
+    """
+    from kuairand_bridge.goat_run import _render_pipeline
+
+    真配置 = {"model": {"name": "fm", "k": 16}, "train": {"epochs": 40}}
+    ex = _造执行器(str(tmp_path), "official_fm_trainer.py", 真配置)
+    文本 = _render_pipeline({"epsilon": 0.002, "patience": 3}, ex)
+
+    assert "fm" in 文本 and "k: 16" in 文本
+    assert "item_popularity" not in 文本      # 那份假病历不许再出现
+
+
+def test_流水线文本跟着已接受的改动更新(tmp_path):
+    """工兵改动被接受之后文本也要更新，否则军师从第 2 轮起看到的就是过期的。"""
+    ex = _造执行器(str(tmp_path), "official_fm_trainer.py",
+                {"model": {"name": "fm", "k": 16}, "train": {"epochs": 40}})
+    assert ex.effective_trainer_config()["model"]["k"] == 16
+
+    ex._patch_history.append({"new_files": [], "config_patch": "model:\n  k: 32\n"})
+    生效 = ex.effective_trainer_config()
+    assert 生效["model"]["k"] == 32
+    assert 生效["model"]["name"] == "fm"       # 深合并，别把兄弟键冲掉
+    assert 生效["train"]["epochs"] == 40
+
+
+def test_明确告诉军师这一场能不能写代码(tmp_path):
+    """真跑里军师连烧 5 轮才自己摸出「写新文件会被拒」。
+
+    每一轮都是一次真训练加四次大模型调用。这是**已知事实**，
+    不该让它花钱去试出来。
+    """
+    from kuairand_bridge.goat_run import _render_pipeline
+
+    fm = _造执行器(str(tmp_path), "official_fm_trainer.py", {"model": {"name": "fm"}})
+    assert fm.agent_capabilities()["可以写新零件"] is False
+    assert "整轮作废" in _render_pipeline({"epsilon": 0.002, "patience": 3}, fm)
+
+    goat = _造执行器(str(tmp_path), "goat_trainer.py", {"model": {"name": "goat_mlp"}})
+    assert goat.agent_capabilities()["可以写新零件"] is True
+    assert "modules/" in _render_pipeline({"epsilon": 0.002, "patience": 3}, goat)

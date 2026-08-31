@@ -726,8 +726,18 @@ def effective_config(executor: Any, fallback: str) -> str:
     一直是初始状态。以前每轮都把初始文本喂给军师和工兵 —— 它们看到的流水线
     从第 2 轮起就是过期的，可能重复启用已经开着的零件。
 
-    执行器没有 config 属性（假执行器）时退回传进来的文本。
+    执行器既没有 effective_trainer_config() 也没有 config 属性（假执行器）时，
+    退回传进来的文本。
+
+    ⚠️ 不能只认 `config` 属性：bridge 那条路的执行器没有它，于是整场跑下来
+    军师每轮看到的都是那份静态初始文本 —— 工兵改动被接受之后也不更新。
     """
+    取 = getattr(executor, "effective_trainer_config", None)
+    if callable(取):
+        cfg = 取()
+        if isinstance(cfg, dict) and cfg:
+            return yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+
     cfg = getattr(executor, "config", None)
     if not isinstance(cfg, dict) or not cfg:
         return fallback

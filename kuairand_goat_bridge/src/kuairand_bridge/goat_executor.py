@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 import json
 import math
@@ -20,6 +21,9 @@ import pathlib
 import time
 from typing import Any, Callable
 
+import yaml
+
+from .runner import _load_trainer as _load_trainer_module
 from .process_runner import (
     ChildRunnerError,
     run_with_timeout,
@@ -541,6 +545,98 @@ class KuaiRandGoatExecutor:
                     exc
                 ),
             )
+
+    @staticmethod
+    def _deep_merge(
+        dst: dict[str, Any],
+        src: dict[str, Any],
+    ) -> None:
+        for key, value in src.items():
+            if (
+                isinstance(value, dict)
+                and isinstance(dst.get(key), dict)
+            ):
+                KuaiRandGoatExecutor._deep_merge(
+                    dst[key],
+                    value,
+                )
+            else:
+                dst[key] = value
+
+    def effective_trainer_config(
+        self,
+    ) -> dict[str, Any]:
+        """当前**真正生效**的配置 = 初始 trainer_config + 历轮 config_patch。
+
+        为什么必须有这个：军师和工兵每轮都要看"现在的流水线长什么样"。
+        goat_run 以前喂给它们的是 `configs/pipeline.yaml` —— 那是**另一个
+        文件**，跟真正在跑的 trainer_config 毫无关系。实测那份写着
+        `model: item_popularity, prior: 20.0`，而真跑的是 FM（k=16,
+        lr=0.001, epochs=40）。军师于是整轮整轮地推理一个根本不存在的模型：
+        该不该给 item_popularity 上 SWA、prior 能不能调到 200 ——
+        而那个配置键在 FM Trainer 里压根没有，提上去必被拒。
+
+        而且它还是**静态**的：工兵改动被接受之后这份文本也不更新，
+        军师看到的流水线从第 2 轮起就是过期的。
+        """
+        merged = copy.deepcopy(self.trainer_config)
+
+        for item in self._patch_history:
+            patch = item.get("config_patch")
+
+            if not patch:
+                continue
+
+            try:
+                parsed = yaml.safe_load(patch) or {}
+            except yaml.YAMLError:
+                continue
+
+            if isinstance(parsed, dict):
+                self._deep_merge(merged, parsed)
+
+        return merged
+
+    def agent_capabilities(self) -> dict[str, Any]:
+        """这个 Trainer 允许 Agent 做什么。
+
+        真跑里军师连烧 5 轮才自己摸出「写新文件会被拒」—— 每一轮都是
+        一次真训练加四次大模型调用。这种约束是**已知事实**，
+        不该让它花钱去试出来。
+        """
+        try:
+            trainer = _load_trainer_module(
+                self.trainer_path
+            )
+        except Exception:                        # noqa: BLE001
+            return {}
+
+        return {
+            "可以写新零件": bool(
+                getattr(
+                    trainer,
+                    "AGENT_SUPPORTS_NEW_FILES",
+                    False,
+                )
+            ),
+            "可以改的配置子树": sorted(
+                getattr(
+                    trainer,
+                    "AGENT_CONFIG_ROOTS",
+                    (),
+                )
+            ),
+            "参数取值范围": {
+                f"{root}.{key}": list(bound)
+                for (root, key), bound in (
+                    getattr(
+                        trainer,
+                        "AGENT_PARAM_BOUNDS",
+                        {},
+                    )
+                ).items()
+            },
+        }
 
     def select_round(
         self,

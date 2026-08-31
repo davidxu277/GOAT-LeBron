@@ -311,6 +311,59 @@ def validate_task(
     return config
 
 
+def _render_pipeline(
+    config: dict[str, Any],
+    executor: "KuaiRandGoatExecutor",
+) -> str:
+    """军师和工兵看到的「当前流水线」。
+
+    三块都来自**真实来源**，没有一处是手写的副本：
+
+      任务      —— 任务配置里的固定口径
+      现在的配置 —— 执行器里真正生效的那份（初始 + 历轮已接受的改动）
+      能改什么   —— Trainer 自己声明的（能不能写新零件、哪些子树、参数范围）
+
+    最后一块尤其重要。真跑里军师连烧 5 轮才自己摸出「写新文件会被拒」，
+    每一轮都是一次真训练加四次大模型调用。这是**已知事实**，
+    不该让它花钱试出来。
+    """
+    能力 = executor.agent_capabilities()
+
+    block = {
+        "任务": {
+            "数据集": "KuaiRand-Pure",
+            "标签": "long_view",
+            "排序范围": "用户内（within_user）",
+            "正式指标": ["GAUC", "nDCG@5"],
+            "主分": "(GAUC + nDCG@5) / 2",
+        },
+        "现在真正生效的配置": (
+            executor.effective_trainer_config()
+        ),
+        "这一场你能改什么": {
+            **能力,
+            "说明": (
+                "「可以写新零件=False」意味着任何带 new_files 的提案都会被"
+                "当场拒掉、整轮作废 —— 这一场只能提配置改动。"
+                "这是当前 Trainer 的限制，不是方法本身不行。"
+                if 能力 and not 能力.get("可以写新零件")
+                else "可以往 modules/ 下写 FeatureOp / ModelOp / TrainOp，"
+                     "写完自动进流水线。"
+            ),
+        },
+        "收敛判定": {
+            "epsilon": config["epsilon"],
+            "patience": config["patience"],
+        },
+    }
+
+    return yaml.safe_dump(
+        block,
+        allow_unicode=True,
+        sort_keys=False,
+    )
+
+
 def _best_executor_round(
     best_report: dict[str, Any],
     source: pathlib.Path,
@@ -480,13 +533,12 @@ def run(
             f"tolerance={tolerance:.5f}"
         )
 
-    pipeline = (
-        BRIDGE_ROOT
-        / "configs"
-        / "pipeline.yaml"
-    ).read_text(
-        encoding="utf-8"
-    )
+    # ⚠️ 以前这里读的是 configs/pipeline.yaml —— 那是**另一个文件**，
+    # 跟真正在跑的 trainer_config 毫无关系。实测那份写着
+    # `model: item_popularity, prior: 20.0`，而真跑的是 FM(k=16, lr=0.001)。
+    # 军师于是整轮整轮地推理一个根本不存在的模型：该不该给
+    # item_popularity 上 SWA、prior 能不能调到 200 —— 而那个键在 FM Trainer
+    # 里压根没有，提上去必被拒。开药的人拿到的是别人的病历。
     interface = (
         profile
         / "modules"
@@ -500,6 +552,11 @@ def run(
         / "tunable_popularity_trainer.py"
     ).read_text(
         encoding="utf-8"
+    )
+
+    pipeline = _render_pipeline(
+        config,
+        executor,
     )
 
     llm = make_llm()
