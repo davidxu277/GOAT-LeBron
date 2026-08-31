@@ -94,6 +94,37 @@ def _check_config_patch(text: str) -> None:
 # ────────────────────────────── ① 医生 ──────────────────────────────
 
 
+# ── 官方基线不进 Agent 的视野 ────────────────────────────────────
+#
+# 赛题按「相对官方基线的提升」排名，所以基线是**评委的尺子**，不是
+# Agent 的输入。把它塞进成绩单，Agent 会退化成对着一个固定数字调参：
+# 分数一超过基线就判"没病"，低于基线就笼统报"学得不够"，而不是去看
+# 训练/验证差、看分桶、看用户构成 —— 真正能指出病因的那些证据。
+#
+# 更实际的一条：这个数字一旦写错，错法是**静默**的。08-31 那场就是
+# 病名表里把 primary 0.6016 当成 GAUC 基线，医生据此算出"明显高于基线"，
+# 而真实情况是三个指标全部低于基线，结论整个反了。
+#
+# 判"有没有进步"改用 Agent 自己的历史：上一轮 vs 这一轮。
+# 那是它真正控制得了、也真正需要学会读的信号。
+_基线字段前缀 = ("官方", "基线")
+
+
+def strip_baseline(report: dict[str, Any]) -> dict[str, Any]:
+    """去掉成绩单里一切跟官方基线有关的块，再交给大模型。
+
+    只改喂给模型的那一份；执行器产出的原文照旧进日志和交付物，
+    人这边该看的对比一个都不少。
+    """
+    if not isinstance(report, dict):
+        return report
+    return {
+        key: value
+        for key, value in report.items()
+        if not any(词 in str(key) for 词 in _基线字段前缀)
+    }
+
+
 # 训练集与验证集的主指标名 —— 按顺序试，第一个两边都有的就用它。
 _MAIN_METRIC_KEYS = ("主分", "点击分")
 
@@ -172,14 +203,15 @@ def diagnose(
                     f"{DANGEROUS_TRAIN_VAL_AUC_GAP:.2f}，危险信号 severity 不得低于 0.7")
 
     user = (
-        f"## 本轮成绩单\n\n{_dump(health_report)}\n\n"
+        f"## 本轮成绩单\n\n{_dump(strip_baseline(health_report))}\n\n"
         f"## 最近几轮的简要记录\n\n{_dump(history_brief or [])}"
     )
     return llm.call(
         role="医生",
         system=_prompt("doctor", 病名清单=vocab.as_prompt_block()),
         user=user,
-        schema=schemas.doctor_schema(vocab),
+        schema=schemas.doctor_schema(
+            vocab, schemas.metric_names(health_report)),
         big=True,
         validate=validate,
     )
@@ -201,6 +233,9 @@ def propose(
     # 于是「上一版为什么没跑起来」只能顺着医生的证据文字间接漏一点过来。
     # 开药的人看不到上一副药为什么没煎成，只能靠猜。
     history_brief: list[dict[str, Any]] | None = None,
+    # expected 要填的指标名。由 run_round 从成绩单推出来传进来，
+    # 军师自己手里没有成绩单。
+    metrics: list[str] | None = None,
 ) -> dict[str, Any]:
     card_ids = [c.id for c in candidates]
 
@@ -294,7 +329,7 @@ def propose(
         role="军师",
         system=_prompt("strategist"),
         user=user,
-        schema=schemas.strategist_schema(vocab, card_ids),
+        schema=schemas.strategist_schema(vocab, card_ids, metrics),
         big=True,
         validate=validate,
     )
@@ -433,6 +468,7 @@ def reflect(
     购买分自己抖一下又能越过门槛白拿 +0.15 信任分。
     """
     floor = max(MIN_REAL_GAIN, float(noise_floor))
+    metrics = schemas.metric_names(result)
 
     def 够不够(gains: dict[str, float]) -> bool:
         """有没有哪一项越过了**它自己**的噪声带。"""
@@ -515,8 +551,8 @@ def reflect(
 
     user = (
         f"## 当初的假设\n\n{_dump(hypothesis)}\n\n"
-        f"## 这次跑出来的结果\n\n{_dump(result)}\n\n"
-        f"## 改动之前那一版\n\n{_dump(parent_result)}\n\n"
+        f"## 这次跑出来的结果\n\n{_dump(strip_baseline(result))}\n\n"
+        f"## 改动之前那一版\n\n{_dump(strip_baseline(parent_result))}\n\n"
         f"## 用到的药方卡\n\n{card.as_prompt_block() if card else '（自创方案，无卡片）'}"
     )
     if card and card.failure_signals:
@@ -529,7 +565,10 @@ def reflect(
         role="复盘官",
         system=_prompt("reflector"),
         user=user,
-        schema=schemas.reflector_schema(vocab),
+        # actual 要填的指标名必须跟成绩单里的一致 —— 否则复盘官被要求
+        # 填两个数据里不存在的字段，填出来的数还会拿去比噪声带、
+        # 更新卡片信任分。这种错不报错，只安静地污染账本。
+        schema=schemas.reflector_schema(vocab, metrics),
         big=True,
         validate=validate,
     )

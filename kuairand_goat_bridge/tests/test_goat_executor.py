@@ -6,6 +6,7 @@ Windows multiprocessing 使用 spawn，因此传给 Executor 的测试 Runner
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 import tempfile
@@ -199,14 +200,24 @@ class GoatExecutorTests(
                 validation["主分"],
                 0.60145,
             )
-            self.assertEqual(
-                result.health_report["官方Validation基线"]["GAUC"],
-                0.6674,
+            # 官方基线**不进成绩单**。赛题按「相对官方基线的提升」排名，
+            # 那是评委的尺子，不是 Agent 的输入 —— 给了它，它会退化成
+            # 对着一个固定数字调参，而不去看训练/验证差、分桶、用户构成。
+            # 基线仍然全程记录，在 final_summary.json 里（见 goat_run.run）。
+            for 字段 in result.health_report:
+                self.assertNotIn(
+                    "基线",
+                    str(字段),
+                    f"成绩单里冒出了基线字段：{字段}",
+                )
+
+            # 具体数字也不许从别的字段漏进去
+            成绩单原文 = json.dumps(
+                result.health_report,
+                ensure_ascii=False,
             )
-            self.assertAlmostEqual(
-                result.health_report["相对官方基线"]["Primary"],
-                -0.0001,
-            )
+            for 数字 in ("0.6674", "0.5357", "0.6016", "0.6610", "0.5946"):
+                self.assertNotIn(数字, 成绩单原文)
             self.assertEqual(
                 result.health_report["训练诊断"]["每轮训练记录"]["最佳轮次"],
                 2,

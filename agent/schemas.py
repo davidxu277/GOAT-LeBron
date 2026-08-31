@@ -33,7 +33,38 @@ from .knowledge import SymptomVocab
 CONFIDENCE = ["高", "中", "低"]
 VERDICT = ["猜对了", "猜错了", "说不清", "没跑起来"]
 RESOLVED = ["是", "部分", "否"]
-METRICS = ["点击AUC", "购买AUC"]
+# ── 两个分指标叫什么 —— 全项目唯一来源 ──────────────────────────
+#
+# 左边是成绩单里的字段名，右边是对 LLM（医生 affects / 军师 expected /
+# 复盘官 actual）和对外报表用的名字。
+#
+# 为什么要有这张表：08-31 换数据集之后，成绩单里是 GAUC / nDCG@5，
+# 而这里还写着「点击AUC / 购买AUC」—— 复盘官被要求填两个数据里根本
+# 不存在的指标名，它只能瞎填或者照抄，填出来的数还会拿去跟噪声带比、
+# 拿去更新卡片信任分。这种错不会报错，只会安静地污染账本。
+METRIC_PAIRS = (
+    (("GAUC", "nDCG@5"), ("GAUC", "nDCG@5")),        # KuaiRand-Pure：当前任务
+    (("点击分", "购买分"), ("点击AUC", "购买AUC")),      # AliCCP：旧任务，测试还在用
+)
+
+# 认不出成绩单格式时的默认 —— 用当前任务那一套。
+METRICS = list(METRIC_PAIRS[0][1])
+
+_SCORE_SECTIONS = ("验证集", "总分")
+
+
+def metric_names(report: dict[str, Any] | None) -> list[str]:
+    """这份成绩单该用哪两个指标名。认不出来就退回当前任务的默认。"""
+    for section in _SCORE_SECTIONS:
+        block = (report or {}).get(section)
+        if not isinstance(block, dict):
+            continue
+        for fields, names in METRIC_PAIRS:
+            if block.get(fields[0]) is not None:
+                return list(names)
+    return list(METRICS)
+
+
 
 # ── 以前写在 schema 里、现在由 validate 强制的约束 ──────────────────
 # 军师报的单项预计提升上限（绝对值）。AUC 上一次改动能挪的量级就在千分位到
@@ -90,7 +121,9 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     }
 
 
-def doctor_schema(vocab: SymptomVocab) -> dict[str, Any]:
+def doctor_schema(vocab: SymptomVocab,
+                  metrics: list[str] | None = None) -> dict[str, Any]:
+    metrics = list(metrics or METRICS)
     finding = _obj(
         {
             "symptom": {"type": "string", "enum": vocab.ids},
@@ -103,7 +136,7 @@ def doctor_schema(vocab: SymptomVocab) -> dict[str, Any]:
             },
             "affects": {
                 "type": "array",
-                "items": {"type": "string", "enum": METRICS},
+                "items": {"type": "string", "enum": metrics},
             },
         },
         ["symptom", "severity", "confidence", "evidence", "affects"],
@@ -122,7 +155,9 @@ def doctor_schema(vocab: SymptomVocab) -> dict[str, Any]:
     )
 
 
-def strategist_schema(vocab: SymptomVocab, card_ids: list[str]) -> dict[str, Any]:
+def strategist_schema(vocab: SymptomVocab, card_ids: list[str],
+                      metrics: list[str] | None = None) -> dict[str, Any]:
+    metrics = list(metrics or METRICS)
     # card_id 允许为空字符串，表示这是自创方案（库里没有的招）
     proposal = _obj(
         {
@@ -143,8 +178,8 @@ def strategist_schema(vocab: SymptomVocab, card_ids: list[str]) -> dict[str, Any
             # 现在由 roles.propose 的 validate 卡。
             "expected": _obj(
                 {m: {"type": "number", "description": f"预计提升，绝对值不超过 {EXPECTED_CAP}"}
-                 for m in METRICS},
-                METRICS,
+                 for m in metrics},
+                metrics,
             ),
             "cost": _obj(
                 {
@@ -219,11 +254,13 @@ def implementer_schema() -> dict[str, Any]:
     )
 
 
-def reflector_schema(vocab: SymptomVocab) -> dict[str, Any]:
+def reflector_schema(vocab: SymptomVocab,
+                     metrics: list[str] | None = None) -> dict[str, Any]:
+    metrics = list(metrics or METRICS)
     return _obj(
         {
             "verdict": {"type": "string", "enum": VERDICT},
-            "actual": _obj({m: {"type": "number"} for m in METRICS}, METRICS),
+            "actual": _obj({m: {"type": "number"} for m in metrics}, metrics),
             "vs_expected": {"type": "string"},
             # 数组，不是单个 —— 一个方案可以同时打好几个病（26 张卡里 11 张是多病卡）。
             # 方案声称要治的每一个病，都必须在这里给出 before/after，

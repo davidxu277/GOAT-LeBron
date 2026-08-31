@@ -265,6 +265,8 @@ class KuaiRandGoatExecutor:
         elapsed_seconds: float,
         remaining_seconds: float,
         executor_round: int,
+        # 收下但**不写进成绩单** —— 见下方注释。留着这个参数是为了让
+        # 调用点显式地把基线交出来，而不是让人以为它被悄悄用上了。
         official_baseline: dict[str, Any] | None = None,
         training: dict[str, Any] | None = None,
         group_evidence: dict[str, Any] | None = None,
@@ -286,25 +288,6 @@ class KuaiRandGoatExecutor:
                 f"primary={primary:.12f}, expected={expected:.12f}"
             )
 
-        baseline = {
-            key: float(value)
-            for key, value in (
-                official_baseline
-                or KuaiRandGoatExecutor.DEFAULT_VALIDATION_BASELINE
-            ).items()
-        }
-        deltas = {
-            "GAUC": gauc - baseline["GAUC"],
-            "nDCG@5": ndcg - baseline["nDCG@5"],
-            "Primary": primary - baseline["primary"],
-        }
-        primary_delta = deltas["Primary"]
-        comparison = (
-            "显著高于官方基线" if primary_delta > KuaiRandGoatExecutor.OFFICIAL_EPSILON
-            else "显著低于官方基线" if primary_delta < -KuaiRandGoatExecutor.OFFICIAL_EPSILON
-            else "与官方基线差异未超过 epsilon"
-        )
-
         # 医生判 12 个病里有 6 个靠分组之后的数字（训练集自评、曝光分桶、
         # 新老用户、用户构成、日期分段、预测健康）。摊平到顶层，跟「验证集」
         # 平级 —— 藏在一层嵌套里，医生读成绩单时容易整块略过。
@@ -312,7 +295,7 @@ class KuaiRandGoatExecutor:
         # 证据块里如果冒出一个「验证集」，它会把真分数盖掉，而且不报错。
         保留字段 = {
             "数据集", "任务", "保真度", "随机种子", "验证集",
-            "官方Validation基线", "相对官方基线", "训练诊断",
+            "训练诊断",
             "运行预算", "官方结果目录", "最终提交",
         }
         evidence = {
@@ -347,17 +330,16 @@ class KuaiRandGoatExecutor:
                     metrics.get("users", 0)
                 ),
             },
-            "官方Validation基线": {
-                "GAUC": baseline["GAUC"],
-                "nDCG@5": baseline["nDCG@5"],
-                "Primary": baseline["primary"],
-                "来源": "Track 2 Starter Kit 官方 FM (k=16, lr=0.001)",
-            },
-            "相对官方基线": {
-                **deltas,
-                "epsilon": KuaiRandGoatExecutor.OFFICIAL_EPSILON,
-                "判断": comparison,
-            },
+            # ⚠️ 官方基线**不进成绩单**。
+            #
+            # 赛题按「相对官方基线的提升」排名 —— 那是评委的尺子，不是
+            # Agent 的输入。给了它，Agent 会退化成对着一个固定数字调参：
+            # 超过就判"没病"，低于就笼统报"学得不够"，而不去看训练/验证差、
+            # 分桶、用户构成这些真正指得出病因的证据。
+            #
+            # 基线仍然全程记录，在 final_summary.json 的
+            # official_baseline_validation / baseline_reproduction 两块里，
+            # 人这边该看的对比一个都不少（见 goat_run.run）。
             "训练诊断": dict(training or {}),
             **evidence,
             "运行预算": {
