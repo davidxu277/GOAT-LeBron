@@ -3715,3 +3715,47 @@ def test_指标名_跑崩时合成的复盘也用当前任务的名字():
     合成 = loop._crashed_reflection({"card_id": "x", "targets": ["在背题"]},
                                   "OOM", ["GAUC", "nDCG@5"])
     assert set(合成["actual"]) == {"GAUC", "nDCG@5"}
+
+
+# ─────────── 09-01：人工干预记了也白记（同学的 Claude 查出来的） ───────────
+
+
+def test_干预_写在仓库根也读得到(tmp_path):
+    """`agent.cli intervene` 写仓库根 logs/，而每一场的 logs_dir 各自独立
+    （bridge 是 output/<场次>/logs/，离线演习是 logs/offline/）。
+
+    只盯自己那一份的话，人在跑的过程中敲多少次 intervene 都读不到，
+    结果表上永远印「人工干预 0 次」—— 而那正是这个类要避免的东西：
+    一个只能是 0 的数字，评委翻一眼代码就知道不算数。
+    """
+    这一场 = tmp_path / "output" / "logs"
+    仓库根 = tmp_path / "logs"
+
+    log = loop.InterventionLog(这一场 / "interventions.jsonl",
+                               仓库根 / "interventions.jsonl")
+    assert log.drain() == []
+
+    # 人在别处敲了命令
+    loop.InterventionLog.record(仓库根 / "interventions.jsonl", "手动改了学习率", 3)
+    拿到 = log.drain()
+    assert len(拿到) == 1 and 拿到[0]["干了什么"] == "手动改了学习率"
+
+
+def test_干预_两个路径指向同一份时不重复计数(tmp_path):
+    """AliCCP 老路径上这两个路径本来就是同一个，别把一次干预数成两次。"""
+    同一份 = tmp_path / "logs" / "interventions.jsonl"
+    log = loop.InterventionLog(同一份, 同一份)
+    loop.InterventionLog.record(同一份, "杀掉了第 7 轮", 7)
+    assert len(log.drain()) == 1
+
+
+def test_干预_跑之前就有的不算(tmp_path):
+    """跑之前的数据准备、环境搭建不算干预 —— 只数跑起来之后新增的。"""
+    路径 = tmp_path / "logs" / "interventions.jsonl"
+    loop.InterventionLog.record(路径, "跑之前装了个库", None)
+
+    log = loop.InterventionLog(路径)          # 这一场从这里开始
+    assert log.drain() == []
+
+    loop.InterventionLog.record(路径, "跑起来之后改了配置", 2)
+    assert len(log.drain()) == 1

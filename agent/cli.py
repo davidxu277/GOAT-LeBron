@@ -368,9 +368,12 @@ def cmd_intervene(args) -> int:
     报出来的「干预 0 次」要有分量，前提是"非零"随手可得 ——
     一个只能是 0 的数字，评委翻一眼代码就知道不算数。
     """
-    InterventionLog.record(LOGS / "interventions.jsonl", args.reason, args.round)
+    目标 = pathlib.Path(args.logs) / "interventions.jsonl"
+    InterventionLog.record(目标, args.reason, args.round)
     print(f"已记一次人工干预：{args.reason}")
-    print(f"（写入 logs/interventions.jsonl，正在跑的那一场下一轮就会把它记进日志）")
+    print(f"（写入 {目标}）")
+    print("正在跑的那一场下一轮就会把它记进日志 —— 每一场除了自己的日志目录，"
+          "还会盯着仓库根的 logs/，所以不用管那一场的日志放在哪。")
     return 0
 
 
@@ -651,6 +654,9 @@ def main() -> int:
     p = sub.add_parser("intervene", help="记一次人工干预（跑的过程中插了手就敲一条）")
     p.add_argument("reason", help="干了什么、为什么")
     p.add_argument("--round", type=int, help="当时第几轮（可选）")
+    p.add_argument("--logs", default=str(LOGS),
+                   help="写到哪份日志。默认仓库根 logs/ —— 每一场都会盯着它，"
+                        "所以一般不用指定")
     p.set_defaults(func=cmd_intervene)
 
     p = sub.add_parser("restore", help="把某一轮的流水线还原出来（交付物 #4）")

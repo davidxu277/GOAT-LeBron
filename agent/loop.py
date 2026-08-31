@@ -202,15 +202,34 @@ class InterventionLog:
       算干预   —— 跑起来之后改配置改代码、手动杀掉某轮、手动挑提交版本
     """
 
-    def __init__(self, path: pathlib.Path):
-        self.path = path
+    def __init__(self, *paths: pathlib.Path):
+        """可以盯**好几个**文件。
+
+        为什么必须盯多个：`agent.cli intervene` 写的是仓库根的
+        `logs/interventions.jsonl`，而每一场跑的 `logs_dir` 是各自独立的
+        （bridge 那条路是 `kuairand_goat_bridge/output/<场次>/logs/`，
+        离线演习是 `logs/offline/`）。只盯自己那一份的话，人在跑的过程中
+        敲多少次 intervene 都读不到 —— 结果表上永远印「人工干预 0 次」，
+        而那正是这个类存在的全部意义要避免的东西。
+        """
+        seen: set[pathlib.Path] = set()
+        self.paths: list[pathlib.Path] = []
+        for path in paths:
+            resolved = pathlib.Path(path).expanduser().resolve()
+            if resolved not in seen:            # 两个路径指向同一份就别数两遍
+                seen.add(resolved)
+                self.paths.append(pathlib.Path(path))
+        self.path = self.paths[0]               # 兼容：老代码读 .path
         self._seen = len(self._read())
 
     def _read(self) -> list[dict[str, Any]]:
-        if not self.path.exists():
-            return []
-        return [json.loads(line) for line in
-                self.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        out: list[dict[str, Any]] = []
+        for path in self.paths:
+            if not path.exists():
+                continue
+            out += [json.loads(line) for line in
+                    path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return out
 
     @classmethod
     def record(cls, path: pathlib.Path, reason: str, round_id: int | None = None) -> None:
@@ -1014,7 +1033,13 @@ def run_session(
     time_ledger = TimeLedger.load(logs_dir / "time_ledger.json")
     prior_ledger = PriorLedger.load(logs_dir / "prior_ledger.json")
     shelf = Shelf.load(logs_dir / "shelf.json")
-    interventions = InterventionLog(logs_dir / "interventions.jsonl")
+    # 两处都盯：这一场自己的 logs_dir，以及 `agent.cli intervene` 默认写的
+    # 仓库根 logs/。人在跑的过程中敲那条命令时，不该还要先想清楚
+    # 「这一场的日志目录在哪」—— 那一刻他正忙着处理刚出的问题。
+    interventions = InterventionLog(
+        logs_dir / "interventions.jsonl",
+        ROOT / "logs" / "interventions.jsonl",
+    )
     module_owner: dict[str, int] = {}      # 零件路径 → 哪一轮写的这一版
 
     run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
