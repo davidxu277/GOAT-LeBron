@@ -1,0 +1,53 @@
+# 官方 FM 基线复现 —— 只做超参数实验，Agent **不能写代码**。
+#
+# 用途：确认我们的框架能一分不差跑出官方 baseline（第 0 轮强制校验）。
+# 这是正式跑之前该做的一步，但它**不是**正式跑：
+# official_fm_trainer 只认 6 个超参数，任何带 new_files 的提案都会被
+# 当场拒掉、整轮作废。要让 Agent 真做研究，用 kuairand_task.yaml。
+#
+# 原作者 Stephen Zhu（5d16d9e）。他当时把这份配置写进了 kuairand_task.yaml，
+# 于是正式跑那条路上 Agent 写代码的能力被整个关掉了 —— 分成两份文件，
+# 两个需求各自有自己的入口，谁也不挡谁。
+
+trainer: examples/official_fm_trainer.py
+
+# 必须使用全新目录，不能继续复用 output/full_run
+output_dir: output/fm_baseline_seed0
+
+seed: 0
+max_iterations: 50
+epsilon: 0.002
+patience: 3
+max_wall_seconds: 21600
+token_budget: 2000000
+generate_test_after_convergence: true
+
+# 第0轮必须复现官方FM
+require_baseline_reproduction: true
+
+trainer_config:
+  model:
+    name: fm
+    k: 16
+    learning_rate: 0.001
+
+  train:
+    epochs: 40
+    batch_size: 8192
+    early_stopping_patience: 4
+    min_delta: 0.00001
+
+official_baseline:
+  validation:
+    GAUC: 0.6674
+    nDCG@5: 0.5357
+    primary: 0.60155
+
+  hidden_test:
+    GAUC: 0.6610
+    nDCG@5: 0.5282
+    primary: 0.5946
+
+  reproduction_tolerance: 0.003
+# GOAT LLM credentials are read from its normal environment, for example:
+# DEEPSEEK_API_KEY / ANTHROPIC_API_KEY.
