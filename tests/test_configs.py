@@ -82,3 +82,19 @@ def test_官方基线数值两份都得对得上(名字):
     assert validation["GAUC"] == 0.6674
     assert validation["nDCG@5"] == 0.5357
     assert abs(validation["primary"] - (0.6674 + 0.5357) / 2) < 1e-9
+
+
+def test_两份配置都要真的能被加载器接受():
+    """守卫自己用 yaml.safe_load 直接读，绕过了 load_task 的必填项校验 ——
+    于是 7741a60 拆配置时删掉的 data_dir 一直没人发现，两份配置**都加载不了**，
+    正式跑和基线跑同时起不来。这条改用真正的加载器，把这类缺口关上。
+    """
+    import sys
+    sys.path.insert(0, str(配置目录.parent / "src"))
+    from kuairand_bridge.goat_run import load_task
+
+    for 名字 in ("kuairand_task.yaml", "fm_baseline.yaml"):
+        配置 = load_task(str(配置目录 / 名字))
+        assert pathlib.Path(配置["data_dir"]).is_dir(), (
+            f"{名字} 的 data_dir 指向的目录不存在：{配置['data_dir']}"
+        )

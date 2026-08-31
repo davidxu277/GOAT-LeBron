@@ -9,6 +9,10 @@
 # 于是正式跑那条路上 Agent 写代码的能力被整个关掉了 —— 分成两份文件，
 # 两个需求各自有自己的入口，谁也不挡谁。
 
+# 数据目录 —— 相对本文件所在目录解析，Windows / Linux / macOS 通用。
+# 从 dataset/KuaiRand-Pure.tar.gz 解压得到（只解 data/ 那一层）。
+data_dir: ../../dataset/KuaiRand-Pure/KuaiRand-Pure/data
+
 trainer: examples/official_fm_trainer.py
 
 # 必须使用全新目录，不能继续复用 output/full_run

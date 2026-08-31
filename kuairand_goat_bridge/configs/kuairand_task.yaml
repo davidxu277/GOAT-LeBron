@@ -1,3 +1,7 @@
+# 数据目录 —— 相对本文件所在目录解析，Windows / Linux / macOS 通用。
+# 从 dataset/KuaiRand-Pure.tar.gz 解压得到（只解 data/ 那一层）。
+data_dir: ../../dataset/KuaiRand-Pure/KuaiRand-Pure/data
+
 # 正式跑 —— Agent 能自己写特征 / 写模型 / 写训练策略。
 #
 # ⚠️ 改 trainer 这一行之前先想清楚：换成 official_fm_trainer.py 会把
