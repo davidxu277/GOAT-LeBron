@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from .dataset import DatasetBundle, load_dataset
+from .dataset import DatasetBundle, FIDELITY_FRACTIONS, load_dataset
 from .evaluator import evaluate_predictions
 
 
@@ -223,6 +223,46 @@ def _save_scores(
     return path.resolve()
 
 
+def _plain(value: Any) -> Any:
+    """把 Trainer 诊断中的 NumPy 值整理成可跨进程、可写 JSON 的值。"""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _training_diagnostics(model: Any, dataset: DatasetBundle, fidelity: str,
+                          full_train_rows: int) -> dict[str, Any]:
+    """从不同 Trainer 的模型包中提取统一、轻量的训练诊断。"""
+    diagnostics: dict[str, Any] = {
+        "fidelity": fidelity,
+        "训练集抽样比例": FIDELITY_FRACTIONS[fidelity],
+        "训练行数": len(dataset.train),
+        "全量训练行数": int(full_train_rows),
+        "验证行数": len(dataset.valid),
+    }
+    if not isinstance(model, dict):
+        return diagnostics
+
+    record = model.get("训练记录")
+    if isinstance(record, dict):
+        diagnostics["每轮训练记录"] = _plain(record)
+    if model.get("best_validation_primary") is not None:
+        diagnostics["最佳验证Primary"] = float(model["best_validation_primary"])
+    if isinstance(model.get("config"), dict):
+        diagnostics["实际生效配置"] = _plain(model["config"])
+    if isinstance(model.get("fields"), (list, tuple)):
+        diagnostics["实际特征"] = [str(value) for value in model["fields"]]
+    if isinstance(model.get("装上的零件"), (list, tuple)):
+        diagnostics["装上的零件"] = [str(value) for value in model["装上的零件"]]
+    return diagnostics
+
+
 def run_trainer(
     data_dir: str | pathlib.Path,
     trainer_path: str | pathlib.Path,
@@ -231,6 +271,7 @@ def run_trainer(
     make_test: bool = False,
     agent_patch: dict[str, Any] | None = None,
     trainer_config: dict[str, Any] | None = None,
+    fidelity: str = "全量",
 ) -> dict[str, Any]:
     """训练并评估一个 Trainer。"""
     work_dir = pathlib.Path(
@@ -243,10 +284,13 @@ def run_trainer(
     )
 
     # make_test=False 时完全不加载 test。
-    dataset = load_dataset(
+    full_dataset = load_dataset(
         data_dir,
         include_test=bool(make_test),
     )
+    # 最终提交必须用全量训练集；开发轮次才按 GOAT 的 fidelity 梯子缩放。
+    effective_fidelity = "全量" if make_test else str(fidelity)
+    dataset = full_dataset.with_train_fidelity(effective_fidelity, int(seed))
 
     trainer = _load_trainer(
         trainer_path
@@ -290,7 +334,13 @@ def run_trainer(
                 valid_path,
                 split="valid",
                 output_dir=work_dir,
-            )
+            ),
+            "training": _training_diagnostics(
+                model,
+                dataset,
+                effective_fidelity,
+                len(full_dataset.train),
+            ),
         }
 
         if not make_test:

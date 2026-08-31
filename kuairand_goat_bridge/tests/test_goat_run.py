@@ -24,6 +24,7 @@ if str(SRC_DIR) not in sys.path:
 
 
 from kuairand_bridge.goat_run import (
+    _track2_read_scores,
     load_task,
 )
 
@@ -86,6 +87,12 @@ class GoatRunConfigTests(
     unittest.TestCase
 ):
     """测试任务配置加载与官方限制。"""
+
+    def test_track2_score_adapter_reads_official_names(self):
+        scores = _track2_read_scores({
+            "验证集": {"GAUC": 0.6674, "nDCG@5": 0.5357, "主分": 0.60155}
+        })
+        self.assertEqual(scores, {"点击AUC": 0.6674, "购买AUC": 0.5357})
 
     def test_official_iteration_limit_is_enforced(
         self,
