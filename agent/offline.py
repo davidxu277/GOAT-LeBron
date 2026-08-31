@@ -119,9 +119,11 @@ class ScriptedLLM:
     def _工兵(self, schema: dict) -> dict[str, Any]:
         return {
             "change_type": "加新零件",
-            "config_patch": "features:\n  demo_op:\n    enabled: true\n",
+            # 名字带 _offline_ 前缀：.gitignore 认这个前缀，
+            # 演习产出的假零件就再也溜不进仓库了（真发生过一次）
+            "config_patch": "features:\n  _offline_scratch:\n    enabled: false\n",
             "new_files": [{
-                "path": "modules/features/demo_op.py",
+                "path": "modules/features/_offline_scratch.py",
                 "content": "# 离线演习用的空零件\nVALUE = 1\n",
             }],
             "self_check": [

@@ -29,6 +29,11 @@ experiments.db
 !deliverables/
 !deliverables/**
 
+# ── 演习产出的假零件（agent.cli run --offline）──
+# 假工兵写的文件会落进 modules/，跟真零件混在一起。
+# 真溜进去过一次（demo_op.py），交付前才发现。
+modules/**/_offline_*.py
+
 # ── Python ──
 __pycache__/
 *.py[cod]
