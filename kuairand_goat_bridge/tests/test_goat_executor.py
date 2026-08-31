@@ -372,6 +372,35 @@ class GoatExecutorTests(
                 )
             )
 
+    def test_float32_rounding_does_not_reject_primary(
+        self,
+    ):
+        """跨平台 float32 舍入误差不能让正常的第0轮失败。"""
+        metrics = {
+            "GAUC": 0.6674000024795532,
+            "nDCG@5": 0.5357000231742859,
+            "primary": 0.6015500000000000,
+        }
+
+        report = (
+            KuaiRandGoatExecutor
+            ._health_report(
+                metrics,
+                "全量",
+                pathlib.Path("."),
+                seed=0,
+                training_attempt=1,
+                remaining_iterations=49,
+                elapsed_seconds=1.0,
+                remaining_seconds=21599.0,
+            )
+        )
+
+        self.assertAlmostEqual(
+            report["验证集"]["主分"],
+            metrics["primary"],
+        )
+
     def test_training_attempt_is_recorded(
         self,
     ):

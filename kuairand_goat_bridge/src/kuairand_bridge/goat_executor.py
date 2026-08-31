@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 import pathlib
 import time
 from typing import Any, Callable
@@ -252,9 +253,13 @@ class KuaiRandGoatExecutor:
             gauc + ndcg
         ) / 2.0
 
-        if abs(primary - expected) > 1e-10:
+        # 官方评估链路里部分值会经过 NumPy float32；Windows/Linux/macOS
+        # 的序列化与加法顺序可能留下 1e-8 量级误差。这里只拒绝真正的口径
+        # 不一致，不应把正常的浮点舍入误判成第 0 轮失败。
+        if not math.isclose(primary, expected, rel_tol=0.0, abs_tol=1e-6):
             raise ValueError(
-                "primary 与GAUC/nDCG均值不一致"
+                "primary 与GAUC/nDCG均值不一致："
+                f"primary={primary:.12f}, expected={expected:.12f}"
             )
 
         return {
