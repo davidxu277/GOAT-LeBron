@@ -155,7 +155,7 @@ def test_没查出问题时findings必须为空(vocab):
 # ────────────────── 工兵：红线 ──────────────────
 
 
-def _impl_validate(data):
+def _impl_validate(data, health_report=None):
     captured = {}
 
     class _FakeLLM:
@@ -165,7 +165,8 @@ def _impl_validate(data):
             captured["validate"] = kw["validate"]
             return data
 
-    roles.implement(_FakeLLM(), {"card_id": "", "how_to": ""}, None, "", "", "")
+    roles.implement(_FakeLLM(), {"card_id": "", "how_to": ""}, None, "", "", "",
+                    health_report=health_report)
     captured["validate"](data)
 
 
@@ -482,7 +483,7 @@ def test_早停盯的指标名不对会当场打回():
         "new_files": [],
         "self_check": BASE_CHECK,
     }
-    with pytest.raises(SchemaViolation, match="点击分.*购买分|monitor"):
+    with pytest.raises(SchemaViolation, match="monitor"):
         _impl_validate(data)
 
 
@@ -494,18 +495,29 @@ def test_早停盯的指标名写点号路径也拦得住():
         "new_files": [],
         "self_check": BASE_CHECK,
     }
-    with pytest.raises(SchemaViolation, match="点击分.*购买分|monitor"):
+    with pytest.raises(SchemaViolation, match="monitor"):
         _impl_validate(data)
 
 
-def test_早停盯真实产出的中文指标名放行():
-    for name in ("点击分", "购买分", "loss"):
-        data = {
-            "change_type": "只改配置",
-            "config_patch": f"train:\n  early_stopping:\n    monitor: {name}\n",
-            "new_files": [], "self_check": BASE_CHECK,
-        }
-        _impl_validate(data)   # 不该抛
+def test_早停盯真实产出的指标名放行():
+    """放行哪些名字**跟着成绩单走** —— 换数据集不用回来改这份名单。
+
+    以前这里写死了「点击分/购买分/loss」，那是 AliCCP 的键名；迁到
+    KuaiRand 之后没人回来改，于是校验器一边打回工兵、一边在报错信息里
+    推荐一个训练循环根本不产出的键。现在两套任务各测一遍。
+    """
+    任务 = [
+        ({"验证集": {"GAUC": 0.63, "nDCG@5": 0.52}}, ("GAUC", "nDCG@5", "primary", "loss")),
+        ({"验证集": {"点击分": 0.62, "购买分": 0.60}}, ("点击分", "购买分", "loss")),
+    ]
+    for report, names in 任务:
+        for name in names:
+            data = {
+                "change_type": "只改配置",
+                "config_patch": f"train:\n  early_stopping:\n    monitor: {name}\n",
+                "new_files": [], "self_check": BASE_CHECK,
+            }
+            _impl_validate(data, health_report=report)   # 不该抛
 
 
 def test_epochs写在model_mlp下会被打回():

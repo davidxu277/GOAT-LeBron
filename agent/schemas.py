@@ -42,9 +42,12 @@ RESOLVED = ["是", "部分", "否"]
 # 而这里还写着「点击AUC / 购买AUC」—— 复盘官被要求填两个数据里根本
 # 不存在的指标名，它只能瞎填或者照抄，填出来的数还会拿去跟噪声带比、
 # 拿去更新卡片信任分。这种错不会报错，只会安静地污染账本。
+# 每一项是 (成绩单里的字段名, 对外报告用的名字, 训练循环额外产出的键)。
+# 第三项是给 TrainOp 的 monitor 用的：训练循环每轮除了两个分指标，还会吐
+# 自己的 loss，KuaiRand 这条路的 trainer 另外报一个 primary（主分）。
 METRIC_PAIRS = (
-    (("GAUC", "nDCG@5"), ("GAUC", "nDCG@5")),        # KuaiRand-Pure：当前任务
-    (("点击分", "购买分"), ("点击AUC", "购买AUC")),      # AliCCP：旧任务，测试还在用
+    (("GAUC", "nDCG@5"), ("GAUC", "nDCG@5"), ("primary", "loss")),   # KuaiRand-Pure：当前任务
+    (("点击分", "购买分"), ("点击AUC", "购买AUC"), ("loss",)),           # AliCCP：旧任务，测试还在用
 )
 
 # 认不出成绩单格式时的默认 —— 用当前任务那一套。
@@ -53,16 +56,34 @@ METRICS = list(METRIC_PAIRS[0][1])
 _SCORE_SECTIONS = ("验证集", "总分")
 
 
-def metric_names(report: dict[str, Any] | None) -> list[str]:
-    """这份成绩单该用哪两个指标名。认不出来就退回当前任务的默认。"""
+def _match_pair(report: dict[str, Any] | None):
+    """成绩单长得像哪一套任务。认不出来返回 None。"""
     for section in _SCORE_SECTIONS:
         block = (report or {}).get(section)
         if not isinstance(block, dict):
             continue
-        for fields, names in METRIC_PAIRS:
-            if block.get(fields[0]) is not None:
-                return list(names)
-    return list(METRICS)
+        for pair in METRIC_PAIRS:
+            if block.get(pair[0][0]) is not None:
+                return pair
+    return None
+
+
+def metric_names(report: dict[str, Any] | None) -> list[str]:
+    """这份成绩单该用哪两个指标名。认不出来就退回当前任务的默认。"""
+    pair = _match_pair(report)
+    return list(pair[1]) if pair else list(METRICS)
+
+
+def epoch_metric_names(report: dict[str, Any] | None = None) -> list[str]:
+    """训练循环每轮产出、TrainOp 的 monitor 能盯的指标键。
+
+    跟 metric_names() 同源 —— 都从 METRIC_PAIRS 推。roles.py 曾经私藏过一份
+    自己的名单（写的还是 AliCCP 的「点击分/购买分」），后果比没有这条校验
+    更糟：工兵被打回时会照着**报错信息**改，于是校验器把它教成写一个训练
+    循环根本不产出的键名，然后死在 KeyError 上。
+    """
+    pair = _match_pair(report) or METRIC_PAIRS[0]
+    return [*pair[0], *pair[2]]
 
 
 

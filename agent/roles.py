@@ -346,7 +346,12 @@ def implement(
     example_module: str,
     current_config: str,
     last_error: str = "",
+    health_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # monitor 能盯哪些键，由成绩单推出来（schemas 那一张表说了算），
+    # 不在这里另立名单 —— 见 schemas.epoch_metric_names 的注释。
+    allowed_monitors = schemas.epoch_metric_names(health_report)
+
     def validate(data: dict[str, Any]) -> None:
         for f in data["new_files"]:
             path = f["path"].replace("\\", "/")
@@ -368,23 +373,26 @@ def implement(
         _check_config_patch(patch_text)
         parsed_patch = yaml.safe_load(patch_text) or {}
 
-        # 深度训练每轮真正产出的指标名只有这三个（点击分/购买分/loss，
-        # 见 harness/deep.py 的 metrics 字典）。工兵曾反复写
+        # TrainOp 的 monitor 只能盯训练循环每轮真正产出的键。工兵曾反复写
         # ctr_auc / cvr_auc / mean_auc 这类英文名，直到烧完一次真训练才 KeyError——
         # 这条检查本来在这里，一次合并冲突手动解决时被整段删掉，没人发现，
         # 直到范文（modules/train/early_stopping.py）还在教错误名字才被揪出来。
+        #
+        # 补回来之后又栽了第二次：名单是**写死**的，而且写的是上一个数据集
+        # 的键名。工兵被打回时会照着报错信息改，于是校验器把它教成写一个
+        # 训练循环根本不产出的键。现在名单从 schemas.epoch_metric_names 推，
+        # 跟医生/复盘官/外层循环同源，不可能再走岔。
         monitor = parsed_patch.get("train.early_stopping.monitor")
         train_patch = parsed_patch.get("train")
         if monitor is None and isinstance(train_patch, dict):
             early_patch = train_patch.get("early_stopping")
             if isinstance(early_patch, dict):
                 monitor = early_patch.get("monitor")
-        allowed_monitors = {"点击分", "购买分", "loss"}
         if monitor is not None and str(monitor) not in allowed_monitors:
             raise SchemaViolation(
                 f"train.early_stopping.monitor 写成了 {monitor!r}，"
-                f"但训练循环只产出 {sorted(allowed_monitors)}。"
-                "请改用「点击分」、「购买分」或 loss。"
+                f"但训练循环只产出 {sorted(allowed_monitors)}，"
+                f"只能从里面挑一个。"
             )
 
         mlp_patch = ((parsed_patch.get("model") or {}).get("mlp")
