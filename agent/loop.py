@@ -363,7 +363,7 @@ def read_scores(report: dict[str, Any]) -> dict[str, float]:
         block = report.get(section)
         if not isinstance(block, dict):
             continue
-        for (first, second), (out_first, out_second) in _METRIC_NAMING:
+        for (first, second), (out_first, out_second), _loop_only in _METRIC_NAMING:
             if block.get(first) is not None:
                 return {
                     out_first: float(block[first]),
@@ -629,6 +629,8 @@ def run_round(
             patch = roles.implement(
                 llm, candidate, card, module_interface, example,
                 current_config, last_error=last_error,
+                # 让工兵的 monitor 校验跟着本轮成绩单走，而不是写死一套名字
+                health_report=health_report,
             )
             log.chosen = candidate
             break

@@ -137,17 +137,57 @@ def load_model_op(config: dict[str, Any]) -> Any:
     return _load_op_class_by(impl, ("build", "predict"), "ModelOp")(config)
 
 
+_TRAIN_OPS_DIR = pathlib.Path(__file__).resolve().parent.parent / "modules" / "train"
+
+
+def _is_train_op_block(name: str, block: dict[str, Any]) -> bool:
+    """这个配置块是"零件声明"还是"普通配置段"？
+
+    `train` 底下住着两类东西：
+      · 零件声明 —— early_stopping / swa …，要被加载成 TrainOp
+      · 普通配置 —— loss_weight 之类，执行器直接读，没有对应零件
+
+    判据取**派生事实**而不是写死的名单：写了 enabled/impl 的显然是在声明零件；
+    没写的，就看 modules/train/ 下有没有同名零件文件。这样新零件长出来自动
+    被认得，不用回来改这份名单 —— 名单一旦忘了同步，就又是一次静默失效。
+    """
+    if "enabled" in block or "impl" in block:
+        return True
+    return (_TRAIN_OPS_DIR / f"{name}.py").is_file()
+
+
 def load_train_ops(config: dict[str, Any]) -> list[tuple[str, Any]]:
     """按 train.<名字>.enabled + impl 加载训练过程零件（早停、SWA…）。"""
     from .executor import _load_op_class_by
 
     ops = []
     for name, block in (config.get("train") or {}).items():
-        if not isinstance(block, dict) or not block.get("enabled"):
-            continue
+        if not isinstance(block, dict):
+            continue                 # train 下的标量（epochs / batch_size…）不是零件声明
+
+        if not _is_train_op_block(name, block):
+            continue                 # 普通配置段（如 loss_weight），执行器自己读
+
+        # 静默跳过是最坑的形态：改了配置等于没改，训练结果纹丝不动，却被
+        # 记成"这个方案没用"。实测（2026-09-01 第 2 轮）就栽在这 —— 模板里
+        # 的 early_stopping 块只有 inner_holdout_frac，没有 enabled，于是整
+        # 个零件从没被加载；军师往里塞了 patience: 3，124,909 个预测值跟改
+        # 动前 bit 级完全相同，复盘官只能判「说不清」。
+        if "enabled" not in block:
+            raise ValueError(
+                f"train.{name} 对应 modules/train/{name}.py，但配置块里没有 enabled"
+                f" —— 零件不会被加载，改了等于没改。要开就写 enabled: true +"
+                f" impl: modules/train/{name}.py，要关就明写 enabled: false")
+
+        if not block["enabled"]:
+            continue                 # 明确关掉的，跳过
+
         impl = block.get("impl")
         if not impl:
-            continue                 # 没指路的当没开 —— 训练策略不像模型那样非有不可
+            raise ValueError(
+                f"train.{name} 写了 enabled: true 却没写 impl —— "
+                f"没有东西可加载。补上 impl: modules/train/{name}.py")
+
         ops.append((name, _load_op_class_by(impl, ("on_epoch_end",), "TrainOp")(config)))
     return ops
 

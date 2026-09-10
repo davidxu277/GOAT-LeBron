@@ -434,6 +434,9 @@ class KuaiRandGoatExecutor:
         started = time.monotonic()
         run_dir: pathlib.Path | None = None
         attempt: int | None = None
+        history_before = len(
+            self._patch_history
+        )
 
         try:
             attempt = (
@@ -516,6 +519,17 @@ class KuaiRandGoatExecutor:
             )
 
         except Exception as exc:
+            # 这一轮没跑成，它的补丁就不能留在 history 里。history 每轮都会
+            # 被 apply_agent_patch 从初始配置重放一遍，留着的话后面每一轮都
+            # 会再撞一次同样的错 —— 哪怕那一轮提的是完全无关的改动。
+            #
+            # 实测（2026-09-01）：第 5 轮想覆盖已有的 swa.py 被守卫拒掉，
+            # 第 6 轮（只改超参数、没有新文件）和第 7 轮（写别的零件）
+            # 报的是一模一样的 FileExistsError。剩下 43 轮全部注定失败。
+            del self._patch_history[
+                history_before:
+            ]
+
             if run_dir is None:
                 run_dir = (
                     self.output_dir
