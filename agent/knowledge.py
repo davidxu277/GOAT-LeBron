@@ -55,6 +55,9 @@ class SymptomVocab:
     def ids(self) -> list[str]:
         return list(self._by_id)
 
+    def all(self) -> list[Symptom]:
+        return list(self._by_id.values())
+
     def __contains__(self, symptom_id: str) -> bool:
         return symptom_id in self._by_id
 

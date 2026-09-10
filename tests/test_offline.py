@@ -117,7 +117,12 @@ def _doctor_validate(vocab, data):
     captured["validate"](data)
 
 
-def test_证据里没有数字会被打回(vocab):
+def test_证据既没数字也没点名成绩单会被打回(vocab):
+    """「训练分明显高于验证分」是转述，不是证据 —— 既没有数字，也没有说
+    自己读的是成绩单哪一块。两条都不占就该打回。
+
+    （见 tests/test_structural_evidence.py：结构型的病可以只点名不带数字，
+    因为它们的证据是"清单里没有这类列"，天生没有数字可引。）"""
     data = {
         "findings": [{
             "symptom": "在背题", "severity": 0.5, "confidence": "高",
@@ -125,7 +130,7 @@ def test_证据里没有数字会被打回(vocab):
         }],
         "no_finding": False, "reason_if_none": "",
     }
-    with pytest.raises(SchemaViolation, match="没有任何数字"):
+    with pytest.raises(SchemaViolation, match="证据"):
         _doctor_validate(vocab, data)
 
 

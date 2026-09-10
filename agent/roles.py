@@ -50,6 +50,17 @@ FORBIDDEN_FIELDS = (
     "comment_stay_time",
 )
 _HAS_DIGIT = re.compile(r"\d")
+_ANCHOR = re.compile(r"「([^」]+)」")
+
+
+def evidence_anchors(symptom: Any) -> list[str]:
+    """这个病的证据可以点名成绩单的哪一块。
+
+    从病名自己的 `needs` 字段里抽 —— 那里本来就用「」标好了要看什么，
+    例如「训练诊断」里的「实际特征」。不写死名单，加新病名不用回来改这里。
+    """
+    return [a.strip() for a in _ANCHOR.findall(getattr(symptom, "needs", "") or "")
+            if a.strip()]
 _HEDGE_WORDS = ("试试看", "可能有帮助", "值得一试", "一般来说效果不错", "应该有帮助")
 
 # 工兵只准动配置里的这三棵子树。别的键（数据路径、评估口径、预算）
@@ -214,10 +225,23 @@ def diagnose(
             if not 低 <= f["severity"] <= 高:
                 raise SchemaViolation(
                     f"病名「{f['symptom']}」的 severity={f['severity']} 超出 {低}~{高}。")
-            if not _HAS_DIGIT.search(f["evidence"]):
+            # 证据必须**落到成绩单上**，但落法有两种：
+            #   · 数值型的病（在背题、时间漂移…）→ 引用具体数字
+            #   · 结构型的病（历史行为没用上、排序损失不匹配…）→ 点名它读的
+            #     是成绩单的哪一块。这类病的证据是"清单里没有这类列"，
+            #     一个关于清单的事实，天生没有数字可引。
+            #
+            # 只留"必须带数字"这一条的后果：结构型的病**结构性地无法合规
+            # 上报**。实测两场跑一共三次，医生每次报「历史行为没用上」都要
+            # 先被打回一次；有一次军师因同一条规则被连打两次、整轮作废。
+            # 而那个病指向的正是官方 Starter Kit 排第 2 的 headroom 方向。
+            证据 = f["evidence"]
+            锚点 = evidence_anchors(vocab[f["symptom"]]) if f["symptom"] in vocab else []
+            if not _HAS_DIGIT.search(证据) and not any(a in 证据 for a in 锚点):
                 raise SchemaViolation(
-                    f"病名「{f['symptom']}」的证据里没有任何数字。"
-                    f"证据必须直接引用成绩单里的数值。"
+                    f"病名「{f['symptom']}」的证据既没有引用数字，也没有点名"
+                    f"它读的是成绩单的哪一块。二者至少要有一个 —— "
+                    f"这个病该看的是：{'、'.join(锚点) or '成绩单里的具体数值'}。"
                 )
         if data["no_finding"] and data["findings"]:
             raise SchemaViolation("no_finding 为 true 时 findings 必须为空")
