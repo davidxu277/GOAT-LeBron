@@ -1066,6 +1066,7 @@ def run_session(
     rung = FIDELITY_LADDER.index(start_fidelity)   # 当前数据档位
     no_finding_streak = 0
     stale = 0                            # 连续多少轮没有超过 epsilon 的提升
+    fail_streak = 0                      # 连续多少轮压根没跑起来
 
     best_score = total_score(cur)
     best = {"round": 0, "report": cur, "fidelity": FIDELITY_LADDER[rung]}
@@ -1296,7 +1297,25 @@ def run_session(
             break
 
         if not log.run_ok:
+            # 「没有进步」和「压根跑不起来」是两种不同的终止理由，但都该终止。
+            #
+            # 判停原本只看验证分，而失败轮次走不到那段逻辑（下面那个 continue），
+            # 于是一场已经废掉的跑不会自己停。实测：第 5 轮一个补丁把 patch
+            # history 弄脏之后，剩余 43 轮全部注定失败，它却一直烧 LLM 调用
+            # 直到 50 轮上限 —— 每一轮都是四次模型调用，全是白花的。
+            #
+            # 只数**真的去做了实验却挂掉**的轮次。医生查不出病、根本没走到
+            # 训练那一步的轮次不算 —— 那是另一码事，有 no_finding_streak
+            # 管着，收敛理由也不一样（"查不出问题"而不是"跑不起来"）。
+            if log.chosen is not None:
+                fail_streak += 1
+                if fail_streak >= patience:
+                    summary.stopped_because = (
+                        f"连续 {fail_streak} 轮跑不起来，判定这一场已经废了")
+                    break
             continue                        # 这一轮没跑出结果，状态不动
+
+        fail_streak = 0
 
         # ── 接线：本轮成绩单成为下一轮的输入 ──
         cur = log.metrics or cur
