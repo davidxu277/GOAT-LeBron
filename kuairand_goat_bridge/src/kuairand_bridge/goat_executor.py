@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+import hashlib
 import json
 import math
 import pathlib
@@ -139,6 +140,9 @@ class KuaiRandGoatExecutor:
             dict[str, Any]
         ] = []
         self._selected_round: int | None = None
+        # 上一次**跑成的**那轮的验证预测指纹。用来机械地判断"这次改动到底
+        # 生没生效" —— 见 _effect_verdict。失败的轮次不更新它。
+        self._last_scores_digest: str | None = None
 
     @property
     def training_attempts(self) -> int:
@@ -256,6 +260,71 @@ class KuaiRandGoatExecutor:
             }
             for item in history
         ]
+
+    @staticmethod
+    def _scores_digest(
+        run_dir: pathlib.Path,
+    ) -> str | None:
+        """这一轮验证预测的指纹。没有预测文件就返回 None（判不了）。"""
+        path = run_dir / "valid_scores.npy"
+        try:
+            return hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+        except OSError:
+            return None
+
+    def _effect_verdict(
+        self,
+        run_dir: pathlib.Path,
+        normalized: dict[str, Any],
+    ) -> dict[str, str]:
+        """这次改动到底生没生效 —— 用预测指纹机械判断，不靠 LLM 推理。
+
+        为什么值得单独判：**「这招没用」和「这招压根没执行」是两件事**。
+        前者该给卡片记负分，后者该去修 harness。混在一起，靠谱度账本就被
+        污染了 —— 一张好卡会因为框架没接上而被冤枉成没用，然后被拉黑。
+
+        2026-09-01 那场真跑里连续三轮预测逐位相同（124,909 个浮点数，
+        最大差 0.0），三种不同的原因：零件缺 enabled 没被加载、工兵自创了
+        一个不存在的挂载点、方案本身在用户内排序下是恒等变换。三种都被
+        这一个哈希抓得住。
+        """
+        digest = self._scores_digest(run_dir)
+        previous = self._last_scores_digest
+        if digest is not None:
+            self._last_scores_digest = digest
+
+        if digest is None:
+            return {"结论": "判不了",
+                    "依据": "这一轮没有留下验证预测文件，无法比较"}
+        if previous is None:
+            return {"结论": "判不了",
+                    "依据": "没有可比的上一轮（首轮，或之前几轮都没跑成）"}
+
+        if digest != previous:
+            return {"结论": "生效",
+                    "依据": "验证集预测与上一轮不同，改动确实进入了训练"}
+
+        # 预测一模一样。先分清是"改了但没生效"还是"本来就没改"。
+        改了什么 = bool(
+            normalized.get("new_files")
+        ) or bool(
+            (normalized.get("config_patch") or "").strip()
+        )
+        if not 改了什么:
+            return {"结论": "本轮无改动",
+                    "依据": "config_patch 和 new_files 都是空的，预测相同是正常的"}
+
+        return {
+            "结论": "未生效",
+            "依据": (
+                "验证集预测与上一轮**逐位相同** —— 这次改动没有进入训练。"
+                "常见原因：零件块缺 enabled/impl 没被加载、config_patch 落在了"
+                "没人读的键上、或者这招在用户内排序下是恒等变换。"
+                "先查是不是没接上，别急着判定这个方案无效。"
+            ),
+        }
 
     @staticmethod
     def _health_report(
@@ -507,6 +576,13 @@ class KuaiRandGoatExecutor:
                 official_baseline=self.official_baseline,
                 training=result.get("training") or {},
                 group_evidence=result.get("diagnostics") or {},
+            )
+
+            # 机械判断这次改动到底生没生效（比对验证预测的指纹）。放进成绩单，
+            # 医生和复盘官就能拿它当**证据**，而不用自己推理"是不是没接上"。
+            report["改动是否生效"] = self._effect_verdict(
+                run_dir,
+                normalized,
             )
 
             return BridgeRunResult(
