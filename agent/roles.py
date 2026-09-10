@@ -550,7 +550,27 @@ def reflect(
 
     targets = list(hypothesis.get("targets") or [])
 
+    # harness 已经用预测指纹证明这一轮的改动压根没进训练（见执行器的
+    # _effect_verdict）。这时候卡片是被冤枉的 —— 该修的是 harness，不是把
+    # 这张卡的信任分扣到底、从此让军师再也不提它。
+    未生效 = (
+        ((result or {}).get("改动是否生效") or {}).get("结论") == "未生效"
+    )
+
     def validate(data: dict[str, Any]) -> None:
+        if 未生效:
+            if data["verdict"] == "猜对了":
+                raise SchemaViolation(
+                    "成绩单显示本轮改动**未生效**（验证预测与上一轮逐位相同），"
+                    "改动没有进入训练，假设无从成立，不能判「猜对了」。"
+                    "判「说不清」或「没跑起来」。")
+            if data["card_update"]["prior_delta"] < 0:
+                raise SchemaViolation(
+                    "成绩单显示本轮改动**未生效** —— 这一轮什么都没执行，"
+                    "不是这张卡没用，是它压根没被跑起来。prior_delta 不许为负"
+                    "（负分会让军师从此不再提这张卡，而问题出在 harness）。"
+                    "记 0，并在 note 里写清楚要去查什么。")
+
         # 数量上限与限幅：接口不支持 maxItems / minimum / maximum，只能在这里卡
         if len(data["symptom_resolved"]) > schemas.MAX_RESOLVED:
             raise SchemaViolation(
