@@ -20,9 +20,14 @@ from tests.conftest import need
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+# 只扫真正放配置的几个目录。别用 ROOT.glob("**/*.yaml") —— 那会把 .venv
+# （1 GB）和 dataset（239 MB）整个走一遍，收集阶段就要几十秒。
+_CONFIG_DIRS = ("config", "kuairand_goat_bridge/configs")
+
 SHIPPED_CONFIGS = sorted(
-    p for p in ROOT.glob("**/*.yaml")
-    if ".venv" not in p.parts and "dataset" not in p.parts
+    p
+    for d in _CONFIG_DIRS
+    for p in (ROOT / d).glob("*.yaml")
 )
 
 

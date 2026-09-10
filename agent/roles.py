@@ -18,15 +18,36 @@ from .llm import LLM, SchemaViolation
 from . import schemas
 
 PROMPTS = pathlib.Path(__file__).resolve().parent / "prompts"
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# CLAUDE.md R1：这六个字段永远不许进入模型输入
+# CLAUDE.md R1：这些字段永远不许进入模型输入。
+#
+# 两套任务的泄漏列都列在这里 —— 取并集是安全的：禁一个当前数据集里根本
+# 不存在的列，代价为零；漏禁一个存在的列，代价是整场实验作废。
+#
+# 2026-09-01 实测：迁到 KuaiRand 之后这里只补了 long_view，工兵的自检于是
+# 一轮轮地在确认"没有用 sample_id / ctcvr"（AliCCP 的列，KuaiRand 里压根
+# 不存在），而真正危险的 play_time_ms（long_view 就是从它推出来的）
+# 一道闸门都没有。
 FORBIDDEN_FIELDS = (
+    # AliCCP
     "sample_id",
     "common_id",
     "click",
     "conversion",
     "ctcvr",
+    # KuaiRand-Pure：标签，以及同一条曝光"之后"才知道的行为结果
     "long_view",
+    "play_time_ms",
+    "is_click",
+    "is_like",
+    "is_follow",
+    "is_comment",
+    "is_forward",
+    "is_hate",
+    "is_profile_enter",
+    "profile_stay_time",
+    "comment_stay_time",
 )
 _HAS_DIGIT = re.compile(r"\d")
 _HEDGE_WORDS = ("试试看", "可能有帮助", "值得一试", "一般来说效果不错", "应该有帮助")
@@ -54,6 +75,25 @@ def _prompt(name: str, **subs: str) -> str:
 
 def _dump(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
+
+
+def existing_modules_block() -> str:
+    """扫 modules/ 生成"现在有哪些现成零件"的清单，注入工兵的提示词。
+
+    手写这份清单等于又立一张会走岔的表：新零件长出来没人回来加，工兵就
+    继续以为它不存在、继续重写一遍、继续被路径守卫拒掉。扫目录是派生
+    事实，永远同步。
+    """
+    lines = []
+    for group in ("features", "models", "train"):
+        d = REPO_ROOT / "modules" / group
+        names = sorted(
+            p.stem for p in d.glob("*.py")
+            if not p.stem.startswith("_")
+        ) if d.is_dir() else []
+        if names:
+            lines.append(f"  modules/{group}/  →  " + "  ".join(names))
+    return "\n".join(lines) or "  （目前一个都没有）"
 
 
 def _check_config_patch(text: str) -> None:
@@ -363,6 +403,20 @@ def implement(
                 raise SchemaViolation(
                     f"{path} 里有 `..`。用它可以从 modules/ 爬出去改主程序，一律打回。"
                 )
+            # 复用已有零件时只该发 config_patch 指路，不该把它再交一遍。
+            # 落地器的路径守卫会拒（R5 只允许新建），但那要等训练子进程起来
+            # 才炸，白白烧掉 50 次训练配额里的一次。实测中这一条废掉过 3 轮。
+            #
+            # `_` 开头的不算 —— 那是演习每轮重建的临时零件（.gitignore 挡着
+            # 进不了仓库），existing_modules_block() 也不把它们列为现成零件。
+            # 这条守卫保护的是**仓库里的用户代码**，不是磁盘上任何一个文件。
+            if not path.rsplit("/", 1)[-1].startswith("_") and (REPO_ROOT / path).is_file():
+                raise SchemaViolation(
+                    f"{path} 在仓库里已经存在，new_files 只能放**新建**的文件。"
+                    f"要启用一个已有零件，把它从 new_files 里去掉，"
+                    f"只发 config_patch 指路即可："
+                    f"\n  train:\n    <名字>:\n      enabled: true\n      impl: {path}"
+                )
             for bad in FORBIDDEN_FIELDS:
                 if re.search(rf"""["']{bad}["']""", f["content"]):
                     raise SchemaViolation(
@@ -438,7 +492,11 @@ def implement(
 
     return llm.call(
         role="工兵",
-        system=_prompt("implementer"),
+        system=_prompt(
+            "implementer",
+            禁用字段="、".join(FORBIDDEN_FIELDS),
+            现有零件=existing_modules_block(),
+        ),
         user=user,
         schema=schemas.implementer_schema(),
         big=False,          # 照着范文写代码，小模型足够
