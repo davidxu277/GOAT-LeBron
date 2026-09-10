@@ -44,7 +44,12 @@ trainer_config:
     # Agent 写的训练过程零件（早停 / SWA / 学习率调度）挂在这里：
     #   <名字>: {enabled: true, impl: modules/train/xxx.py, ...参数}
     early_stopping:
-      inner_holdout_frac: 0.1
+      enabled: true                       # 少这一行 = 零件根本不加载，改了等于没改
+      impl: modules/train/early_stopping.py
+      monitor: primary                    # train_deep 每轮产出 primary / GAUC / nDCG@5
+      mode: max
+      patience: 3
+      min_delta: 0.0005                   # CLAUDE.md R11 的兜底门槛
 
 official_baseline:
   validation:
