@@ -49,7 +49,9 @@ def test_代码里不再有退役任务的字段和指标名():
 # 它要是还在讲 click / conversion，等于让 Agent 照着别的任务守规矩。
 # 「AliCCP」这个名字本身可以出现（讲历史），它的字段和指标名不行。
 # AGENTS.md 是 CLAUDE.md 的同内容副本（给别的编码助手读），两份一起盯。
-DOCS = [ROOT / "CLAUDE.md", ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "agent" / "README.md"]
+# 中文 README 曾经整篇停在 AliCCP 时代（数据集写的还是上一个），一起盯。
+DOCS = [ROOT / "CLAUDE.md", ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "README.zh-CN.md",
+        ROOT / "agent" / "README.md"]
 RETIRED_IN_TEXT = re.compile(
     r"(?<![\w])(click|conversion|ctcvr|sample_id|common_id)(?![\w])"
     r"|点击分|购买分|点击\s*AUC|购买\s*AUC|(?<![\w.])\d{3}_\d{2}(?![\w.])")

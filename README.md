@@ -101,13 +101,14 @@ Code-mutation agents search blindly: change something, see if the number moved. 
 never form a view of *what is actually wrong*.
 
 ```
-Evidence   train primary 0.6909 vs validation 0.6015 — a gap of 0.0894
+Evidence   exposure bucket "<10 views": GAUC 0.611, vs 0.684 for ">1000 views"
+           — a gap of 0.073, on 22% of impressions
              ↓
-Diagnosis  "memorising the training set" (severity 0.6, confidence high)
+Diagnosis  "cold videos can't rank" (severity 0.7, confidence high)
              ↓
-Remedy     from the cards that treat it → e.g. user-level normalisation
-           Reason: the model is fitting per-user rating scale rather than
-           within-user preference order, which is what GAUC actually measures
+Remedy     from the cards that treat it → e.g. author fallback
+           Reason: a video seen fewer than 10 times cannot learn its own
+           embedding; borrowing its author's statistics targets exactly that
 ```
 
 The link between doctor and cards is a **12-entry symptom vocabulary**
@@ -193,6 +194,9 @@ Robustness is scored, so it is engineered rather than hoped for.
 | The same idea keeps coming back | Tried cards blacklisted; applied cards never re-proposed |
 | Several rounds with nothing diagnosable | Escalate one data fidelity; if already at full data, declare convergence |
 | Process dies mid-session | Logs and all three ledgers are flushed every round; restart resumes |
+| A change silently has no effect (the part never loaded, the config key is read by nobody) | Validation predictions are fingerprinted; identical to last round → verdict "had no effect", and the card's trust score is protected — the fault is the harness, not the idea |
+| A failed round leaves its patch behind | Patch history is rolled back, so one bad round cannot poison every round after it |
+| Round after round fails to even run | Stop after `patience` consecutive failures instead of burning the whole budget |
 
 Training runs in a spawned subprocess with a hard wall-clock timeout (`terminate`,
 escalating to `kill`), so a hung trainer cannot consume the session budget. Every
@@ -244,7 +248,8 @@ agent/                      the agent core
 knowledge/
   symptoms.yaml               12 symptoms — the doctor↔card vocabulary
   cards/                      14 method cards
-harness/                    training path: op loading, deep loop, R2/R5 guards
+harness/                    training path: op loading, deep loop, auto-binning of
+                            continuous features, loss mount point, R2/R5 guards
 modules/                    replaceable parts — the ONLY place the agent may write
 kuairand_goat_bridge/       KuaiRand adapter
   official_starter_kit/       vendored, unmodified: data.py, evaluate.py, submit.py
@@ -477,3 +482,27 @@ KuaiRand-1k and 27k in the available time would most likely have compromised bot
 | [knowledge/symptoms.yaml](knowledge/symptoms.yaml) | The 12 symptoms and their detection rules |
 | [knowledge/卡片格式.md](knowledge/卡片格式.md) | Method card format and an annotated example |
 | [README.zh-CN.md](README.zh-CN.md) | Chinese README |
+
+---
+
+## 12. After the competition
+
+The competition submission is pinned by the tag `submission-techjam2026`. Work since
+then went into making the agent's own failures impossible rather than patching them one
+at a time — every change below comes with a test that fails without it.
+
+- **Knowledge that cannot silently go stale.** Cards, prompts, the implementer's example
+  files and the hard rules are checked against derived facts: the current task's metric
+  names, files that actually exist, fields that actually exist. The mid-competition
+  dataset switch had left 11 of 14 cards quoting the previous task's metrics.
+- **One task, one pipeline.** The previous dataset's pipeline is gone; a guard test keeps
+  its field and metric names out of the code.
+- **Mount points the cards were promising.** A model part's own `loss` now actually runs
+  (it used to be silently overridden), so the pairwise-ranking and time-decay cards can
+  be implemented. Continuous features are binned on train quantiles instead of being
+  treated as IDs — in a synthetic check, 37% of validation rows used to fall out of
+  vocabulary.
+- **Bugs that corrupted results without a single error.** Target encoding output a
+  constant on integer IDs; real runs handed the implementer a stale config-only trainer
+  as its example; and a leftover score-renaming adapter made the results table report
+  every run as 0.67 below the official baseline.
