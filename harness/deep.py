@@ -37,6 +37,8 @@ DEEP_PARAMS = {
     "embed_dim":     (4, 128, 16),
     "weight_decay":  (0.0, 0.1, 1e-5),
     "predict_batch_size": (64, 262144, 16384),
+    # 连续值特征切几档（见 Vocab）。档太少丢信息，太多又退回"每个数一个 ID"
+    "numeric_bins":  (2, 256, 32),
 }
 
 OOV = 0          # 训练集里没见过的 ID 一律落到 0 号槽位
@@ -252,7 +254,7 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
     op = load_model_op(config)
     train_ops = load_train_ops(config)
 
-    vocab = Vocab().fit(train, features)         # 只在训练集上建（R2）
+    vocab = Vocab(numeric_bins=kw["numeric_bins"]).fit(train, features)   # 只在训练集上建（R2）
     spec = feature_spec(vocab, kw["embed_dim"])
     model = op.build(spec)
     if not isinstance(model, torch.nn.Module):
@@ -342,6 +344,8 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
         "GPU名称": device_name if device.type == "cuda" else "",
         "GPU峰值显存_MB": peak_mb,
         "装上的训练零件": [name for name, _ in train_ops],
+        # 一个统计特征加了没效果，头一件要确认的就是它有没有被当成连续值分档
+        "自动分档的列": vocab.binned_fields,
         "_vocab": vocab,
     }
 
