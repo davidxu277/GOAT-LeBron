@@ -285,10 +285,10 @@ def cmd_run(args) -> int:
             executor, real, fallback, fidelity=args.start_fidelity)
 
     baseline = {}
-    if args.baseline_ctr is not None:
-        baseline["点击AUC"] = args.baseline_ctr
-    if args.baseline_cvr is not None:
-        baseline["购买AUC"] = args.baseline_cvr
+    if args.baseline_gauc is not None:
+        baseline["GAUC"] = args.baseline_gauc
+    if args.baseline_ndcg is not None:
+        baseline["nDCG@5"] = args.baseline_ndcg
 
     def on_round(log, summary) -> None:
         ref = log.reflection or {}
@@ -297,7 +297,8 @@ def cmd_run(args) -> int:
                 f"{(log.chosen or {}).get('card_id') or '（自创/未选）'} · "
                 f"{ref.get('verdict', '本轮作废')}")
         if scores:
-            line += f" · 点击 {scores['点击AUC']:.4f} 购买 {scores['购买AUC']:.4f}"
+            # 成绩单里有哪几个指标就打哪几个 —— 写死名字的话，换任务第一轮就 KeyError
+            line += " · " + " ".join(f"{k} {v:.4f}" for k, v in scores.items())
         print(line)
         for r in log.recoveries:
             print(f"        ↳ 恢复：{r}")
@@ -606,8 +607,8 @@ def main() -> int:
     p.add_argument("--no-rollback", action="store_true",
                    help="关掉爬山回滚，只累加不回头（坏改动会永久留在流水线上）")
     p.add_argument("--token-budget", type=int, default=DEFAULT_TOKEN_BUDGET)
-    p.add_argument("--baseline-ctr", type=float, help="官方基线的点击 AUC，用来算 delta")
-    p.add_argument("--baseline-cvr", type=float, help="官方基线的购买 AUC，用来算 delta")
+    p.add_argument("--baseline-gauc", type=float, help="官方基线的 GAUC，用来算 delta")
+    p.add_argument("--baseline-ndcg", type=float, help="官方基线的 nDCG@5，用来算 delta")
     p.add_argument("--fresh", action="store_true",
                    help="清空历史账本再跑 —— 正式那一场应该带上它，"
                         "免得带着开发期间攒下的错误偏见开跑")

@@ -632,7 +632,7 @@ def test_一整场_状态在轮与轮之间传下去(tmp_path):
     )
     rows = [json.loads(l) for l in (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(rows) == summary.rounds_run >= 2
-    分数 = [r["metrics"]["验证集"]["点击分"] for r in rows if r["metrics"]]
+    分数 = [r["metrics"]["验证集"]["GAUC"] for r in rows if r["metrics"]]
     assert 分数 == sorted(分数) and 分数[0] < 分数[-1]     # 一轮比一轮高 = 状态真的传下去了
     assert summary.best_round > 0
     assert summary.total_tokens > 0
@@ -652,7 +652,7 @@ def test_一整场_每轮日志都符合交付物要求(tmp_path):
     first = rows[0]
     assert first["diagnosis"]["findings"]          # 假设
     assert first["patch_files"]                    # 代码改动全文
-    assert first["metrics"]["验证集"]["点击分"]      # 指标
+    assert first["metrics"]["验证集"]["GAUC"]        # 指标
     assert first["interventions"] == 0             # 人工干预
     assert "recoveries" in first                   # 错误与恢复
 
@@ -739,10 +739,10 @@ def test_一整场_结果表算得出相对基线的差值(tmp_path):
         llm=llm, vocab=SymptomVocab.load(), cards=CardLibrary.load(SymptomVocab.load()),
         executor=ex, initial_report=ex.report("小份"),
         module_interface="", example_module="", current_config="",
-        rounds=3, baseline={"点击AUC": 0.6000, "购买AUC": 0.5900}, logs_dir=tmp_path,
+        rounds=3, baseline={"GAUC": 0.6674, "nDCG@5": 0.5357}, logs_dir=tmp_path,
     )
-    assert summary.deltas["点击AUC"] == pytest.approx(
-        summary.best_scores["点击AUC"] - 0.6000)
+    assert summary.deltas["GAUC"] == pytest.approx(
+        summary.best_scores["GAUC"] - 0.6674)
     assert "相对基线" in summary.as_table()
 
 
@@ -1394,7 +1394,7 @@ def test_快照_每轮都留一份(tmp_path):
     assert 起点["配置"] and 起点["零件"] == {}      # 起点还没有任何零件
     snap = json.loads(snaps[1].read_text(encoding="utf-8"))
     assert snap["配置"] and snap["零件"]           # 配置文本 + 哪个文件哪轮写的
-    assert snap["分数"]["点击AUC"] > 0
+    assert snap["分数"]["GAUC"] > 0
 
 
 def test_快照_记住每个零件是哪一轮写的(tmp_path):
@@ -1546,8 +1546,8 @@ def test_复盘官拿的是上一轮而不是上上轮(tmp_path):
     )
     rows = [json.loads(l) for l in
             (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
-    第2轮的分 = rows[1]["metrics"]["验证集"]["点击分"]
-    第1轮的分 = rows[0]["metrics"]["验证集"]["点击分"]
+    第2轮的分 = rows[1]["metrics"]["验证集"]["GAUC"]
+    第1轮的分 = rows[0]["metrics"]["验证集"]["GAUC"]
 
     # 第 3 轮的复盘材料里，「改动之前那一版」必须是第 2 轮的分，不是第 1 轮的
     第3轮材料 = 看到的[2]
@@ -3078,7 +3078,7 @@ class _会变差的执行器(DriftingExecutor):
     def run(self, patch, fidelity):
         self.runs += 1
         self.config = {**self.config, f"第{self.runs}轮加的": True}
-        self.ctr += 0.01 if self.runs == 1 else -0.05      # 第 2 轮起断崖
+        self.gauc += 0.01 if self.runs == 1 else -0.05     # 第 2 轮起断崖
         return RunResult(ok=True, seconds=1.0, fidelity=fidelity,
                          health_report=self.report(fidelity))
 
@@ -3113,11 +3113,11 @@ def test_爬山_退回之后比较基准也跟着回去(tmp_path):
     """只把配置退回去、`cur` 不退，下一轮医生看的还是退化后的成绩单，
     复盘官的「改动之前那一版」也还停在坏的那一版。"""
     ex, summary = _爬山跑一场(tmp_path, rollback_margin=0.0)
-    最好 = summary.best_scores["点击AUC"]
+    最好 = summary.best_scores["GAUC"]
     行 = [json.loads(l) for l in
           (tmp_path / "rounds.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     第一轮 = next(r for r in 行 if r["round_id"] == 1)
-    assert 第一轮["metrics"]["验证集"]["点击分"] == pytest.approx(最好)
+    assert 第一轮["metrics"]["验证集"]["GAUC"] == pytest.approx(最好)
 
 
 def test_爬山_门槛比噪声小的下降不值得退(tmp_path):
@@ -3142,7 +3142,7 @@ def test_爬山_第0轮有快照所以第1轮就变差也退得回去(tmp_path):
         def run(self, patch, fidelity):
             self.runs += 1
             self.config = {**self.config, f"第{self.runs}轮加的": True}
-            self.ctr -= 0.05
+            self.gauc -= 0.05
             return RunResult(ok=True, seconds=1.0, fidelity=fidelity,
                              health_report=self.report(fidelity))
 
