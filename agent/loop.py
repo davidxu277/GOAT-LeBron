@@ -329,10 +329,10 @@ def beats_noise(gains: dict[str, float],
                 floors: dict[str, float] | float | None) -> bool:
     """这次的变化里，有没有哪一项真的越过了**它自己**的噪声带。
 
-    为什么必须分指标：点击分和购买分的抖动差一个数量级（实测验证集里
+    为什么必须分指标：不同指标的抖动可能差一个数量级（AliCCP 时代实测验证集里
     点击正样本 8,950 个、转化正样本只有 38 个）。用一个标量门槛管两个指标，
-    两头都会错 —— 真实的点击提升被购买分的抖动淹掉判成「说不清」，
-    购买分自己抖一下又越过门槛被记成「猜对了」，白送 +0.15 信任分。
+    两头都会错 —— 稳的那个指标的真实提升被抖得凶的那个淹掉判成「说不清」，
+    抖得凶的那个自己抖一下又越过门槛被记成「猜对了」，白送 +0.15 信任分。
 
     floors 给 None 或标量时退回旧行为（R11 的 0.0005 兜底）。
     """
@@ -695,7 +695,7 @@ def run_round(
             symptom_improved=any(item["resolved"] in ("是", "部分")
                                  for item in log.reflection["symptom_resolved"]),
             # 分指标判定：点击和购买的抖动差一个数量级，一个标量门槛管两个，
-            # 真实的点击提升会被购买分的抖动淹掉，购买分自己抖一下又白拿 +0.15
+            # 稳的那个指标的真实提升会被抖得凶的那个淹掉，抖得凶的自己抖一下又白拿 +0.15
             beat_noise=beats_noise(log.reflection["actual"],
                                    noise_bands_by_metric or noise_floor),
         )
@@ -1199,7 +1199,7 @@ def run_session(
             fidelity_override=FIDELITY_LADDER[rung] if rung else None,
             noise_floor=noise_floor,
             # 分指标门槛：点击和购买的抖动差一个数量级，用一个标量管两个，
-            # 真实的点击提升会被购买分的抖动淹掉，购买分自己抖一下又白拿 +0.15
+            # 稳的那个指标的真实提升会被抖得凶的那个淹掉，抖得凶的自己抖一下又白拿 +0.15
             noise_bands_by_metric=(noise_bands or {}).get("分指标噪声带"),
         )
 

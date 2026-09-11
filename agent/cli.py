@@ -61,8 +61,12 @@ def _load_fixtures() -> dict:
 
 
 NO_CREDS = (
-    "找不到大模型的凭据。设置一下再跑（见 .env.example）。\n\n"
-    "只想检查知识库是否自洽的话，用 `python -m agent.cli check`，它不调用模型。"
+    "找不到大模型的凭据。设置一下再跑：\n"
+    "    export ANTHROPIC_API_KEY=...\n"
+    "  或者改用 DeepSeek：\n"
+    "    export AGENT_PROVIDER=deepseek DEEPSEEK_API_KEY=...\n\n"
+    "只想检查知识库是否自洽、或者跑一场离线演习的话，用 `agent.cli check` /"
+    " `agent.cli run --offline`，它们不调用模型。"
 )
 
 

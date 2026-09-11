@@ -145,10 +145,15 @@ asked again.
 Is "the cold bucket is 0.03 below the hot bucket" a finding? Only if 0.03 is larger
 than how much that number wobbles by itself.
 
-We measure it: same config, different random seeds, N runs — and cross-check against
-the Hanley–McNeil analytic standard error computed from the positive/negative counts
-(`agent/noise.py`). Anything below the band may not be reported as a symptom, and may
-not be claimed as a gain.
+The design: same config, different random seeds, N runs — anything below that band may
+not be reported as a symptom, and may not be claimed as a gain. A band measured at one
+data fidelity is never silently reused at another; if it does not fit, the session
+drops it and says so in the results table.
+
+**Status on this dataset:** the threshold machinery is in place, but the measurement
+tool itself was written for the previous dataset's two-tower funnel and was removed with
+it. On KuaiRand every threshold currently falls back to a fixed floor of 0.0005, and the
+session announces this at startup (limitation 2).
 
 The band is also **per-metric**. Two metrics whose wobble differs by an order of
 magnitude cannot share one threshold: a real gain in the stable one gets drowned by
@@ -234,7 +239,6 @@ agent/                      the agent core
   loop.py                     one round, one session, three ledgers, the shelf
   knowledge.py                loads the vocabulary and cards; matches by symptom
   schemas.py                  structured-output schemas; symptom names enum-locked
-  noise.py                    noise bands: multi-seed empirical + Hanley–McNeil
   offline.py                  fake model + fake executor — rehearse a session for $0
   prompts/                    the four role prompts
 knowledge/
@@ -242,16 +246,17 @@ knowledge/
   cards/                      14 method cards
 harness/                    training path: op loading, deep loop, R2/R5 guards
 modules/                    replaceable parts — the ONLY place the agent may write
-config/pipeline.yaml        pipeline config — the other thing the agent may change
 kuairand_goat_bridge/       KuaiRand adapter
   official_starter_kit/       vendored, unmodified: data.py, evaluate.py, submit.py
   src/kuairand_bridge/        dataset views, runner, evaluator, diagnostics,
                               subprocess sandbox, session entry point
   examples/goat_trainer.py    research trainer — the agent CAN write modules
   examples/official_fm_trainer.py  baseline trainer — config-only, by design
-  configs/kuairand_task.yaml  ← the real run
+  configs/kuairand_task.yaml  ← the real run; its trainer_config (features / model /
+                                train) is the other thing the agent may change
   configs/fm_baseline.yaml    ← baseline reproduction only
-logs/ · deliverables/       per-round logs, ledgers, snapshots; the submission bundle
+logs/                       offline-rehearsal logs and ledgers (a real run writes
+                            everything under its own output_dir)
 ```
 
 The starter kit is **vendored unmodified and called directly**. We never reimplement
@@ -334,9 +339,9 @@ rather than to a harness discrepancy.
 
 ### Step 2 — noise band: **not available on this dataset yet**
 
-`agent.cli noise` still requires the previous dataset's file layout
-(`--train` / `--val-features`) and its analytic fallback assumes a plain AUC rather
-than a within-user GAUC. It has never been run on KuaiRand.
+The multi-seed measurement tool was written for the previous dataset's two-tower funnel
+and was removed with it. A KuaiRand version — bands for within-user GAUC and nDCG@5 —
+has not been written yet.
 
 Nothing needs doing here — but be aware of what it means: every "is this a real
 improvement?" threshold falls back to a fixed floor of **0.0005**, which is a guess,
@@ -369,24 +374,25 @@ being a real observation rather than a hard-coded zero:
 .venv/bin/python -m agent.cli intervene "round 7 hit OOM, reduced batch size" --round 7
 ```
 
-### Step 4 — package the deliverables
+### Step 4 — collect the deliverables
 
-```bash
-.venv/bin/python -m agent.cli finalize
-```
+Nothing to run: the session writes everything under the config's `output_dir`
+(`output/agent_run/` by default).
 
 | Output | Deliverable |
 |---|---|
-| `rounds.jsonl` | **#3** per-iteration log: hypothesis, full code diff, metrics, errors and recoveries |
-| `narrative.md` | **#3** human-readable: the whole session as one storyline |
-| `session_summary.json` | **#4** results table: best scores, delta over baseline, tokens, wall-clock, GPU-hours, interventions |
-| `best_pipeline/` | the **recipe** of the best round (config + module code) |
-| `dashboard.html` | round-by-round replay for reviewers |
+| `logs/rounds.jsonl` | **#3** per-iteration log: hypothesis, full code diff, metrics, errors and recoveries |
+| `logs/narrative.md` | **#3** human-readable: the whole session as one storyline |
+| `logs/session_summary.json` | **#4** results table: best scores, delta over baseline, tokens, wall-clock, GPU-hours, interventions |
+| `logs/snapshots/` | each round's config and module code — any round can be reconstructed |
+| `final/` | the validation-best round replayed on full data, with the checked test-set submission |
+| `final_summary.json` | best scores, the baseline-reproduction check, the submission, and the whole session summary |
 
-> **Deliverable #4 is the model output, not the score.** The agent's edits are
-> *cumulative*: by round 20 the disk holds only the final stack, and round 5's state
-> was overwritten long ago. `best_pipeline/` is how the best round is reconstructed
-> and re-run to produce the actual submission file.
+> **The submission comes from the best round, not the last one.** The agent's edits
+> are *cumulative*: by round 20 the pipeline holds the whole stack, and round 5's state
+> is long gone. After convergence the bridge replays exactly the best round's patch
+> history on full data to produce the submission — including round 0, the official
+> baseline, when no round beat it.
 
 ### What counts as a manual intervention
 
@@ -413,12 +419,13 @@ weigh confidence, rank severity, and notice what the rules do not cover. Diagnos
 should be deterministic; the innovation is in the strategist's reasoning, not in the
 doctor's subtraction.
 
-**2. Noise bands have never been measured on this dataset.** `agent/noise.py` is still
-shaped for the previous dataset's click/conversion funnel — it reads fields KuaiRand
-does not have, and its analytic fallback assumes a plain AUC rather than a within-user
-GAUC. Until it is rewritten, every threshold falls back to a fixed floor of 0.0005,
-which is a guess. The system says so out loud at startup rather than pretending
-otherwise. *Improvement:* rewrite the measurement for within-user ranking metrics.
+**2. Noise bands have never been measured on this dataset.** The measurement tool was
+written for the previous dataset's two-tower funnel and was removed with it; its
+analytic fallback assumed a plain AUC, which does not transfer to within-user GAUC, and
+nDCG@5 has no closed-form standard error at all. Until a KuaiRand version exists, every
+threshold falls back to a fixed floor of 0.0005, which is a guess. The system says so
+out loud at startup rather than pretending otherwise. *Improvement:* measure the bands
+empirically with multiple seeds for within-user ranking metrics.
 
 **3. The reflector's before/after numbers are still self-reported.** Code checks that
 they are *mutually consistent* with the reflector's own verdict — claiming a symptom
@@ -445,10 +452,6 @@ we have read few.
 
 **7. Bonus benchmarks not attempted.** Only the required KuaiRand-Pure. Attempting
 KuaiRand-1k and 27k in the available time would most likely have compromised both.
-
-**8. Two AliCCP-era items remain unfixed** because they cannot affect this task: a
-purchase-AUC field naming mismatch, and rows with `click=0, conversion=1` being warned
-about rather than cleaned. Both live on the retired dataset path.
 
 ---
 

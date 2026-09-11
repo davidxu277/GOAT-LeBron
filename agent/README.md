@@ -1,45 +1,43 @@
 # Agent 大脑
 
-负责人：成员3。这是四个 AI 角色以及把它们串起来的那段代码。
+四个 AI 角色（医生 → 军师 → 工兵 → 复盘官），以及把它们串起来的外层循环。
 
 ## 先跑起来
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-# ① 不调用模型，零成本 —— 检查词表和卡片是否自洽
+# ① 不调用模型，零成本 —— 检查病名词表、药方卡、假成绩单是否自洽
 .venv/bin/python -m agent.cli check
 
-# ② 需要凭据
-export ANTHROPIC_API_KEY=sk-ant-...
+# ② 不调用模型，零成本 —— 整场演习：假模型 + 假执行器把四个角色和外层循环跑一遍
+.venv/bin/python -m agent.cli run --offline --rounds 6 --fail-round 3
 
-# 用一份假成绩单跑医生
-.venv/bin/python -m agent.cli doctor 一切正常
-
-# 跑全部 5 份，对照标准答案
-.venv/bin/python -m agent.cli doctor --all
-
-# 用假执行器跑完整一轮：诊断 → 筛卡 → 提案 → 调度 → 实现 → 复盘
-.venv/bin/python -m agent.cli round 正常起步
-
-# 离线测试（不花钱）
+# ③ 离线测试（不花钱）
 .venv/bin/python -m pytest tests/ -q
+
+# ④ 需要凭据：拿假成绩单调医生的提示词
+export ANTHROPIC_API_KEY=...        # 或者 AGENT_PROVIDER=deepseek + DEEPSEEK_API_KEY
+.venv/bin/python -m agent.cli doctor 一切正常
+.venv/bin/python -m agent.cli doctor --all      # 5 份全跑，对照标准答案
 ```
 
-**数据和模型都还没好，也能开发。** 假成绩单（`fixtures/health_reports.yaml`）和
-假执行器（`loop.FakeExecutor`）让整条链路今天就能跑通。
+真数据的自主迭代走 KuaiRand 那条路：
+`python -m kuairand_bridge goat-run --config kuairand_goat_bridge/configs/kuairand_task.yaml`
+（见仓库根目录的 README）。
 
 ## 文件
 
 | 文件 | 干什么 |
 |---|---|
-| `knowledge.py` | 读病名词表和药方卡；**按病名筛卡片**就在这里，纯代码不花钱 |
-| `schemas.py` | 四个角色的输出结构。医生的病名是 enum，**直接从 symptoms.yaml 生成** |
-| `llm.py` | 唯一的 Claude 调用入口：结构化输出、重试、按角色记账 |
-| `roles.py` | 四个角色 + 各自的额外校验 |
-| `loop.py` | 一轮循环；与成员4 的接口（Scheduler / Executor）及参考实现 |
-| `prompts/` | 四段提示词。改行为改这里，不要改代码 |
-| `fixtures/` | 5 份假成绩单，含标准答案 |
+| `knowledge.py` | 读病名词表和药方卡；**按病名筛卡片**就在这里，纯代码不花钱。卡片的指标名启动时就校验 |
+| `schemas.py` | 四个角色的输出结构。医生的病名是 enum，**直接从 symptoms.yaml 生成**；指标名只有一张表 |
+| `llm.py` / `llm_deepseek.py` | 大模型调用入口：结构化输出、重试、按角色记账 |
+| `roles.py` | 四个角色 + 各自的校验（证据、禁用字段、复盘官不许自欺）；工兵的范文按方案环节取 |
+| `loop.py` | 一轮、一整场、三本账（耗时 / 靠谱度 / 待议架）、爬山回滚、判停 |
+| `offline.py` | 假模型 + 假执行器，出 KuaiRand 格式的成绩单 —— 演习和测试用 |
+| `prompts/` | 四段提示词。改行为改这里 |
+| `fixtures/` | 5 份 KuaiRand 格式的假成绩单，含标准答案（其中两份是陷阱题） |
 
 ## 两个设计要点
 
@@ -56,23 +54,12 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 查卡片、算性价比、跑校验都是查字典和算术，用 if 判断就够了。
-省下的 token 直接计入评分的"资源消耗"（占 15%）。
+省下的 token 直接计入评分的"资源消耗"。
 
 ## 三条最重要的校验（都有测试兜住）
 
 这些是**代码强制**的，不靠提示词自觉：
 
-1. **证据必须带数字** —— 医生说不出"明显偏低"这种没有数字的话
-2. **禁用字段拦截** —— 工兵写的代码里出现 `conversion` 等五个字段直接打回（CLAUDE.md R1）
+1. **证据必须落到成绩单上** —— 要么带数字，要么点名它读的是成绩单的哪一块
+2. **禁用字段拦截** —— 工兵写的代码里出现 `long_view`、`play_time_ms` 等禁用字段直接打回（CLAUDE.md R1）
 3. **分数涨了但毛病没治好 → 必须判「说不清」** —— 防止 Agent 沿着错误的因果链一路走下去
-
-## 与队友的接口
-
-| 谁 | 提供什么 | 现在用什么顶着 |
-|---|---|---|
-| 成员1 + 成员4 | 真实成绩单 | `fixtures/health_reports.yaml` |
-| 成员2 | 20 张药方卡、零件接口、范文 | `knowledge/cards/` 里 2 张种子卡 + `cli.py` 里的 STUB |
-| 成员4 | `Scheduler`、`Executor` | `loop.CostAwareScheduler`、`loop.FakeExecutor` |
-
-`loop.py` 里的 `Scheduler` / `Executor` 是 Protocol，成员4 写自己的实现替换即可，
-`run_round` 不用改。

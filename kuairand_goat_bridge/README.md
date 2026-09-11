@@ -87,10 +87,8 @@ result = executor.run({"new_files": [], "config_patch": ""}, "全量")
 print(result.ok, result.health_report)
 ```
 
-成绩单中的 `GAUC`、`nDCG@5`、`主分` 是正式含义。为了让未修改的 GOAT
-`read_scores()` 能读取两个数，Bridge 同时提供 `点击分=GAUC`、
-`购买分=nDCG@5` 两个兼容别名；它们绝不代表 CTR/CVR，官方 JSON 和提交文件
-仍使用真实指标名。
+成绩单中的 `GAUC`、`nDCG@5`、`主分` 就是正式指标。Agent 的外层循环直接按这几个
+名字读分，不做任何改名或别名 —— 官方 JSON、提交文件、结果表用的都是同一套名字。
 
 如果 Agent 本轮产生代码或配置修改，trainer 必须另外实现：
 

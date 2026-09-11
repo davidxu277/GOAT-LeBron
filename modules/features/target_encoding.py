@@ -7,19 +7,19 @@ from sklearn.model_selection import KFold
 
 
 class TargetEncoding:
-    """目标编码 —— 把高基数 ID 替换成它历史上的平滑点击率。
+    """目标编码 —— 把高基数 ID 替换成它在训练集上的平滑正样本率（KuaiRand 上就是看完率）。
 
-    对每个指定字段，分别计算该字段每个取值在训练集上的平滑点击率：
+    对每个指定字段，分别计算该字段每个取值在训练集上的平滑正样本率：
         encode_value = (sum_y + alpha * global_mean) / (count + alpha)
-    其中 sum_y 是该取值下的正样本数（点击），count 是该取值出现次数，
-    global_mean 是训练集全局点击率，alpha 是平滑强度（从配置读）。
+    其中 sum_y 是该取值下的正样本数，count 是该取值出现次数，
+    global_mean 是训练集全局正样本率，alpha 是平滑强度（从配置读）。
 
     ⚠️ 折外纪律（CLAUDE.md R2）：训练集内部用 K 折，算第 k 折的编码值时
     只用其余 K−1 折的统计量，杜绝标签泄漏。验证集 / 测试集用整个训练集
     的统计量。没见过的 ID 一律回退到全局先验。
 
-    ⚠️ 本节零件不把 click 列加入特征输出。目标列名由配置 target_col 指定，
-    默认使用 ctr_label，该列在训练开始前由主流程生成，不会进入模型输入。
+    ⚠️ 标签列只用来算统计量，不会进入特征输出。列名由配置 target_col 指定；
+    不给时从数据里认 label 列（KuaiRand 流水线里标签列就叫 label）。
     """
 
     def __init__(self, config: dict[str, Any]):

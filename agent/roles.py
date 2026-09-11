@@ -195,7 +195,7 @@ def _main_metric_pair(health_report: dict[str, Any]
                       ) -> tuple[Any | None, Any | None]:
     """从成绩单里取出训练集和验证集**同一个**指标，用来算过拟合差值。
 
-    两边必须是同一个指标名，否则拿训练集的主分减验证集的点击分，
+    两边必须是同一个指标名，否则拿训练集的一个指标减验证集的另一个，
     差值毫无意义却会照样触发闸门。
     """
     train = health_report.get("训练集") or {}

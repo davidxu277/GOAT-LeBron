@@ -175,7 +175,7 @@ def _impl_validate(data, health_report=None):
     captured["validate"](data)
 
 
-BASE_CHECK = ["未使用禁用字段 conversion", "统计量只用了训练集", "参数从配置读取"]
+BASE_CHECK = ["未使用禁用字段 long_view", "统计量只用了训练集", "参数从配置读取"]
 
 
 def test_把答案字段当特征会被拦下():
@@ -1160,7 +1160,7 @@ def test_待议架_真的摆到军师面前了(tmp_path):
             # 每轮报同一个病 —— 病变了架子本来就该清空（见「病没了药也不留」）
             self._last_findings = [{
                 "symptom": "Top5排不上去", "severity": 0.8, "confidence": "高",
-                "evidence": "购买模型只用了 click=1 的样本，占比 3.4%", "affects": ["nDCG@5"],
+                "evidence": "按视频曝光次数分组：最低桶 GAUC 0.612，比最高桶低 0.069，占比 22%", "affects": ["nDCG@5"],
             }]
             return {"findings": [dict(self._last_findings[0])],
                     "no_finding": False, "reason_if_none": ""}
@@ -1579,28 +1579,6 @@ def test_跑挂了的结果会标出是不是兑现不了():
 # 真的走过 _train_and_score。纯函数测得再细也发现不了这类断裂。
 
 
-def _造数据(tmp_path, n=400):
-    """造一份最小可训练数据：两个类别特征 + 点击 + 转化。"""
-    pd = pytest.importorskip("pandas")
-    need("lightgbm")
-    import numpy as np
-
-    rng = np.random.default_rng(0)
-    df = pd.DataFrame({
-        "sample_id": range(n),
-        "101": rng.integers(0, 7, n),
-        "205": rng.integers(0, 5, n),
-    })
-    # 让标签跟特征有点关系，否则 AUC 恒等于 0.5，测不出东西
-    df["click"] = ((df["101"] % 3 == 0) ^ (rng.random(n) < 0.25)).astype(int)
-    df["conversion"] = (df["click"] & (df["205"] % 2 == 0)
-                        & (rng.random(n) < 0.7)).astype(int)
-    train_p, val_p = tmp_path / "train.parquet", tmp_path / "val.parquet"
-    df.iloc[:300].to_parquet(train_p)
-    df.iloc[300:].to_parquet(val_p)
-    return str(train_p), str(val_p)
-
-
 def _配置(**train_over):
     cfg = {"features": {"base_fields": ["101", "205"]},
            "model": {"name": "lightgbm",
@@ -1612,18 +1590,19 @@ def _配置(**train_over):
 
 # ── 噪声门槛必须分指标，不能一个标量管两个 ────────────────────────
 #
-# 实测：验证集里点击正样本 8,950 个，转化正样本只有 38 个。
-# 购买 AUC 的抖动比点击大一个数量级 —— 一个转化样本换个排位，
-# nDCG@5就能动 1/38 ≈ 0.026，而GAUC动一下要 8,950 个样本一起使劲。
+# AliCCP 时代实测过：验证集里点击正样本 8,950 个，转化正样本只有 38 个。
+# 两个指标的抖动能差一个数量级 —— 正样本少的那个，一个样本换个排位就能动
+# 1/38 ≈ 0.026，而正样本多的那个动一下要 8,950 个样本一起使劲。
 #
-# 以前 summarize() 取 max(点击带, 购买带) 当唯一门槛，被购买带主导，
-# 于是两头都错：真实的点击提升（+0.008 这种，已实测到过）被当噪声抹掉，
-# nDCG@5的纯抖动（±0.05）反而越过门槛被记成"猜对了"，白送 +0.15 信任分。
+# 以前取 max(两条带子) 当唯一门槛，被抖得凶的那条主导，于是两头都错：
+# 稳的那个指标的真实提升（+0.008 这种，已实测到过）被当噪声抹掉，
+# 抖得凶的那个的纯抖动（±0.05）反而越过门槛被记成"猜对了"，白送 +0.15 信任分。
+# 下面几条测试沿用这组数，指标名换成了当前任务的。
 
 
-def test_越过噪声_点击涨了就该算数():
-    """+0.008 的点击提升是真的（实测加 3 个交叉特征就有 +0.0075），
-    不该因为nDCG@5抖得凶而被一起否掉。"""
+def test_越过噪声_稳的指标涨了就该算数():
+    """+0.008 的提升是真的（实测加 3 个交叉特征就有 +0.0075），
+    不该因为另一个指标抖得凶而被一起否掉。"""
     from agent.loop import beats_noise
 
     assert beats_noise({"GAUC": 0.008, "nDCG@5": 0.0},
@@ -1693,26 +1672,6 @@ def test_落盘失败不该拖垮整场(tmp_path, monkeypatch):
 
 
 # ────────────────── 深度模型训练路径 ──────────────────
-
-
-def _造数据(tmp_path, n_train=1500, n_val=600):
-    """带真实信号的合成数据 —— 没信号的话 AUC 恒等 0.5，测不出训练有没有起作用。"""
-    pd = pytest.importorskip("pandas")
-    import numpy as np
-
-    rng = np.random.default_rng(0)
-
-    def 造(n):
-        u, i = rng.integers(0, 50, n), rng.integers(0, 30, n)
-        p = 1 / (1 + np.exp(-(u / 50 + i / 30 - 1)))
-        click = (rng.random(n) < p).astype(int)
-        conv = ((click == 1) & (rng.random(n) < 0.3)).astype(int)
-        return pd.DataFrame({"sample_id": np.arange(n), "101": u, "205": i,
-                             "click": click, "conversion": conv})
-
-    造(n_train).to_parquet(tmp_path / "train.parquet")
-    造(n_val).to_parquet(tmp_path / "val.parquet")
-    return str(tmp_path / "train.parquet"), str(tmp_path / "val.parquet")
 
 
 def test_深度路径_超参数越界被夹回():
@@ -2124,9 +2083,9 @@ def test_没崩但有恢复事件也要传下去():
     from agent.loop import RoundLog, _brief
 
     log = RoundLog(round_id=2, started_at="", run_id="x")
-    log.recoveries = ["工兵实现失败（FinalMLP）：出现了禁用字段 click"]
+    log.recoveries = ["工兵实现失败（FinalMLP）：出现了禁用字段 long_view"]
     log.reflection = {"verdict": "猜对了", "actual": {}, "next_hint": "继续"}
-    assert "禁用字段 click" in _brief(log)["出了什么错"]
+    assert "禁用字段 long_view" in _brief(log)["出了什么错"]
 
 
 def test_没出错就不占位():
@@ -2426,7 +2385,7 @@ def test_加特征零件都声明了needs():
 
 
 def test_成绩单_KuaiRand的分数读得出来():
-    """b35cbff 把「GAUC/nDCG@5」兼容字段删了（本来就没有购买任务）。
+    """b35cbff 把 KuaiRand 成绩单里那两个冒充 AliCCP 指标名的兼容别名删了（本来就没有购买任务）。
 
     只认旧名字的话 read_scores 一路返回空 dict：收敛判定走「主分」不受
     影响，但 best_scores、锁定集分数、叙事里每轮的分数会全是空的 ——

@@ -89,6 +89,12 @@ def _llm_visible_texts():
     for s in SymptomVocab.load().all():
         yield f"symptoms/{s.id}", f"{s.detect}\n{s.needs}"
     yield CARD_FORMAT_DOC.name, CARD_FORMAT_DOC.read_text(encoding="utf-8")
+    # 工兵的两份材料：零件接口说明 + 按环节取的范文。它们原样进工兵的提示词，
+    # docstring 里教的指标名、字段名，工兵会照抄 —— 早停范文就曾教它把 monitor
+    # 写成「点击分」，一个训练循环根本不产出的键。
+    from agent.roles import _EXAMPLES
+    for path in [ROOT / "modules" / "base.py", *_EXAMPLES.values()]:
+        yield f"范文/{path.relative_to(ROOT).as_posix()}", path.read_text(encoding="utf-8")
 
 
 # AliCCP 的指标名。以前从 METRIC_PAIRS 里旧任务那一套派生；那一套随旧流水线

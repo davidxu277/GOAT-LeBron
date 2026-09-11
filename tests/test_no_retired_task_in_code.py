@@ -43,3 +43,22 @@ def test_代码里不再有退役任务的字段和指标名():
         for s in _string_literals(p) if RETIRED.match(s)
     ]
     assert not hits, f"还在用退役任务的名字：{hits}"
+
+
+# 写给人和 Agent 看的规矩与说明 —— CLAUDE.md 是硬约束，工兵写代码前要读它。
+# 它要是还在讲 click / conversion，等于让 Agent 照着别的任务守规矩。
+# 「AliCCP」这个名字本身可以出现（讲历史），它的字段和指标名不行。
+# AGENTS.md 是 CLAUDE.md 的同内容副本（给别的编码助手读），两份一起盯。
+DOCS = [ROOT / "CLAUDE.md", ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "agent" / "README.md"]
+RETIRED_IN_TEXT = re.compile(
+    r"(?<![\w])(click|conversion|ctcvr|sample_id|common_id)(?![\w])"
+    r"|点击分|购买分|点击\s*AUC|购买\s*AUC|(?<![\w.])\d{3}_\d{2}(?![\w.])")
+
+
+def test_规矩和说明文档不再讲退役任务的字段和指标名():
+    hits = [
+        (p.relative_to(ROOT).as_posix(), m.group(0))
+        for p in DOCS
+        for m in RETIRED_IN_TEXT.finditer(p.read_text(encoding="utf-8"))
+    ]
+    assert not hits, f"文档还在讲退役任务：{hits}"
