@@ -61,7 +61,7 @@
      swa:
        enabled: true
        impl: modules/train/swa.py     # 已有文件，不要放进 new_files
-       start_epoch: 8
+       start_epoch_ratio: 0.75        # 键名以零件自己读的为准，别凭记忆写
    ```
 
    把已有文件塞进 `new_files` 会被当场打回（`已经存在`），**这一轮就白跑了**。

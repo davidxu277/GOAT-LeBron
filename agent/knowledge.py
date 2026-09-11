@@ -133,12 +133,20 @@ class CardLibrary:
         self._by_id = {c.id: c for c in cards}
 
     @classmethod
-    def load(cls, vocab: SymptomVocab, cards_dir: pathlib.Path = CARDS_DIR) -> "CardLibrary":
+    def load(cls, vocab: SymptomVocab, cards_dir: pathlib.Path = CARDS_DIR,
+             metrics: list[str] | None = None) -> "CardLibrary":
         """读取全部卡片，并强制校验标签合法性。
 
         任何一张卡贴了词表外的标签 → 直接报错，不许运行。
         贴错了当场就炸，五分钟修好；而不是跑到第四天才发现实验全白做。
+
+        「预计能提多少」的指标名同理，只能是当前任务的（默认跟成绩单同源，
+        取 schemas.METRICS）。换任务那次 11 张卡还写着 点击AUC / 购买AUC，
+        军师照着过期的卡去讲道理 —— 这种事不该靠人记得挨个改。
         """
+        if metrics is None:
+            from . import schemas          # schemas 反过来要 import 本模块
+            metrics = schemas.METRICS
         cards: list[Card] = []
         for path in sorted(cards_dir.glob("*.yaml")):
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -150,6 +158,12 @@ class CardLibrary:
                 raise ValueError(
                     f"卡片 {path.name} 贴了词表里没有的病名：{bad}\n"
                     f"合法的病名见 knowledge/symptoms.yaml"
+                )
+            unknown = [m for m in card.expected if m not in metrics]
+            if unknown:
+                raise ValueError(
+                    f"卡片 {path.name} 的「预计能提多少」写了本任务没有的指标：{unknown}\n"
+                    f"当前任务的指标是：{list(metrics)}"
                 )
             if not card.mechanism:
                 raise ValueError(f"卡片 {path.name} 缺少「为什么管用」—— 这一栏不能省")
