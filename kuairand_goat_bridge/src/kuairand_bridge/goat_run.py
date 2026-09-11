@@ -27,17 +27,6 @@ OFFICIAL_MAX_ITERATIONS = 50
 OFFICIAL_MAX_SECONDS = 21600
 
 
-def _track2_read_scores(report: dict[str, Any]) -> dict[str, float]:
-    """把 Track 2 正式指标翻译成旧 GOAT 账本键；不污染健康报告。"""
-    validation = report.get("验证集") or {}
-    if validation.get("GAUC") is None:
-        return {}
-    return {
-        "点击AUC": float(validation["GAUC"]),
-        "购买AUC": float(validation.get("nDCG@5") or 0.0),
-    }
-
-
 def _resolve(
     value: str,
     base: pathlib.Path,
@@ -452,10 +441,10 @@ def run(
     )
     from agent import loop as goat_loop
 
-    # 旧 GOAT 的内部账本仍把两个分量命名为点击AUC/购买AUC。只在本次
-    # Bridge 进程内部安装读取适配器，不把这些错误业务名写进 Doctor 成绩单。
-    # 这样核心调度/总结保持兼容，LLM 看到的始终只有 Track 2 正式语义。
-    goat_loop.read_scores = _track2_read_scores
+    # 以前这里把 goat_loop.read_scores 换成一个改名适配器（GAUC/nDCG@5 → 点击AUC/购买AUC），
+    # 理由是"旧 GOAT 的内部账本仍用这两个名字"。外层循环早就直接认 GAUC/nDCG@5 了，
+    # 那个适配器只剩副作用：下面传进去的官方基线用 GAUC/nDCG@5，读出来的分数却叫
+    # 点击AUC/购买AUC，结果表的「相对官方基线」按 0 分去减，每一场都报 −0.67。
     run_session = goat_loop.run_session
 
     # 病名词表与药方卡用主仓库那一套（knowledge/），不再单独维护一份。
