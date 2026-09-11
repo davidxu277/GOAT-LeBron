@@ -52,7 +52,7 @@ import data as official_data                                  # noqa: E402
 import evaluate as official_evaluate                           # noqa: E402
 
 from harness.deep import train_deep, predict_deep              # noqa: E402
-from harness.executor import (                                 # noqa: E402
+from harness.ops import (                                      # noqa: E402
     apply_feature_ops,
     load_feature_ops,
 )

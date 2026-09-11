@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 from harness.deep import OOV, Vocab
-from harness.executor import apply_feature_ops, load_feature_ops
+from harness.ops import apply_feature_ops, load_feature_ops
 
 
 def _te_frames():

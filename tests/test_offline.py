@@ -1692,10 +1692,13 @@ def test_超参数_没在白名单里的键被忽略():
 
 
 def _写个零件(tmp_path, monkeypatch, body: str) -> None:
-    """在临时 ROOT 下放一个零件文件，并把执行器的 ROOT 指过去。"""
-    from harness import executor as ex_mod
+    """在临时 ROOT 下放一个零件文件，并把装零件那一层的 ROOT 指过去。
 
-    monkeypatch.setattr(ex_mod, "ROOT", tmp_path)
+    路径守卫跟着装零件的代码搬到了 harness/ops.py，要指的是它的 ROOT。
+    """
+    from harness import ops as ops_mod
+
+    monkeypatch.setattr(ops_mod, "ROOT", tmp_path)
     path = tmp_path / "modules" / "features" / "demo.py"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
@@ -1718,7 +1721,7 @@ class Demo:
 def test_零件_启用了就真的被加载并跑起来(tmp_path, monkeypatch):
     """这是 ① 的核心：以前文件写进去了，但没有任何机制去加载和运行它。"""
     pd = pytest.importorskip("pandas")
-    from harness.executor import apply_feature_ops, load_feature_ops
+    from harness.ops import apply_feature_ops, load_feature_ops
 
     _写个零件(tmp_path, monkeypatch, 零件范本)
     cfg = {"features": {"演示零件": {
@@ -1737,7 +1740,7 @@ def test_零件_启用了就真的被加载并跑起来(tmp_path, monkeypatch):
 
 def test_零件_没启用的不加载(tmp_path, monkeypatch):
     pytest.importorskip("pandas")
-    from harness.executor import load_feature_ops
+    from harness.ops import load_feature_ops
 
     _写个零件(tmp_path, monkeypatch, 零件范本)
     assert load_feature_ops({"features": {"演示零件": {
@@ -1748,7 +1751,7 @@ def test_零件_启用了却没写impl直接报错(tmp_path, monkeypatch):
     """以前这种情况是**静默无效**：配置改了、文件写了，训练纹丝不动，
     却被记成「这个方案没用」，工兵白挨一次负分。宁可当场炸。"""
     pytest.importorskip("pandas")
-    from harness.executor import load_feature_ops
+    from harness.ops import load_feature_ops
 
     _写个零件(tmp_path, monkeypatch, 零件范本)
     with pytest.raises(ValueError, match="没写 impl"):
@@ -1758,7 +1761,7 @@ def test_零件_启用了却没写impl直接报错(tmp_path, monkeypatch):
 def test_零件_不许从modules之外加载(tmp_path, monkeypatch):
     """放开一寸就等于让 Agent import 任意文件（R5）。"""
     pytest.importorskip("pandas")
-    from harness.executor import load_feature_ops
+    from harness.ops import load_feature_ops
 
     _写个零件(tmp_path, monkeypatch, 零件范本)
     for 坏路径 in ("harness/executor.py", "modules/../harness/x.py"):
@@ -1768,7 +1771,7 @@ def test_零件_不许从modules之外加载(tmp_path, monkeypatch):
 
 def test_零件_文件里没有合格的类会说清楚(tmp_path, monkeypatch):
     pytest.importorskip("pandas")
-    from harness.executor import load_feature_ops
+    from harness.ops import load_feature_ops
 
     _写个零件(tmp_path, monkeypatch, "class 不合格:\n    pass\n")
     with pytest.raises(TypeError, match="没有实现 FeatureOp 接口"):
@@ -1779,7 +1782,7 @@ def test_零件_文件里没有合格的类会说清楚(tmp_path, monkeypatch):
 def test_零件_fit只看训练集(tmp_path, monkeypatch):
     """R2：读验证集来算统计量 = 作弊，分数虚高，测试集必掉。"""
     pd = pytest.importorskip("pandas")
-    from harness.executor import apply_feature_ops, load_feature_ops
+    from harness.ops import apply_feature_ops, load_feature_ops
 
     _写个零件(tmp_path, monkeypatch, '''
 class Demo:
@@ -3461,7 +3464,7 @@ def test_危险信号_差距不大时不干涉(vocab):
 
 
 def _目标编码零件(seed=0, smoothing=0):
-    from harness.executor import _load_op_class_by
+    from harness.ops import load_op_class as _load_op_class_by
     cfg = {"train": {"seed": seed},
            "features": {"目标编码": {
                "enabled": True, "impl": "modules/features/target_encoding.py",
@@ -3501,7 +3504,7 @@ def test_目标编码_训练集走折外不再把答案抄进特征():
 def test_目标编码_执行器真的走了折外那条():
     """零件写好了防泄漏的通道，但加载器不调用它 —— 那跟没写一样。"""
     pytest.importorskip("pandas")
-    from harness.executor import apply_feature_ops
+    from harness.ops import apply_feature_ops
 
     df = _只出现一次的数据()
     op = _目标编码零件()
@@ -3534,7 +3537,7 @@ def test_目标编码_折分种子从配置读():
 def test_目标编码_目标列不再默认那个不存在的列():
     """原来默认 target_col='ctr_label'，那一列在任何数据里都不存在，一启用就炸。"""
     pytest.importorskip("pandas")
-    from harness.executor import _load_op_class_by
+    from harness.ops import load_op_class as _load_op_class_by
 
     Op = _load_op_class_by(
         "modules/features/target_encoding.py", ("fit", "transform"), "FeatureOp")
@@ -3547,7 +3550,7 @@ def test_目标编码_目标列不再默认那个不存在的列():
 def test_加特征零件都声明了needs():
     """不声明 needs()，执行器只能读整张表 —— 而这些零件本来就是为省内存写的。"""
     pytest.importorskip("pandas")
-    from harness.executor import _load_op_class_by
+    from harness.ops import load_op_class as _load_op_class_by
 
     for name in ("target_encoding", "sequence_summary", "category_fallback",
                  "frequency_bucket"):

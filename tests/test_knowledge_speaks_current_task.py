@@ -143,7 +143,7 @@ def test_提示词里的配置样例真的能把现成零件装上():
     这里不比对键名清单，直接拿样例去**真的加载**那个零件。
     """
     from harness.deep import load_train_ops
-    from harness.executor import load_feature_ops
+    from harness.ops import load_feature_ops
 
     loaders = {"train": load_train_ops, "features": load_feature_ops}
     sources = [(p.name, p.read_text(encoding="utf-8"))

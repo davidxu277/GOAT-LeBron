@@ -159,7 +159,7 @@ def _default_loss(out: dict[str, Any], click, conv, torch) -> Any:
 
 def load_model_op(config: dict[str, Any]) -> Any:
     """按 model.impl 指路加载模型零件。跟 FeatureOp 同一套规矩。"""
-    from .executor import _load_op_class_by
+    from .ops import load_op_class
 
     impl = (config.get("model") or {}).get("impl")
     if not impl:
@@ -167,7 +167,7 @@ def load_model_op(config: dict[str, Any]) -> Any:
             "配置里 model.name 不是 lightgbm，却没写 model.impl —— "
             "不知道该加载哪个模型零件。config_patch 里补一行 "
             "impl: modules/models/xxx.py（零件要实现 modules/base.py 的 ModelOp）")
-    return _load_op_class_by(impl, ("build", "predict"), "ModelOp")(config)
+    return load_op_class(impl, ("build", "predict"), "ModelOp")(config)
 
 
 _TRAIN_OPS_DIR = pathlib.Path(__file__).resolve().parent.parent / "modules" / "train"
@@ -191,7 +191,7 @@ def _is_train_op_block(name: str, block: dict[str, Any]) -> bool:
 
 def load_train_ops(config: dict[str, Any]) -> list[tuple[str, Any]]:
     """按 train.<名字>.enabled + impl 加载训练过程零件（早停、SWA…）。"""
-    from .executor import _load_op_class_by
+    from .ops import load_op_class
 
     ops = []
     for name, block in (config.get("train") or {}).items():
@@ -221,7 +221,7 @@ def load_train_ops(config: dict[str, Any]) -> list[tuple[str, Any]]:
                 f"train.{name} 写了 enabled: true 却没写 impl —— "
                 f"没有东西可加载。补上 impl: modules/train/{name}.py")
 
-        ops.append((name, _load_op_class_by(impl, ("on_epoch_end",), "TrainOp")(config)))
+        ops.append((name, load_op_class(impl, ("on_epoch_end",), "TrainOp")(config)))
     return ops
 
 
