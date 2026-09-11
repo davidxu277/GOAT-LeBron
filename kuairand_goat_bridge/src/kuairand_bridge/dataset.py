@@ -12,6 +12,8 @@ from .official import module
 
 
 FIDELITY_FRACTIONS = {
+    # 试跑：只回答"跑不跑得通"，不出成绩（见 goat_executor.smoke）
+    "试跑": 0.02,
     "小份": 0.15,
     "中份": 0.40,
     "大份": 0.75,

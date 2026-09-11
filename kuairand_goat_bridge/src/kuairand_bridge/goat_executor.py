@@ -143,6 +143,8 @@ class KuaiRandGoatExecutor:
         # 上一次**跑成的**那轮的验证预测指纹。用来机械地判断"这次改动到底
         # 生没生效" —— 见 _effect_verdict。失败的轮次不更新它。
         self._last_scores_digest: str | None = None
+        # 试跑的编号，只用来给输出目录分个号（见 smoke）
+        self._smoke_no = 0
 
     @property
     def training_attempts(self) -> int:
@@ -634,6 +636,71 @@ class KuaiRandGoatExecutor:
                 unsupported=self._unsupported(
                     exc
                 ),
+            )
+
+    # ── 试跑 ──────────────────────────────────────────────────────
+    #
+    # 真数据实测（2026-09-12）：一个读了不存在的列的零件，正式训练 3 秒就挂，
+    # 报错里带着完整 traceback —— 可它照样占掉一个官方训练名额，那一轮也跟着作废。
+    # 试跑只回答"跑不跑得通"：极小一份数据、1 轮，不占名额、不进补丁历史，
+    # 挂了的 traceback 交给外层循环拿回去让工兵改。
+
+    SMOKE_FIDELITY = "试跑"
+    _SMOKE_EPOCHS_PATCH = "model:\n  deep:\n    epochs: 1\n"
+
+    def smoke(
+        self,
+        patch: dict[str, Any],
+    ) -> BridgeRunResult:
+        started = time.monotonic()
+        self._smoke_no += 1
+        run_dir = (
+            self.output_dir
+            / "smoke"
+            / f"{self._smoke_no:03d}"
+        )
+        normalized = self._normalize_patch(patch)
+        history = self._copy_history(self._patch_history) + [normalized]
+        # 只训 1 轮压在历史最后一条 —— 工兵自己改了轮数也盖得住。
+        # 只有 goat_trainer 认 model.deep.epochs；只能改配置的 FM trainer 塞进去会被拒。
+        if self.agent_capabilities().get("可以写新零件"):
+            history.append({
+                "new_files": [],
+                "config_patch": self._SMOKE_EPOCHS_PATCH,
+            })
+
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            self._call_runner(
+                run_dir,
+                make_test=False,
+                agent_patch={
+                    "new_files": list(normalized["new_files"]),
+                    "config_patch": normalized["config_patch"],
+                    "history": history,
+                },
+                fidelity=self.SMOKE_FIDELITY,
+            )
+            return BridgeRunResult(
+                ok=True,
+                seconds=time.monotonic() - started,
+                fidelity=self.SMOKE_FIDELITY,
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            self._write_error(
+                run_dir,
+                error,
+                self.SMOKE_FIDELITY,
+                time.monotonic() - started,
+                None,
+            )
+            return BridgeRunResult(
+                ok=False,
+                error=error,
+                seconds=time.monotonic() - started,
+                fidelity=self.SMOKE_FIDELITY,
+                unsupported=self._unsupported(exc),
             )
 
     @staticmethod
