@@ -141,6 +141,11 @@ def test_演习整场说的都是当前任务的指标名(tmp_path):
 - [ ] **Step 5: 跑新测试 + 全量 + check + 离线演习**
 - [ ] **Step 6: 提交** `refactor(agent): 离线演习和假成绩单换成 KuaiRand 格式`
 
+> **执行时调整顺序（2026-09-11）：先做 Task 4，再做 Task 3。** Task 3 的守卫测试点名的
+> `harness/deep.py` 双塔默认路径和 `agent/noise.py` 本身就是 AliCCP 专用代码；先删它们会
+> 让 RealExecutor 的测试全挂，Task 3 没法单独绿着收尾。所以先整块删旧代码（连同只测它的
+> 测试），再删兼容分支、迁测试。Task 4 验证时单独跳过还是红的守卫测试文件，不提交它。
+
 ### Task 3: 通用测试迁到 KuaiRand 格式，删 agent 核心的兼容分支
 
 **Files:**

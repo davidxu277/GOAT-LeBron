@@ -749,13 +749,6 @@ def test_一整场_结果表算得出相对基线的差值(tmp_path):
 # ────────────────── 噪声带 ──────────────────
 
 
-def test_噪声带_正样本越少抖得越厉害():
-    """47 条正样本的 AUC 和 4 万条正样本的 AUC，不是一回事。"""
-    少 = noise.hanley_mcneil_se(0.70, n_pos=47, n_neg=940)
-    多 = noise.hanley_mcneil_se(0.70, n_pos=41_200, n_neg=824_000)
-    assert 少 > 多 * 10
-
-
 def test_噪声带_从多次运行算出来():
     reports = [
         {"保真度": "小份", "验证集": {"点击分": 0.610, "购买分": 0.590},
@@ -793,46 +786,6 @@ def test_噪声带_医生看到的也是分指标的():
 
 
 # ────────────────── 真执行器：落地补丁那一段 ──────────────────
-
-
-def test_真执行器_能吃下YAML文本的配置补丁(tmp_path, monkeypatch):
-    """工兵产出的 config_patch 是 YAML **文本**，不是 dict。
-
-    执行器早先直接对它 .items()，任何一个带配置改动的补丁都会当场
-    AttributeError —— 而这正是最常见的那种补丁。
-    """
-    pytest.importorskip("pandas")
-    from harness import executor as ex_mod
-
-    monkeypatch.setattr(ex_mod, "ROOT", tmp_path)
-    ex = ex_mod.RealExecutor.__new__(ex_mod.RealExecutor)
-    ex.config = {}
-    ex._apply_patch({
-        "config_patch": "train:\n  seed: 7\nfeatures:\n  x:\n    enabled: true\n",
-        "new_files": [{"path": "modules/features/x.py", "content": "V = 1\n"}],
-    })
-    assert ex.config["train"] == {"seed": 7}
-    assert (tmp_path / "modules" / "features" / "x.py").read_text(encoding="utf-8") == "V = 1\n"
-
-
-def test_真执行器_不许写到modules之外(tmp_path, monkeypatch):
-    pytest.importorskip("pandas")
-    from harness import executor as ex_mod
-
-    monkeypatch.setattr(ex_mod, "ROOT", tmp_path)
-    ex = ex_mod.RealExecutor.__new__(ex_mod.RealExecutor)
-    ex.config = {}
-    with pytest.raises(ValueError, match="非法写入路径"):
-        ex._apply_patch({"config_patch": "",
-                         "new_files": [{"path": "harness/x.py", "content": "V = 1"}]})
-
-
-def test_真执行器_满足外层循环要的协议():
-    pytest.importorskip("pandas")
-    from harness.executor import RealExecutor
-    from agent.loop import Executor
-
-    assert isinstance(RealExecutor("a", "b"), Executor)   # Protocol 运行时检查
 
 
 def test_一整场_最大数据上还查不出病就算收敛(tmp_path):
@@ -1049,42 +1002,6 @@ def test_Haiku输出预算自动限制为64000且仍走流式():
     assert 走了流式
 
 
-# ────────────────── 配置：白名单与深度合并 ──────────────────
-
-
-def test_特征清单在白名单内可改():
-    """医生最常诊断出的就是「特征没用上」，改特征却被白名单拦住的话，
-    等于一边让它诊断、一边堵死修复的路。base_fields 必须在 features 下。"""
-    import yaml as _yaml
-    from agent.roles import _check_config_patch
-
-    cfg = _yaml.safe_load(
-        (pathlib.Path(__file__).resolve().parent.parent
-         / "config" / "pipeline.yaml").read_text(encoding="utf-8"))
-    assert "base_fields" in cfg["features"], "特征清单要放在 features 下，工兵才改得动"
-    assert "fidelity" not in cfg.get("train", {}), "数据规模归调度器管，不能让工兵改"
-
-    _check_config_patch("features:\n  base_fields: ['101', '205']\n")   # 不该抛
-
-
-def test_改配置不会冲掉同级的其他键():
-    """浅层赋值的坑：工兵只想改一个 K，结果把 features 下其他零件全抹了。"""
-    from harness.executor import _deep_set
-
-    cfg = {"features": {"类目兜底": {"enabled": True, "K": 20},
-                        "目标编码": {"enabled": False}}}
-    _deep_set(cfg, ["features", "类目兜底", "K"], 50)
-    assert cfg["features"]["类目兜底"]["K"] == 50
-    assert cfg["features"]["类目兜底"]["enabled"] is True      # 同级键还在
-    assert "目标编码" in cfg["features"]                       # 兄弟零件还在
-
-
-def test_执行器默认读配置文件():
-    """不读的话，工兵改配置类的方案永远等于没改，复盘官只会一直判「猜错了」。"""
-    from harness.executor import _load_pipeline_config
-
-    cfg = _load_pipeline_config()
-    assert cfg.get("features", {}).get("base_fields"), "应该读到特征清单"
 # ────────────────── 复盘官：多个目标毛病 ──────────────────
 
 
@@ -1304,28 +1221,6 @@ def test_待议架_工兵换了备胎就不算没轮到(tmp_path):
 # ────────────────── 锁定集（R3）──────────────────
 
 
-def test_锁定集只许读一次(tmp_path):
-    """读第二次它就跟开发集一样被污染了 —— 一旦拿它的分数做过决策，
-    它就不再是干净的裁判。这条靠代码硬拦，不靠自觉。"""
-    from harness.executor import RealExecutor
-
-    ex = RealExecutor.__new__(RealExecutor)      # 不碰真数据，只测守卫
-    ex.holdout_path = tmp_path / "holdout"
-    ex.holdout_reads = 1                          # 假装已经读过
-    with pytest.raises(RuntimeError, match="只许读一次"):
-        ex.final_judge("小份")
-
-
-def test_没配锁定集不算错(tmp_path):
-    """没有裁判只是少一份证据，不该让整场跑挂。"""
-    from harness.executor import RealExecutor
-
-    ex = RealExecutor.__new__(RealExecutor)
-    ex.holdout_path = None
-    r = ex.final_judge("小份")
-    assert not r.ok and "没有配锁定集" in r.error
-
-
 def test_泛化落差算的是开发集减锁定集():
     """落差为正 = 开发集分虚高，那部分是反复筛选筛出来的迎合。"""
     from agent.loop import SessionSummary
@@ -1464,66 +1359,6 @@ def test_两个人各跑一次_日志能分得开(tmp_path):
 # ────────────────── finalize：一条命令出齐提交包 ──────────────────
 
 
-def test_整理提交包_只取一场(tmp_path):
-    """几个人各跑几次混在一个日志里，提交包必须只含一场，否则轮次编号是乱的。"""
-    import argparse as _ap
-    from agent import cli
-
-    v = SymptomVocab.load()
-    for who, n in (("旧的一场", 2), ("要交的那场", 3)):
-        run_session(
-            llm=ScriptedLLM(promote_on=()), vocab=v, cards=CardLibrary.load(v),
-            executor=DriftingExecutor(), initial_report=DriftingExecutor().report("小份"),
-            module_interface="", example_module="", current_config="",
-            rounds=n, run_id=who, logs_dir=tmp_path,
-        )
-    out = tmp_path / "deliverables"
-    cli.cmd_finalize(_ap.Namespace(run="要交的那场", out=str(out), logs=str(tmp_path)))
-
-    rows = [json.loads(l) for l in
-            (out / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert [r["round_id"] for r in rows] == [1, 2, 3]           # 编号连续可读
-    assert {r["run_id"] for r in rows} == {"要交的那场"}
-    for name in ("narrative.md", "session_summary.json", "dashboard.html"):
-        assert (out / name).exists(), name
-    assert (out / "best_pipeline" / "config" / "pipeline.yaml").exists()
-
-
-def test_整理提交包_默认取最后一场(tmp_path):
-    import argparse as _ap
-    from agent import cli
-
-    v = SymptomVocab.load()
-    for who in ("先跑的", "后跑的"):
-        run_session(
-            llm=ScriptedLLM(promote_on=()), vocab=v, cards=CardLibrary.load(v),
-            executor=DriftingExecutor(), initial_report=DriftingExecutor().report("小份"),
-            module_interface="", example_module="", current_config="",
-            rounds=2, run_id=who, logs_dir=tmp_path,
-        )
-    out = tmp_path / "deliverables"
-    cli.cmd_finalize(_ap.Namespace(run=None, out=str(out), logs=str(tmp_path)))
-    rows = [json.loads(l) for l in
-            (out / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert {r["run_id"] for r in rows} == {"后跑的"}
-
-
-def test_整理提交包_场次不存在时说清楚有哪些(tmp_path):
-    import argparse as _ap
-    from agent import cli
-
-    v = SymptomVocab.load()
-    run_session(
-        llm=ScriptedLLM(promote_on=()), vocab=v, cards=CardLibrary.load(v),
-        executor=DriftingExecutor(), initial_report=DriftingExecutor().report("小份"),
-        module_interface="", example_module="", current_config="",
-        rounds=2, run_id="真有的那场", logs_dir=tmp_path,
-    )
-    with pytest.raises(SystemExit, match="真有的那场"):
-        cli.cmd_finalize(_ap.Namespace(run="不存在", out=str(tmp_path / "x"),
-                                       logs=str(tmp_path)))
-
-
 def test_复盘官拿的是上一轮而不是上上轮(tmp_path):
     """曾经的 off-by-one：第 3 轮会拿第 1 轮来比，中间两轮的进步全算在这一次头上。
 
@@ -1632,60 +1467,6 @@ def test_读快照_缺件就整份不认(tmp_path):
         "round_id": 1, "run_id": "某场", "patch_files": {}}, ensure_ascii=False) + "\n",
         encoding="utf-8")
     assert read_snapshot(tmp_path, "某场", 2) is None
-
-
-# ────────────────── 超参数：工兵改了得真的生效，但不能想改多大改多大 ──────────────────
-
-
-def test_超参数_默认值跟改之前一模一样():
-    """接通配置不能顺手改变基线行为，否则历史分数全对不上了。"""
-    pytest.importorskip("pandas")
-    from harness.executor import lgbm_kwargs
-
-    assert lgbm_kwargs(None) == {
-        "n_estimators": 120, "num_leaves": 31, "learning_rate": 0.05,
-        "min_child_samples": 20, "colsample_bytree": 1.0,
-    }
-    # 购买塔的覆盖值也照旧
-    cvr = lgbm_kwargs(None, {"n_estimators": 60, "num_leaves": 15})
-    assert cvr["n_estimators"] == 60 and cvr["num_leaves"] == 15
-
-
-def test_超参数_工兵改了真的生效():
-    pytest.importorskip("pandas")
-    from harness.executor import lgbm_kwargs
-
-    kw = lgbm_kwargs({"n_estimators": 300, "learning_rate": 0.02})
-    assert kw["n_estimators"] == 300 and kw["learning_rate"] == 0.02
-
-
-def test_超参数_越界会被夹回去():
-    """护栏不是建议：n_estimators=100000 能让一轮跑到天亮，把整场预算烧光。"""
-    pytest.importorskip("pandas")
-    from harness.executor import lgbm_kwargs
-
-    assert lgbm_kwargs({"n_estimators": 100000})["n_estimators"] == 2000
-    assert lgbm_kwargs({"num_leaves": 1})["num_leaves"] == 4
-    assert lgbm_kwargs({"learning_rate": 5.0})["learning_rate"] == 0.5
-
-
-def test_超参数_写歪了退回默认而不是炸掉():
-    """一个配置错字不该让整轮训练报废。"""
-    pytest.importorskip("pandas")
-    from harness.executor import lgbm_kwargs
-
-    assert lgbm_kwargs({"n_estimators": "很多"})["n_estimators"] == 120
-    assert lgbm_kwargs({"learning_rate": None})["learning_rate"] == 0.05
-
-
-def test_超参数_没在白名单里的键被忽略():
-    """工兵只能调这五个 —— 别的键写了也不会被传给 LightGBM。"""
-    pytest.importorskip("pandas")
-    from harness.executor import lgbm_kwargs
-
-    kw = lgbm_kwargs({"n_jobs": 999, "device": "cuda", "n_estimators": 200})
-    assert "n_jobs" not in kw and "device" not in kw
-    assert kw["n_estimators"] == 200
 
 
 # ────────────────── 加特征零件：写进去的文件必须真的被跑起来 ──────────────────
@@ -1799,140 +1580,7 @@ class Demo:
     assert ops[0][1].fit_rows == [3]             # 只 fit 过训练集，一次
 
 
-# ── 执行器能不能兑现配置里承诺的东西 ────────────────────────────────
-#
-# 背景：26 张卡里只有 3 张是纯特征卡，其余 23 张落在 模型/损失函数/训练策略。
-# 而执行器走的是 LightGBM 这条路 —— ModelOp / TrainOp 两类零件没有任何加载机制，
-# TrainOp 的接口（按 epoch 回调 + state_dict）跟 LightGBM 结构上也对不上。
-#
-# 如果这些配置被"接受但无视"，就会重演那个最贵的 bug：
-# 工兵改了、跑完了、分数纹丝不动，复盘官判「猜错了」，好方法被拉黑。
-# 所以：能真做的真做，做不了的**当场炸**。
-
-
-def test_能力check_默认配置跑得通():
-    """仓库里那份 config/pipeline.yaml 必须是执行器兑现得了的。"""
-    from harness.executor import check_supported
-
-    cfg = (pathlib.Path(__file__).resolve().parent.parent
-           / "config" / "pipeline.yaml")
-    check_supported(yaml.safe_load(cfg.read_text(encoding="utf-8")))
-
-
-def test_能力check_换深度模型要当场炸():
-    """model.name 换成 deepfm 但执行器还是 LightGBM —— 静默无视等于骗自己。"""
-    from harness.executor import check_supported
-
-    with pytest.raises(ValueError, match="deepfm"):
-        check_supported({"model": {"name": "deepfm"}})
-
-
-def test_能力check_报错要说清为什么和怎么办():
-    """错误信息得让人（和下一轮的军师）知道这不是"方法不行"，是"跑不了"。
-
-    深度路径接通之后，esmm 不再是「整类不支持」—— 它只是还没人指路。
-    所以报错要说清缺的是什么、怎么补，而不是笼统一句"只会 LightGBM"。
-    """
-    from harness.executor import check_supported
-
-    with pytest.raises(ValueError) as e:
-        check_supported({"model": {"name": "esmm"}})
-    报错 = str(e.value)
-    assert "impl" in 报错 and "modules/models/" in 报错      # 缺什么、放哪
-    assert "ModelOp" in 报错                                 # 照哪个接口写
-
-    # 指了路就放行 —— 剩下的错留给加载时报（文件不存在之类）
-    check_supported({"model": {"name": "esmm", "impl": "modules/models/esmm.py"}})
-
-
-def test_能力check_epoch类零件要当场炸():
-    """SWA 要按 epoch 平权重，LightGBM 没有 epoch 循环可以挂。"""
-    from harness.executor import check_supported
-
-    with pytest.raises(ValueError, match="SWA|swa"):
-        check_supported({"train": {"swa": {"enabled": True}}})
-
-
-def test_能力check_关着的epoch类零件不算错():
-    """enabled: false 就是没开，不该拦。"""
-    from harness.executor import check_supported
-
-    check_supported({"train": {"swa": {"enabled": False}}})
-
-
-def test_能力check_多任务损失权重要当场炸():
-    """loss_weight 是给「一个模型同时学两件事」用的；
-    这里点击和购买是两个独立的 LightGBM，权重无处可施。"""
-    from harness.executor import check_supported
-
-    with pytest.raises(ValueError, match="uncertainty"):
-        check_supported({"train": {"loss_weight": {"strategy": "uncertainty"}}})
-
-
-def test_能力check_固定权重不算错():
-    from harness.executor import check_supported
-
-    check_supported({"train": {"loss_weight": {"strategy": "fixed",
-                                               "ctr": 1.0, "cvr": 1.0}}})
-
-
-# ── 负采样：概率要还原回真实尺度 ──────────────────────────────────
-
-
-def test_负采样_没开就原样返回():
-    from harness.executor import recalibrate
-
-    p = [0.1, 0.5, 0.9]
-    assert recalibrate(p, keep_ratio=1.0) == pytest.approx(p)
-
-
-def test_负采样_还原后概率变小():
-    """负样本被抽掉之后模型看到的正样本比例虚高，预测的概率整体偏大。
-    还原就是把它压回真实尺度。"""
-    from harness.executor import recalibrate
-
-    out = recalibrate([0.5], keep_ratio=0.1)
-    assert out[0] < 0.5
-    # w*p / (1-p+w*p) = 0.05/0.55
-    assert out[0] == pytest.approx(0.05 / 0.55)
-
-
-def test_负采样_还原不改变排序():
-    """AUC 只看排序 —— 还原是单调变换，所以 AUC 不该被它改动。
-    它影响的是 logloss 和「预测均值对不对得上真实点击率」。"""
-    from harness.executor import recalibrate
-
-    out = recalibrate([0.2, 0.4, 0.8], keep_ratio=0.3)
-    assert out == sorted(out)
-
-
-def test_负采样_边界值不炸():
-    from harness.executor import recalibrate
-
-    assert recalibrate([0.0, 1.0], keep_ratio=0.5) == pytest.approx([0.0, 1.0])
-
-
 # ── 「跑不了」和「方法不行」是两回事 ──────────────────────────────
-
-
-def test_兑现不了的配置不该扣卡片的信任分():
-    """执行器兑现不了 ≠ 这张卡不靠谱。
-
-    前者是我们的流水线缺能力，后者是方法本身没用。混为一谈的话，
-    一场跑下来会把 ESMM、DeepFM 这些真正的好方法全部扣成低信任分，
-    下一场开跑时军师就再也不会提它们了 —— 错误结论被固化进账本。
-    """
-    from harness.executor import UnsupportedByExecutor, check_supported
-
-    with pytest.raises(UnsupportedByExecutor):
-        check_supported({"model": {"name": "deepfm"}})
-
-
-def test_兑现不了也是一种跑不起来():
-    """仍然是 ValueError 的子类 —— 老代码里 except ValueError 的地方不会漏接。"""
-    from harness.executor import UnsupportedByExecutor
-
-    assert issubclass(UnsupportedByExecutor, ValueError)
 
 
 def test_跑挂了的结果会标出是不是兑现不了():
@@ -1981,89 +1629,6 @@ def _配置(**train_over):
     return cfg
 
 
-def test_整条路_基线跑得完并出成绩单(tmp_path):
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    r = RealExecutor(tr, va, seed=1, config=_配置()).run(
-        {"new_files": [], "config_patch": {}}, "全量")
-    assert r.ok, r.error
-    assert r.health_report["验证集"]["点击分"] is not None
-    # 这一条就是当初那个 NameError 的哨兵
-    assert r.health_report["实际超参数"]["点击塔"]["n_estimators"] == 20
-
-
-def test_整条路_改超参数真的会传到模型上(tmp_path):
-    """R7：配置里写的数必须真的进模型，不是摆设。"""
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    cfg = _配置()
-    cfg["model"]["lightgbm"]["n_estimators"] = 33
-    r = RealExecutor(tr, va, seed=1, config=cfg).run(
-        {"new_files": [], "config_patch": {}}, "全量")
-    assert r.ok, r.error
-    assert r.health_report["实际超参数"]["点击塔"]["n_estimators"] == 33
-
-
-def test_整条路_开早停跑得完(tmp_path):
-    """早停从训练集内部切裁判，不碰被评的那份数据（R2/R3）。"""
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    cfg = _配置(early_stopping={"enabled": True, "patience": 2,
-                               "inner_holdout_frac": 0.2})
-    cfg["model"]["lightgbm"]["n_estimators"] = 200
-    r = RealExecutor(tr, va, seed=1, config=cfg).run(
-        {"new_files": [], "config_patch": {}}, "全量")
-    assert r.ok, r.error
-
-
-def test_整条路_开负采样跑得完且训练集变小(tmp_path):
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    满 = RealExecutor(tr, va, seed=1, config=_配置()).run(
-        {"new_files": [], "config_patch": {}}, "全量")
-    抽 = RealExecutor(tr, va, seed=1, config=_配置(
-        negative_sampling={"enabled": True, "keep_ratio": 0.3})).run(
-        {"new_files": [], "config_patch": {}}, "全量")
-    assert 满.ok and 抽.ok, (满.error, 抽.error)
-    assert 抽.health_report["训练集"]["总行数"] < 满.health_report["训练集"]["总行数"]
-
-
-def test_整条路_兑现不了的配置标成unsupported(tmp_path):
-    """跑不了要跟跑崩了分开，否则会扣错卡片的信任分。"""
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    cfg = _配置()
-    cfg["model"]["name"] = "deepfm"
-    r = RealExecutor(tr, va, seed=1, config=cfg).run(
-        {"new_files": [], "config_patch": {}}, "全量")
-    assert not r.ok
-    assert r.unsupported is True
-
-
-def test_整条路_训练崩了不算unsupported(tmp_path):
-    """普通的崩溃仍然该扣分 —— 别把两种失败混成一种。"""
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    cfg = _配置()
-    cfg["features"]["base_fields"] = ["根本不存在的字段"]
-    r = RealExecutor(tr, va, seed=1, config=cfg).run(
-        {"new_files": [], "config_patch": {}}, "全量")
-    assert not r.ok
-    assert r.unsupported is False
-
-
 # ── 噪声门槛必须分指标，不能一个标量管两个 ────────────────────────
 #
 # 实测：验证集里点击正样本 8,950 个，转化正样本只有 38 个。
@@ -2073,26 +1638,6 @@ def test_整条路_训练崩了不算unsupported(tmp_path):
 # 以前 summarize() 取 max(点击带, 购买带) 当唯一门槛，被购买带主导，
 # 于是两头都错：真实的点击提升（+0.008 这种，已实测到过）被当噪声抹掉，
 # 购买分的纯抖动（±0.05）反而越过门槛被记成"猜对了"，白送 +0.15 信任分。
-
-
-def test_噪声带_分指标各给各的():
-    from agent import noise
-
-    reports = [{"验证集": {"点击分": 0.550 + i * 0.0005,
-                          "购买分": 0.45 + i * 0.03}} for i in range(3)]
-    bands = noise.summarize(reports, seeds=[1, 2, 3])
-    分 = bands["分指标噪声带"]
-    assert 分["点击AUC"] < 分["购买AUC"]          # 购买抖得多，门槛就该高
-    assert 分["点击AUC"] == bands["点击分"]["噪声带"]
-    assert 分["购买AUC"] == bands["购买分"]["噪声带"]
-
-
-def test_噪声带_老的单指标字段还在():
-    """别把已经在用它的地方弄挂了。"""
-    from agent import noise
-
-    reports = [{"验证集": {"点击分": 0.55, "购买分": 0.45}} for _ in range(3)]
-    assert "单指标噪声带" in noise.summarize(reports, seeds=[1, 2, 3])
 
 
 def test_越过噪声_点击涨了就该算数():
@@ -2119,29 +1664,6 @@ def test_越过噪声_没量过噪声就退回R11门槛():
     assert beats_noise({"点击AUC": 0.0001}, None) is False
 
 
-def test_噪声带_测出0要退回理论值():
-    """保真度抽样只抽负样本，click=1 子集在每个种子下完全一样 ——
-    换种子扰动不到购买塔，测出来的噪声带是 0.0000。
-    照单全收的话购买分任何抖动都能越过门槛，比不分指标还糟。"""
-    from agent import noise
-
-    reports = [{"验证集": {"总行数": 217974, "点击数": 8950, "转化数": 38,
-                          "点击分": 0.5507, "购买分": 0.4462}} for _ in range(3)]
-    分 = noise.summarize(reports, seeds=[1, 2, 3])["分指标噪声带"]
-    assert 分["购买AUC"] > 0.05, "38 个正样本的理论带该在 ±0.09 量级"
-
-
-def test_噪声带_测得出来就用实测的():
-    """理论带是兜底，不该盖掉真正测出来的抖动。"""
-    from agent import noise
-
-    reports = [{"验证集": {"总行数": 217974, "点击数": 8950, "转化数": 38,
-                          "点击分": 0.55 + i * 0.001, "购买分": 0.45 + i * 0.002}}
-               for i in range(3)]
-    分 = noise.summarize(reports, seeds=[1, 2, 3])["分指标噪声带"]
-    assert 分["购买AUC"] < 0.05          # 实测出了抖动，就不该退回 0.09 的理论带
-
-
 def test_事件流_可以改道到别处(tmp_path, monkeypatch):
     """看板的事件流要能改道，否则测试会往真日志里灌假事件。"""
     from agent import events
@@ -2161,103 +1683,6 @@ def test_事件流_设成空就谁也不写(tmp_path, monkeypatch):
     events.emit("phase", name="绝对不该出现在任何文件里")
     after = events.EVENTS_PATH.stat().st_size if events.EVENTS_PATH.exists() else 0
     assert after == before
-
-
-# ── 导出预测（交付物 #4 的原料）────────────────────────────────
-
-
-def _造无标签测试集(tmp_path, n=120):
-    pd = pytest.importorskip("pandas")
-    import numpy as np
-    rng = np.random.default_rng(7)
-    df = pd.DataFrame({"sample_id": range(10000, 10000 + n),
-                       "101": rng.integers(0, 7, n),
-                       "205": rng.integers(0, 5, n)})
-    p = tmp_path / "test_nolabel.parquet"
-    df.to_parquet(p)
-    return str(p)
-
-
-def test_预测_测试集没有标签也能出预测(tmp_path):
-    """真测试集就是没标签的 —— 这条要是不通，交付物 #4 根本交不出来。"""
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    te = _造无标签测试集(tmp_path)
-    out = RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(te, "全量")
-    assert len(out) == 120
-    assert list(out.columns) == ["sample_id", "ctr", "cvr", "ctcvr"]
-
-
-def test_预测_概率都在0和1之间(tmp_path):
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    te = _造无标签测试集(tmp_path)
-    out = RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(te, "全量")
-    for col in ("ctr", "cvr", "ctcvr"):
-        assert out[col].between(0, 1).all(), f"{col} 跑到 [0,1] 外面去了"
-
-
-def test_预测_ctcvr是两者相乘(tmp_path):
-    """口径写死：cvr 是 P(购买|点击) 这个条件概率，ctcvr 才是 P(点击且购买)。
-    两者混用是这个赛题里最容易犯的错（见 ESMM 卡片）。"""
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    te = _造无标签测试集(tmp_path)
-    out = RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(te, "全量")
-    assert (out["ctcvr"] - out["ctr"] * out["cvr"]).abs().max() < 1e-12
-
-
-def test_预测_sample_id原样带出来(tmp_path):
-    """对不上行就等于没交 —— 顺序和取值都不许动。"""
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    te = _造无标签测试集(tmp_path)
-    out = RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(te, "全量")
-    assert out["sample_id"].tolist() == list(range(10000, 10120))
-
-
-def test_预测_没有sample_id要当场报错(tmp_path):
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    pd = pytest.importorskip("pandas")
-    tr, va = _造数据(tmp_path)
-    bad = tmp_path / "no_id.parquet"
-    pd.DataFrame({"101": [1, 2], "205": [3, 4]}).to_parquet(bad)
-    with pytest.raises(ValueError, match="sample_id"):
-        RealExecutor(tr, va, seed=1, config=_配置()).predict_frame(str(bad), "全量")
-
-
-def test_预测_跟评分走同一条路(tmp_path):
-    """同一份数据，predict_frame 出的 ctr 必须跟评分时用的是同一个模型。
-
-    这条是防"两条路慢慢走岔" —— 导出预测要是自己复制一份训练流程，
-    加特征零件、数组拍平、负采样还原任何一步改了单边，
-    交上去的预测就跟验证时评的不是同一个模型，而且**分数完全正常**，
-    根本看不出来。
-    """
-    need("lightgbm")
-    from harness.executor import RealExecutor
-    from sklearn.metrics import roc_auc_score
-
-    tr, va = _造数据(tmp_path)
-    ex = RealExecutor(tr, va, seed=1, config=_配置())
-    report = ex.run({"new_files": [], "config_patch": {}}, "全量").health_report
-    out = ex.predict_frame(va, "全量")          # 拿验证集当"测试集"再走一遍
-
-    import pandas as pd
-    truth = pd.read_parquet(va)[["sample_id", "click"]]
-    m = out.merge(truth, on="sample_id")
-    assert roc_auc_score(m["click"], m["ctr"]) == pytest.approx(
-        report["验证集"]["点击分"], abs=1e-9)
 
 
 # ────────────────── 审查修掉的问题：回归锁 ──────────────────
@@ -2286,210 +1711,6 @@ def test_落盘失败不该拖垮整场(tmp_path, monkeypatch):
     assert summary.recoveries >= 3                      # 但每次都记了一笔
 
 
-def test_噪声带_按样本量缩放到新档位():
-    """升档只换数据量重训，不重测噪声带 —— 正样本一多抖动就小，
-    沿用起步档位的带子是一把过松的尺子。"""
-    from agent import noise
-
-    小份 = [{"保真度": "小份", "验证集": {"总行数": 218000, "点击数": 8950,
-                                    "转化数": 38, "点击分": 0.61, "购买分": p}}
-           for p in (0.56, 0.60, 0.52)]
-    bands = noise.summarize(小份, [1, 2, 3])
-    assert bands["样本量"]["转化数"] == 38
-
-    放大 = noise.rescale(bands, {"保真度": "全量",
-                               "验证集": {"总行数": 2180000, "点击数": 89500, "转化数": 467}})
-    # 转化样本从 38 涨到 467，购买带必须明显收窄
-    assert 放大["分指标噪声带"]["购买AUC"] < bands["分指标噪声带"]["购买AUC"] / 2
-    assert 放大["分指标噪声带"]["点击AUC"] < bands["分指标噪声带"]["点击AUC"]
-    assert "缩放" in 放大["缩放说明"]
-
-
-def test_噪声带_缺样本量时原样返回并说明():
-    """悄悄用一把错的尺子，比没有尺子更糟。"""
-    from agent import noise
-
-    bands = {"分指标噪声带": {"点击AUC": 0.002}, "样本量": {}}
-    out = noise.rescale(bands, {"验证集": {}})
-    assert out["分指标噪声带"] == bands["分指标噪声带"]
-    assert "没做缩放" in out["缩放说明"]
-
-
-# ── 大数据集不能一次性读进内存（真撞过 OOM）──────────────────────
-#
-# large_25pct 的 train+public_test 加起来两千多万行，predict_frame 整份
-# 读进 16GB 的机器直接被系统强制杀掉（退出码 137）。修法：按可用内存
-# 分批读目标数据，模型只训一次，分批的只是"喂给它做预测的数据"。
-
-
-def _造多分片数据(tmp_path, dirname, n_shards=5, rows_per_shard=20):
-    """造一个"分片目录"——几个小 parquet 文件，模拟真实的 256 片布局。"""
-    pd = pytest.importorskip("pandas")
-    import numpy as np
-    d = tmp_path / dirname
-    d.mkdir()
-    rng = np.random.default_rng(3)
-    for i in range(n_shards):
-        df = pd.DataFrame({
-            "sample_id": range(i * rows_per_shard, (i + 1) * rows_per_shard),
-            "101": rng.integers(0, 7, rows_per_shard),
-            "205": rng.integers(0, 5, rows_per_shard),
-        })
-        df.to_parquet(d / f"part-{i:04d}.parquet")
-    return d
-
-
-def test_分批读取_内存预算够大时一批读完(tmp_path):
-    from harness.executor import read_in_batches
-
-    d = _造多分片数据(tmp_path, "big_enough")
-    批次 = list(read_in_batches(d, budget_bytes=10 * 1024 ** 3))  # 10GB 预算，随便装
-    assert len(批次) == 1
-    assert len(批次[0]) == 5 * 20
-
-
-def test_训练分片_合并前先抽样且正样本全留(tmp_path):
-    pd = pytest.importorskip("pandas")
-    from harness.data import read_training_sample
-
-    path = tmp_path / "train_shards"
-    path.mkdir()
-    for i in range(3):
-        pd.DataFrame({
-            "sample_id": range(i * 100, i * 100 + 100),
-            "click": [1] * 10 + [0] * 90,
-            "conversion": [0] * 100,
-            "101": range(100),
-        }).to_parquet(path / f"part-{i}.parquet")
-
-    out = read_training_sample(path, negative_fraction=0.2, seed=7)
-    assert int(out["click"].sum()) == 30                 # 三片全部正样本都保留
-    assert int((out["click"] == 0).sum()) == 54          # 每片 90 × 20%
-    assert len(out) == 84
-
-
-def test_训练分片_相同种子结果完全一致(tmp_path):
-    pd = pytest.importorskip("pandas")
-    from harness.data import read_training_sample
-
-    path = tmp_path / "deterministic_shards"
-    path.mkdir()
-    for i in range(2):
-        pd.DataFrame({"sample_id": range(i * 50, i * 50 + 50),
-                      "click": [1] * 5 + [0] * 45,
-                      "conversion": [0] * 50}).to_parquet(path / f"part-{i}.parquet")
-    first = read_training_sample(path, 0.25, seed=20260827)
-    second = read_training_sample(path, 0.25, seed=20260827)
-    assert first["sample_id"].tolist() == second["sample_id"].tolist()
-
-
-def test_训练分片_全量比例不丢任何行(tmp_path):
-    pd = pytest.importorskip("pandas")
-    from harness.data import read_training_sample
-
-    path = tmp_path / "full_shards"
-    path.mkdir()
-    for i in range(2):
-        pd.DataFrame({"sample_id": range(i * 20, i * 20 + 20),
-                      "click": [0, 1] * 10,
-                      "conversion": [0] * 20}).to_parquet(path / f"part-{i}.parquet")
-    out = read_training_sample(path, 1.0, seed=3)
-    assert len(out) == 40
-    assert set(out["sample_id"]) == set(range(40))
-
-
-def test_训练分片_只读取模型需要的列(tmp_path):
-    pd = pytest.importorskip("pandas")
-    from harness.data import read_training_sample
-
-    path = tmp_path / "wide_shards"
-    path.mkdir()
-    pd.DataFrame({
-        "sample_id": range(20), "click": [0, 1] * 10,
-        "conversion": [0] * 20, "101": range(20),
-        "巨大未启用对象列": [[str(i)] * 100 for i in range(20)],
-    }).to_parquet(path / "part-0.parquet")
-    columns = ["sample_id", "click", "conversion", "101"]
-    out = read_training_sample(path, 0.5, seed=3, columns=columns)
-    assert list(out.columns) == columns
-    assert "巨大未启用对象列" not in out
-
-
-def test_分批读取_预算小就拆成多批(tmp_path):
-    from harness.executor import read_in_batches
-
-    d = _造多分片数据(tmp_path, "tight")
-    # 量出单个分片的真实大小，预算刚好够 2 个分片
-    import pandas as pd
-    one = pd.read_parquet(sorted(d.glob("*.parquet"))[0])
-    per_shard = int(one.memory_usage(deep=True).sum())
-    批次 = list(read_in_batches(d, budget_bytes=per_shard * 2))
-    assert len(批次) > 1, "预算收紧了却还是一批读完，分批没生效"
-    assert sum(len(b) for b in 批次) == 100          # 行一行没丢
-
-
-def test_分批读取_合起来跟不分批结果一样(tmp_path):
-    """分几批是内存策略，不该影响"读到了什么"——总行数、sample_id 集合必须一致。"""
-    from harness.executor import read_in_batches
-    import pandas as pd
-
-    d = _造多分片数据(tmp_path, "consistency")
-    整批 = pd.concat(list(read_in_batches(d, budget_bytes=10 * 1024 ** 3)), ignore_index=True)
-    分批 = pd.concat(list(read_in_batches(d, budget_bytes=1024)), ignore_index=True)  # 预算小到逼近逐片读
-    assert set(整批["sample_id"]) == set(分批["sample_id"])
-    assert len(整批) == len(分批)
-
-
-def test_分批读取_单个文件不是目录也能读(tmp_path):
-    """不是分片数据集时（单个 parquet 文件），整份当一批——绕不开这个限制，
-    但至少不能报错或漏数据。"""
-    pd = pytest.importorskip("pandas")
-    from harness.executor import read_in_batches
-
-    p = tmp_path / "single.parquet"
-    pd.DataFrame({"sample_id": range(10), "101": range(10)}).to_parquet(p)
-    批次 = list(read_in_batches(p, budget_bytes=1))  # 预算给到 1 字节也没用，文件不可再拆
-    assert len(批次) == 1
-    assert len(批次[0]) == 10
-
-
-def test_可用内存_装不上psutil就退回保守默认(monkeypatch):
-    import builtins
-    from harness import executor
-
-    真实import = builtins.__import__
-
-    def 假装没装(name, *a, **kw):
-        if name == "psutil":
-            raise ImportError("模拟这台机器没装 psutil")
-        return 真实import(name, *a, **kw)
-
-    monkeypatch.setattr(builtins, "__import__", 假装没装)
-    assert executor.available_memory_bytes() == 2 * 1024 ** 3
-
-
-def test_预测_大数据集分批也能出完整预测(tmp_path):
-    """端到端验证：目标数据分成好几个小分片，跟单个大文件相比，
-    分批处理不能丢行、不能变模型——这是真正防回归的那道关卡。"""
-    need("lightgbm")
-    from harness.executor import RealExecutor
-
-    tr, va = _造数据(tmp_path)
-    多分片测试集 = _造多分片数据(tmp_path, "predict_target", n_shards=4, rows_per_shard=15)
-
-    ex = RealExecutor(tr, va, seed=1, config=_配置())
-    # 逼它分很多批：预算小到只够一两个分片
-    import harness.executor as _exec_mod
-    原始函数 = _exec_mod.available_memory_bytes
-    try:
-        _exec_mod.available_memory_bytes = lambda: 200 * 1024   # 极小，逼出多批
-        out = ex.predict_frame(多分片测试集, "全量")
-    finally:
-        _exec_mod.available_memory_bytes = 原始函数
-
-    assert len(out) == 60                               # 4 片 × 15 行，一行不丢
-    assert set(out["sample_id"]) == set(range(60))
-    assert out["ctr"].between(0, 1).all()
 # ────────────────── 深度模型训练路径 ──────────────────
 
 
@@ -2513,62 +1734,6 @@ def _造数据(tmp_path, n_train=1500, n_val=600):
     return str(tmp_path / "train.parquet"), str(tmp_path / "val.parquet")
 
 
-def _深度配置(**deep):
-    return {"features": {"base_fields": ["101", "205"]},
-            "model": {"name": "mlp", "impl": "modules/models/mlp.py",
-                      "mlp": {"hidden": [16], "tower": [8], "dropout": 0.0},
-                      "deep": {"epochs": 3, "batch_size": 256,
-                               "learning_rate": 0.02, **deep}}}
-
-
-def test_深度路径_训得起来并出成绩单(tmp_path):
-    """21 张卡卡在这条路上：模型类卡本身就是神经网络，
-    损失函数类卡只有在梯度下降里才存在，训练策略类卡要挂在 epoch 边界上。"""
-    need("torch")
-    from harness.executor import RealExecutor
-
-    train, val = _造数据(tmp_path)
-    ex = RealExecutor(train, val, seed=7, config=_深度配置())
-    r = ex.run({"new_files": [], "config_patch": ""}, "全量")
-    assert r.ok, r.error
-    rep = r.health_report
-    assert 0.0 < rep["验证集"]["点击分"] < 1.0
-    assert rep["训练集"]["点击分"] is not None        # 医生判「在背题」要用它
-    dt = rep["深度训练"]
-    assert dt["训练轮数"] == 3 and dt["最佳轮次"] >= 1
-    assert [e["轮"] for e in dt["每轮"]] == [1, 2, 3]  # 每轮曲线进日志
-
-
-def test_深度路径_不需要lightgbm(tmp_path, monkeypatch):
-    """深度路径用不到 LightGBM，不该因为这台机器装不上它就跑不了。"""
-    need("torch")
-    from harness.executor import RealExecutor
-
-    train, val = _造数据(tmp_path, 400, 200)
-    ex = RealExecutor(train, val, seed=7, config=_深度配置(epochs=1))
-    # 把 lightgbm 变成一 import 就炸，模拟缺 libomp 的机器
-    import builtins
-    真import = builtins.__import__
-
-    def 拦(name, *a, **kw):
-        if name.startswith("lightgbm"):
-            raise OSError("（演习）libomp 缺失")
-        return 真import(name, *a, **kw)
-
-    monkeypatch.setattr(builtins, "__import__", 拦)
-    assert ex.run({"new_files": [], "config_patch": ""}, "全量").ok
-
-
-def test_深度路径_超参数从配置读(tmp_path):
-    need("torch")
-    from harness.executor import RealExecutor
-
-    train, val = _造数据(tmp_path, 400, 200)
-    ex = RealExecutor(train, val, seed=7, config=_深度配置(epochs=2))
-    r = ex.run({"new_files": [], "config_patch": ""}, "全量")
-    assert r.health_report["深度训练"]["训练轮数"] == 2
-
-
 def test_深度路径_超参数越界被夹回():
     """epochs: 9999 能把一晚上的算力烧光，而 Agent 自己看不出是它干的。"""
     need("torch")
@@ -2588,39 +1753,6 @@ def test_深度路径_设备选择可配置():
     assert select_device(torch, "auto").type in {"cpu", "cuda"}
     with pytest.raises(ValueError, match="auto / cpu / cuda"):
         select_device(torch, "显卡")
-
-
-def test_深度路径_CUDA真实训练并记录设备(tmp_path):
-    need("torch")
-    import torch
-    if not torch.cuda.is_available():
-        pytest.skip("这台机器没有 CUDA")
-    from harness.executor import RealExecutor
-
-    train, val = _造数据(tmp_path, 400, 200)
-    cfg = _深度配置(epochs=1, device="cuda", batch_size=128,
-                    predict_batch_size=128)
-    r = RealExecutor(train, val, seed=7, config=cfg).run(
-        {"new_files": [], "config_patch": ""}, "全量")
-    assert r.ok, r.error
-    dt = r.health_report["深度训练"]
-    assert dt["训练设备"] == "cuda"
-    assert "RTX 4060" in dt["GPU名称"]
-    assert dt["GPU峰值显存_MB"] > 0
-
-
-def test_深度路径_缺impl当场炸而不是悄悄换模型(tmp_path):
-    """静默无视是最坑的形态：一切看起来都跑了，结论却是假的。"""
-    need("torch")
-    from harness.executor import RealExecutor
-
-    cfg = _深度配置()
-    cfg["model"].pop("impl")
-    train, val = _造数据(tmp_path, 300, 150)
-    r = RealExecutor(train, val, seed=7, config=cfg).run(
-        {"new_files": [], "config_patch": ""}, "全量")
-    assert not r.ok and r.unsupported             # 是「跑不了」不是「方法不行」
-    assert "impl" in r.error and "modules/models/" in r.error
 
 
 def test_深度路径_ID词表只在训练集上建():
@@ -2649,32 +1781,6 @@ def test_深度路径_category缺失值和未知值都落OOV():
     encoded = vocab.encode(val)[:, 0].tolist()
     assert encoded[0] != OOV
     assert encoded[1:] == [OOV, OOV]
-
-
-def test_深度路径_导出预测走同一条路(tmp_path):
-    need("torch")
-    from harness.executor import RealExecutor
-
-    train, val = _造数据(tmp_path, 500, 250)
-    ex = RealExecutor(train, val, seed=7, config=_深度配置(epochs=1))
-    out = ex.predict_frame(val, "全量")
-    assert list(out.columns) == ["sample_id", "ctr", "cvr", "ctcvr"]
-    assert len(out) == 250
-    assert ((out.ctr >= 0) & (out.ctr <= 1)).all()
-
-
-def test_深度路径_epoch类训练策略不再被拒():
-    """早停、SWA 这些是挂在 epoch 边界的回调 —— LightGBM 那条路没有轮次，
-    深度路径有，就该放行。"""
-    need("torch")
-    from harness.executor import check_supported
-
-    深度 = {"model": {"name": "mlp", "impl": "modules/models/mlp.py"},
-           "train": {"swa": {"enabled": True}}}
-    check_supported(深度)                                   # 不该抛
-
-    with pytest.raises(ValueError, match="没有 epoch 循环"):
-        check_supported({"model": {"name": "lightgbm"}, "train": {"swa": {"enabled": True}}})
 
 
 # ────────────────── 军师自己写落地草图 ──────────────────
@@ -2977,78 +2083,6 @@ def test_医生_报太多条会被打回(vocab):
 # 而那张卡治的是医生排第 2、第 3 的两个病。
 
 
-def _造分片数据(tmp_path, 片数=3, 每片=40):
-    """造一个多分片目录 —— 估算函数要靠"抽一片再外推"，单文件它会主动弃权。"""
-    pd = pytest.importorskip("pandas")
-    import numpy as np
-    rng = np.random.default_rng(0)
-    d = tmp_path / "train"
-    d.mkdir()
-    for i in range(片数):
-        pd.DataFrame({
-            "sample_id": range(i * 每片, (i + 1) * 每片),
-            "101": rng.integers(0, 7, 每片),
-            "205": rng.integers(0, 5, 每片),
-            "click": rng.integers(0, 2, 每片),
-            "conversion": np.zeros(每片, dtype=int),
-        }).to_parquet(d / f"part-{i:03d}.parquet")
-    return d
-
-
-def test_内存不够时报的是兑现不了而不是跑崩了(tmp_path, monkeypatch):
-    need("pandas")
-    from harness import executor as ex_mod
-
-    d = _造分片数据(tmp_path)
-    ex = ex_mod.RealExecutor(str(d), str(d), seed=1,
-                             config={"features": {"base_fields": ["101", "205"]},
-                                     "model": {"name": "lightgbm"}, "train": {}})
-    # 假装这台机器只剩 1KB —— 任何数据都装不下
-    monkeypatch.setattr(ex_mod, "available_memory_bytes", lambda: 1024)
-    with pytest.raises(ex_mod.UnsupportedByExecutor) as e:
-        ex._guard_memory(d, ["sample_id", "101", "205", "click", "conversion"])
-    说明 = str(e.value)
-    assert "不是方法不行" in 说明          # 军师和复盘官都要读得懂这句
-    assert "G" in 说明                      # 要给出具体数字，别只说"内存不够"
-
-
-def test_内存够就放行(tmp_path, monkeypatch):
-    need("pandas")
-    from harness import executor as ex_mod
-
-    d = _造分片数据(tmp_path)
-    ex = ex_mod.RealExecutor(str(d), str(d), seed=1, config={})
-    monkeypatch.setattr(ex_mod, "available_memory_bytes", lambda: 8 * 1024 ** 3)
-    ex._guard_memory(d, ["sample_id", "101", "click"])      # 不该抛
-
-
-def test_估不出来就不拦(tmp_path, monkeypatch):
-    """单个文件没法便宜地抽样。不确定的时候放行，别把能跑的挡在门外。"""
-    need("pandas")
-    import pandas as pd
-    from harness import executor as ex_mod
-
-    f = tmp_path / "train.parquet"
-    pd.DataFrame({"sample_id": [1, 2], "101": [3, 4], "click": [0, 1]}).to_parquet(f)
-    assert ex_mod.estimate_read_bytes(f, ["101"]) == (0, 0)
-    ex = ex_mod.RealExecutor(str(f), str(f), seed=1, config={})
-    monkeypatch.setattr(ex_mod, "available_memory_bytes", lambda: 1)
-    ex._guard_memory(f, ["101"])                            # 估不出来 → 放行
-
-
-def test_多值列认得出来(tmp_path):
-    """内存大头就是它们，报错信息要点名，否则看的人不知道该砍哪几列。"""
-    need("pandas")
-    import pandas as pd
-    from harness import executor as ex_mod
-
-    d = tmp_path / "shards"
-    d.mkdir()
-    pd.DataFrame({"101": [1, 2], "109_14": [[1, 2], [3]], "click": [0, 1]}
-                 ).to_parquet(d / "part-000.parquet")
-    assert ex_mod.list_columns_of(d) == {"109_14"}
-
-
 def test_兑现不了的不扣卡片信任分():
     """这条已经有测试盖着记账逻辑，这里钉住「内存不够」也走同一条路。"""
     from agent.loop import PriorLedger, RunResult
@@ -3271,88 +2305,6 @@ def test_没历史时不塞空块(vocab, cards):
     assert "最近几轮发生了什么" not in 看到的["user"]
 
 
-# ── 单值的多值列，在 Arrow 层就压成标量 ──────────────────────────
-#
-# pandas 里一个多值列是「每行一个 Python 对象」，光对象头就约 110 字节/行，
-# 跟里面装几个元素无关 —— 一个 85% 都是空数组的列，代价跟装满的一样。
-# 真数据上三个这样的列要吃十几 G，压成 int64 之后不到 1 G。
-
-
-def _造带多值列的分片(tmp_path, 片数=2, 每片=50):
-    pd = pytest.importorskip("pandas")
-    import numpy as np
-    rng = np.random.default_rng(0)
-    d = tmp_path / "shards"
-    d.mkdir()
-    for i in range(片数):
-        pd.DataFrame({
-            "sample_id": range(i * 每片, (i + 1) * 每片),
-            "101": rng.integers(0, 5, 每片),
-            # 单值：有的行是空数组 —— 空的含义是「没有交集」，不是缺失
-            "508": [[int(v)] if v % 3 else [] for v in rng.integers(0, 9, 每片)],
-            # 真多值：长度不定，动不了
-            "109_14": [list(range(int(k))) for k in rng.integers(0, 6, 每片)],
-            "click": rng.integers(0, 2, 每片),
-        }).to_parquet(d / f"part-{i:03d}.parquet")
-    return d
-
-
-def test_单值多值列被压成标量(tmp_path):
-    need("pandas")
-    from harness.data import EMPTY_TOKEN, read_any
-
-    df = read_any(_造带多值列的分片(tmp_path))
-    assert df["508"].map(lambda v: hasattr(v, "__len__")).sum() == 0, "508 应该已经是标量"
-    assert EMPTY_TOKEN in set(df["508"]), "空数组要映射成专门的类别，不是丢掉"
-    # 真多值不能动 —— 硬压成单值会丢信息，那是编码零件的活
-    assert df["109_14"].map(lambda v: hasattr(v, "__len__")).all()
-
-
-def test_压平之后行数和对齐都不变(tmp_path):
-    """空数组那些行必须留在原位，不能被 list_flatten 悄悄挤掉。"""
-    need("pandas")
-    import pandas as pd
-    from harness.data import read_any
-
-    d = _造带多值列的分片(tmp_path)
-    df = read_any(d)
-    原 = pd.concat([pd.read_parquet(f) for f in sorted(d.glob("*.parquet"))],
-                   ignore_index=True)
-    assert len(df) == len(原)
-    assert list(df["sample_id"]) == list(原["sample_id"])
-    非空 = 原["508"].map(len) > 0
-    assert (df.loc[非空, "508"].to_numpy()
-            == 原.loc[非空, "508"].map(lambda v: v[0]).to_numpy()).all()
-
-
-def test_压平省下的内存是数量级的(tmp_path):
-    need("pandas")
-    import pandas as pd
-    from harness.data import read_any
-
-    d = _造带多值列的分片(tmp_path, 片数=4, 每片=2000)
-    压过 = read_any(d, columns=["sample_id", "101", "508", "click"])
-    原样 = pd.concat([pd.read_parquet(f, columns=["sample_id", "101", "508", "click"])
-                     for f in sorted(d.glob("*.parquet"))], ignore_index=True)
-    省 = 原样["508"].memory_usage(deep=True) / 压过["508"].memory_usage(deep=True)
-    assert 省 > 5, f"只省了 {省:.1f} 倍，压平大概没生效"
-
-
-def test_内存守卫也护验证集(tmp_path, monkeypatch):
-    """以前只护训练集。但验证集可能比训练集还大（小训练集 + 大验证集
-    是完全合理的配法），护一边等于没护。"""
-    need("pandas")
-    from harness import executor as ex_mod
-
-    d = _造带多值列的分片(tmp_path, 片数=3, 每片=100)
-    ex = ex_mod.RealExecutor(str(d), str(d), seed=1,
-                             config={"features": {"base_fields": ["101"]},
-                                     "model": {"name": "lightgbm"}, "train": {}})
-    monkeypatch.setattr(ex_mod, "available_memory_bytes", lambda: 1024)
-    with pytest.raises(ex_mod.UnsupportedByExecutor):
-        ex._guard_memory(d, ["sample_id", "101", "109_14"])
-
-
 # ── 工兵拿到的范文必须对得上它要写的东西 ────────────────────────
 #
 # 真跑撞出来的：第 4 轮工兵写 FinalMLP（模型类），却拿到了「训练」类的范文
@@ -3552,8 +2504,7 @@ def test_加特征零件都声明了needs():
     pytest.importorskip("pandas")
     from harness.ops import load_op_class as _load_op_class_by
 
-    for name in ("target_encoding", "sequence_summary", "category_fallback",
-                 "frequency_bucket"):
+    for name in ("target_encoding", "category_fallback", "frequency_bucket"):
         path = pathlib.Path("modules/features") / f"{name}.py"
         if not path.exists():
             continue

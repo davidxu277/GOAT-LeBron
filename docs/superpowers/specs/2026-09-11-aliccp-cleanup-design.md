@@ -16,7 +16,7 @@ KuaiRand 的路（`kuairand_goat_bridge/`），旧的 AliCCP 流水线一直没�
 | 类别 | 内容 | 处理 |
 |---|---|---|
 | 共用 | `harness/executor.py` 的 `_load_op_class_by`、`load_feature_ops`、`apply_feature_ops`（deep.py 和 goat_trainer 在用） | 挪到 `harness/ops.py` |
-| AliCCP 专用代码 | `harness/executor.py` 其余部分（RealExecutor、内存守卫、LightGBM、recalibrate…）、`harness/data.py`、`agent/noise.py`；`agent/cli.py` 的 round / run 真跑路径 / predict / restore / finalize / noise；`config/pipeline.yaml`、`config/pipeline.before-agent.yaml`；`modules/features/sequence_summary.py`、`modules/features/item_frequency.py`、`modules/models/mlp_aitm.py`、`modules/train/compliance_gate.py` | 删 |
+| AliCCP 专用代码 | `harness/executor.py` 其余部分（RealExecutor、内存守卫、LightGBM、recalibrate…）、`harness/data.py`、`agent/noise.py` 的 `measure`（用旧执行器反复跑来量噪声）；`agent/cli.py` 的 round / run 真跑路径 / predict / restore / finalize / noise；`config/pipeline.yaml`、`config/pipeline.before-agent.yaml`；`modules/features/sequence_summary.py`、`modules/features/item_frequency.py`、`modules/models/mlp_aitm.py`、`modules/train/compliance_gate.py` | 删 |
 | AliCCP 格式的练习材料 | `agent/offline.py`（ScriptedLLM、DriftingExecutor）、`agent/fixtures/health_reports.yaml`、`agent/fixtures/假成绩单_5份.md` | 改成 KuaiRand 成绩单格式 |
 | agent 核心的兼容分支 | `schemas.METRIC_PAIRS` 的 AliCCP 一套、`roles._MAIN_METRIC_KEYS` 的「点击分」、`roles.FORBIDDEN_FIELDS` 的 AliCCP 五个、loop 里"旧成绩单没有主分就退回双指标"一类退路 | 材料换完后删 |
 | 测试（test_offline.py 244 个） | 74 个只测 AliCCP 专用代码；61 个测通用逻辑但用 AliCCP 格式假数据；109 个无关 | 跟着删 / 改格式保留 / 不动 |

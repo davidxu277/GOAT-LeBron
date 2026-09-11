@@ -295,30 +295,3 @@ def rescale(bands: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
     out["缩放说明"] = (f"按样本量从「{bands.get('保真度') or '?'}」缩放到"
                     f"「{out['保真度'] or '?'}」：" + "；".join(说明))
     return out
-
-
-def measure(*, train: str, val_features: str, val_labels: str | None,
-            seeds: list[int], fidelity: str,
-            out_path: pathlib.Path | None = None) -> dict[str, Any]:
-    """真跑 N 次，量出噪声带。除了种子，什么都不改。"""
-    from harness.executor import RealExecutor
-
-    reports = []
-    for seed in seeds:
-        print(f"  种子 {seed} 跑中……", flush=True)
-        ex = RealExecutor(train, val_features, val_labels, seed=seed)
-        result = ex.run({"new_files": [], "config_patch": ""}, fidelity)
-        if not result.ok:
-            print(f"  ⚠️ 种子 {seed} 失败：{result.error}")
-            continue
-        reports.append(result.health_report)
-
-    if len(reports) < 2:
-        raise SystemExit("至少要有 2 次成功运行才能量抖动")
-
-    bands = summarize(reports, seeds[:len(reports)])
-    if out_path is not None:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(bands, ensure_ascii=False, indent=1), encoding="utf-8")
-        print(f"\n已写入 {out_path} —— 复盘官和医生下次跑会自动读它")
-    return bands

@@ -137,26 +137,6 @@ def feature_spec(vocab: Vocab, embed_dim: int) -> dict[str, Any]:
     }
 
 
-def _default_loss(out: dict[str, Any], click, conv, torch) -> Any:
-    """没有自定义损失时的默认口径 —— 跟 LightGBM 那条路语义一致，分数才可比。
-
-        点击塔：全部曝光上的 BCE
-        购买塔：**只在点击过的行上**算 BCE（P(购买|点击) 的定义）
-
-    想换打分规则的零件，自己实现 `loss(out, batch, torch)` 方法覆盖它 ——
-    那正是「损失函数」类卡片存在的意义（优先级见 train_deep）。
-    """
-    bce = torch.nn.functional.binary_cross_entropy
-    eps = 1e-7
-    ctr = out["ctr"].clamp(eps, 1 - eps)
-    loss = bce(ctr, click)
-    mask = click > 0.5
-    if mask.any():
-        cvr = out["cvr"].clamp(eps, 1 - eps)
-        loss = loss + bce(cvr[mask], conv[mask])
-    return loss
-
-
 def load_model_op(config: dict[str, Any]) -> Any:
     """按 model.impl 指路加载模型零件。跟 FeatureOp 同一套规矩。"""
     from .ops import load_op_class
@@ -227,17 +207,17 @@ def load_train_ops(config: dict[str, Any]) -> list[tuple[str, Any]]:
 
 def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
                features: list[str], seed: int,
-               task_loss: Any = None, task_metric: Any = None,
+               task_loss: Any, task_metric: Any,
                ) -> tuple[Any, Any, dict[str, Any]]:
     """训一个深度模型，返回 (模型零件, 训好的模型, 训练过程记录)。
 
     整个循环归我们管，模型长什么样归零件管 —— 这就是考场和考生的分界。
 
-    task_loss / task_metric 让这套循环脱离具体任务：
+    task_loss / task_metric 由任务提供（KuaiRand 的在 goat_trainer 里）：
         task_loss(out, batch_df, torch)          -> 标量张量
         task_metric(op, model, vocab, val_df)    -> {"指标名": 值, ...}（第一个是主指标）
-    不给就用默认的双塔口径，行为跟以前完全一致。
-    换任务（比如 KuaiRand 的用户内排序）只需换这两个函数 ——
+    以前不给就退回 AliCCP 的双塔口径，那条默认路径随旧任务一起拆了。
+    换任务只需换这两个函数 ——
     ID 词表、embedding 表、epoch 循环、TrainOp 回调、最佳权重回滚，全部照用。
     """
     import torch
@@ -262,28 +242,16 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
                         f"拿到的是 {type(model).__name__}")
 
     model = model.to(device)
-    # AliCCP 很大：完整训练张量留在 CPU，每个 batch 才送入显卡，避免 8GB 显存 OOM。
+    # 完整训练张量留在 CPU，每个 batch 才送入显卡，避免显存 OOM。
     x = torch.tensor(vocab.encode(train), dtype=torch.long)
-    # 双塔标签只有默认损失才用得上。给了任务级损失就跳过 ——
-    # 别的任务（KuaiRand 只有一个 long_view）根本没有这两列。
-    if task_loss is None:
-        click = torch.tensor(train["click"].to_numpy(), dtype=torch.float32)
-        conv = torch.tensor(train["conversion"].to_numpy(), dtype=torch.float32)
-    else:
-        click = conv = torch.zeros(len(train), dtype=torch.float32)
     model._goat_predict_batch_size = kw["predict_batch_size"]
     opt = torch.optim.Adam(model.parameters(), lr=kw["learning_rate"],
                            weight_decay=kw["weight_decay"])
     loss_fn = getattr(op, "loss", None)
-    # 谁明确写了打分规则就听谁的：零件 > 任务默认 > 双塔默认。
+    # 谁明确写了打分规则就听谁的：零件的 loss 优先于任务默认。
     # 以前任务默认排在零件前面 —— KuaiRand 总是传 task_loss，零件写的 loss
     # 被静默忽略，配对排序、时间衰减两张卡因此一直落不了地。
-    if callable(loss_fn):
-        损失来源 = f"模型零件 {type(op).__name__}.loss"
-    elif task_loss is not None:
-        损失来源 = "任务默认"
-    else:
-        损失来源 = "双塔默认"
+    损失来源 = f"模型零件 {type(op).__name__}.loss" if callable(loss_fn) else "任务默认"
 
     device_name = (torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU")
     emit("phase", name="训练设备", detail=f"{device.type} · {device_name}")
@@ -304,24 +272,19 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
         for start in range(0, n, kw["batch_size"]):
             idx = order[start:start + kw["batch_size"]]
             batch_x = x[idx].to(device, non_blocking=True)
-            batch_click = click[idx].to(device, non_blocking=True)
-            batch_conv = conv[idx].to(device, non_blocking=True)
             out = model(batch_x)
+            batch = train.iloc[idx.numpy()]
             if callable(loss_fn):                     # 零件明确写了打分规则 —— 听它的
                 # 给整张表而不是两个标签张量：配对要 user_id，时间衰减要 date
-                loss = loss_fn(out, train.iloc[idx.numpy()], torch)
-            elif task_loss is not None:               # 任务默认（KuaiRand：逐条 BCE）
-                loss = task_loss(out, train.iloc[idx.numpy()], torch)
-            else:
-                loss = _default_loss(out, batch_click, batch_conv, torch)
+                loss = loss_fn(out, batch, torch)
+            else:                                     # 任务默认（KuaiRand：逐条 BCE）
+                loss = task_loss(out, batch, torch)
             opt.zero_grad()
             loss.backward()
             opt.step()
             总损失 += float(loss.detach().cpu()) * len(idx)
 
-        metrics = (task_metric(op, model, vocab, val) if task_metric is not None
-                   else _eval_epoch(op, model, vocab, val, torch,
-                                    batch_size=kw["predict_batch_size"]))
+        metrics = task_metric(op, model, vocab, val)
         metrics["loss"] = round(总损失 / max(1, n), 6)
         # 评分函数返回的第一个指标就是主指标 —— 换任务只换评分函数，这里不用动
         主指标 = next(k for k in metrics if k != "loss")
@@ -360,21 +323,6 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
         "自动分档的列": vocab.binned_fields,
         "_vocab": vocab,
     }
-
-
-def _eval_epoch(op: Any, model: Any, vocab: Vocab, val: pd.DataFrame, torch,
-                batch_size: int) -> dict[str, float]:
-    """每轮结束在验证集上算一次分 —— TrainOp 拿它决定要不要停（R3：绝不碰锁定集）。"""
-    from sklearn.metrics import roc_auc_score
-
-    ctr, cvr = predict_deep(op, model, vocab, val, torch, batch_size=batch_size)
-    out = {"点击分": 0.5, "购买分": 0.5}
-    if val["click"].nunique() > 1:
-        out["点击分"] = float(roc_auc_score(val["click"], ctr))
-    clicked = val["click"] == 1
-    if clicked.any() and val.loc[clicked, "conversion"].nunique() > 1:
-        out["购买分"] = float(roc_auc_score(val.loc[clicked, "conversion"], cvr[clicked.to_numpy()]))
-    return {k: round(v, 6) for k, v in out.items()}
 
 
 def predict_deep(op: Any, model: Any, vocab: Vocab, df: pd.DataFrame, torch=None,
