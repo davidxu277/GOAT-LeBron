@@ -87,6 +87,18 @@ class ModelOp(Protocol):
         报分时在哪些记录上算也由评估代码决定（见 CLAUDE.md 第五节）。
         """
 
+    def loss(self, out: dict[str, Any], batch: Any, torch: Any) -> Any:
+        """【可选】换打分规则 —— 写了它，训练循环就用它，而不是任务默认的损失。
+
+        out    predict() 这一批的返回值
+        batch  这一批的 **DataFrame**，带全部列：KuaiRand 是 user_id、date、label
+               和所有特征列 —— 配对排序按 user_id 找同一用户的对，时间衰减按 date 算权重
+        torch  torch 模块本身
+
+        返回一个标量张量。成绩单「训练诊断」里的「损失来源」会写明这一轮用的是谁的。
+        最省事的写法：继承 modules/models/mlp.py 的 MLPModel，只加这一个方法。
+        """
+
 
 class TrainOp(Protocol):
     """改训练过程类零件 —— 早停、权重平均、学习率调度、梯度裁剪等。

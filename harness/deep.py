@@ -143,8 +143,8 @@ def _default_loss(out: dict[str, Any], click, conv, torch) -> Any:
         点击塔：全部曝光上的 BCE
         购买塔：**只在点击过的行上**算 BCE（P(购买|点击) 的定义）
 
-    想改成全曝光空间建模（ESMM 那套）的零件，自己实现 `loss` 方法覆盖它 ——
-    那正是「损失函数」类卡片存在的意义。
+    想换打分规则的零件，自己实现 `loss(out, batch, torch)` 方法覆盖它 ——
+    那正是「损失函数」类卡片存在的意义（优先级见 train_deep）。
     """
     bce = torch.nn.functional.binary_cross_entropy
     eps = 1e-7
@@ -275,6 +275,15 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
     opt = torch.optim.Adam(model.parameters(), lr=kw["learning_rate"],
                            weight_decay=kw["weight_decay"])
     loss_fn = getattr(op, "loss", None)
+    # 谁明确写了打分规则就听谁的：零件 > 任务默认 > 双塔默认。
+    # 以前任务默认排在零件前面 —— KuaiRand 总是传 task_loss，零件写的 loss
+    # 被静默忽略，配对排序、时间衰减两张卡因此一直落不了地。
+    if callable(loss_fn):
+        损失来源 = f"模型零件 {type(op).__name__}.loss"
+    elif task_loss is not None:
+        损失来源 = "任务默认"
+    else:
+        损失来源 = "双塔默认"
 
     device_name = (torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU")
     emit("phase", name="训练设备", detail=f"{device.type} · {device_name}")
@@ -298,10 +307,11 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
             batch_click = click[idx].to(device, non_blocking=True)
             batch_conv = conv[idx].to(device, non_blocking=True)
             out = model(batch_x)
-            if task_loss is not None:                 # 调用方给的任务级损失
+            if callable(loss_fn):                     # 零件明确写了打分规则 —— 听它的
+                # 给整张表而不是两个标签张量：配对要 user_id，时间衰减要 date
+                loss = loss_fn(out, train.iloc[idx.numpy()], torch)
+            elif task_loss is not None:               # 任务默认（KuaiRand：逐条 BCE）
                 loss = task_loss(out, train.iloc[idx.numpy()], torch)
-            elif loss_fn is not None:                 # 零件自带的损失（ESMM 那类）
-                loss = loss_fn(out, batch_click, batch_conv)
             else:
                 loss = _default_loss(out, batch_click, batch_conv, torch)
             opt.zero_grad()
@@ -344,6 +354,8 @@ def train_deep(config: dict[str, Any], train: pd.DataFrame, val: pd.DataFrame,
         "GPU名称": device_name if device.type == "cuda" else "",
         "GPU峰值显存_MB": peak_mb,
         "装上的训练零件": [name for name, _ in train_ops],
+        # 改了打分规则却没效果时，先看这一轮到底用的是谁的
+        "损失来源": 损失来源,
         # 一个统计特征加了没效果，头一件要确认的就是它有没有被当成连续值分档
         "自动分档的列": vocab.binned_fields,
         "_vocab": vocab,
