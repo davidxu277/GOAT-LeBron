@@ -534,6 +534,20 @@ def _crashed_reflection(chosen: dict[str, Any] | None, error: str,
     }
 
 
+# 试跑挂了之后，同一个方案最多再让工兵改几次；交回工兵的报错留多长。
+# traceback 可能几百行，有用的是最后那几行（哪个文件哪一行、什么错）；整段塞进去会把提示词撑爆。
+SMOKE_RETRIES = 2
+_SMOKE_TAIL_LINES = 40
+_SMOKE_TAIL_CHARS = 4000
+
+
+def _smoke_feedback(error: str) -> str:
+    """把试跑的报错裁成交回工兵的那一段：最后 40 行、上限 4000 字，前面说清楚这是什么。"""
+    tail = "\n".join(str(error).splitlines()[-_SMOKE_TAIL_LINES:])[-_SMOKE_TAIL_CHARS:]
+    return ("你交的代码在一小份数据上试跑时崩了（还没开始正式训练，没占训练名额）。"
+            "下面是报错的最后一段，改好再交：\n" + tail)
+
+
 def run_round(
     *,
     round_id: int,
@@ -616,33 +630,58 @@ def run_round(
     log.chosen, log.fidelity = chosen, fidelity_override or fidelity
 
     # ③ 工兵（失败可重试，再失败换备胎）
+    #
+    # 执行器有 smoke 就先试跑：极小一份数据、1 轮，不占训练名额。挂了把 traceback
+    # 尾巴交回工兵，同一个方案最多再改 SMOKE_RETRIES 次。以前训练崩了的报错从来
+    # 没回到工兵手里 —— 那一轮直接作废、占掉一个名额，卡片还被记「没跑起来」。
+    smoke = getattr(executor, "smoke", None)
     queue = [chosen, *backups]
     patch = None
     last_error = ""
+    试跑拦下 = False
     for candidate in queue:
+        name = candidate["card_id"] or "自创"
         card = cards.get(candidate["card_id"]) if candidate["card_id"] else None
         # example_module 可以是字符串，也可以是「按环节取范文」的函数 ——
         # 改训练过程的方案看训练类范文，加特征的看特征类范文，产出质量差很多
         example = (example_module(card.stage if card else "")
                    if callable(example_module) else example_module)
-        try:
-            patch = roles.implement(
-                llm, candidate, card, module_interface, example,
-                current_config, last_error=last_error,
-                # 让工兵的 monitor 校验跟着本轮成绩单走，而不是写死一套名字
-                health_report=health_report,
-            )
+        for 第几次 in range(1, 2 + (SMOKE_RETRIES if callable(smoke) else 0)):
+            try:
+                patch = roles.implement(
+                    llm, candidate, card, module_interface, example,
+                    current_config, last_error=last_error,
+                    # 让工兵的 monitor 校验跟着本轮成绩单走，而不是写死一套名字
+                    health_report=health_report,
+                )
+            except SchemaViolation as exc:
+                patch, last_error = None, str(exc)
+                log.recoveries.append(f"工兵实现失败（{name}）：{exc}")
+                break
+            except Exception as exc:             # noqa: BLE001 —— 网络抖动等
+                patch, last_error = None, str(exc)
+                log.recoveries.append(f"工兵调用出错（{name}）：{exc}")
+                break
+            if not callable(smoke):
+                break
+            试跑 = _guard(log, "试跑", smoke, patch)
+            if 试跑 is None or 试跑.ok:       # 试跑本身坏了不拦着 —— 正式训练会给出真结论
+                break
+            试跑拦下 = True
+            首行 = (试跑.error.splitlines() or [""])[0]
+            log.recoveries.append(f"试跑没过（{name}，第 {第几次} 次）：{首行}")
+            patch = None
+            if 试跑.unsupported:              # 流水线兑现不了，工兵改代码改不出来 → 换备胎
+                last_error = 试跑.error
+                break
+            last_error = _smoke_feedback(试跑.error)
+        if patch is not None:
             log.chosen = candidate
             break
-        except SchemaViolation as exc:
-            last_error = str(exc)
-            log.recoveries.append(f"工兵实现失败（{candidate['card_id'] or '自创'}）：{exc}")
-        except Exception as exc:                 # noqa: BLE001 —— 网络抖动等
-            last_error = str(exc)
-            log.recoveries.append(f"工兵调用出错（{candidate['card_id'] or '自创'}）：{exc}")
 
     if patch is None:
-        log.recoveries.append("所有方案都实现失败，本轮放弃")
+        log.recoveries.append("所有方案都实现失败，本轮放弃"
+                              + ("（试跑拦下的，没占训练名额）" if 试跑拦下 else ""))
         return finish()
 
     log.patch_summary = {
