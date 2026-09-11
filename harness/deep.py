@@ -72,26 +72,57 @@ class Vocab:
 
     ⚠️ **只在训练集上建**（R2）。验证集里没见过的 ID 落到 OOV 槽，
     而不是给它一个新编号 —— 后者等于偷看了验证集里有哪些 ID。
+
+    连续值（Agent 写的目标编码、看完率这类小数）不能按取值编号：训练集和验证集
+    算出来的数几乎对不上，实测验证集 37% 的行落进 OOV。给了 numeric_bins，
+    浮点列且取值多于档数的，就按**训练集**分位数切档，验证/测试沿用同一套边界。
+    从 dtype 认，不靠零件声明、也不靠工兵记得自己分档。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, numeric_bins: int | None = None) -> None:
         self.maps: dict[str, dict[Any, int]] = {}
+        self.edges: dict[str, np.ndarray] = {}      # 被分档的列 → 训练集分位数边界
+        self.numeric_bins = numeric_bins
+
+    @property
+    def binned_fields(self) -> list[str]:
+        return list(self.edges)
+
+    def _is_continuous(self, col: pd.Series) -> bool:
+        return (self.numeric_bins is not None
+                and pd.api.types.is_float_dtype(col)
+                and col.nunique(dropna=True) > self.numeric_bins)
 
     def fit(self, df: pd.DataFrame, fields: list[str]) -> "Vocab":
         for f in fields:
-            # 0 号留给 OOV，所以从 1 开始编
-            self.maps[f] = {v: i + 1 for i, v in enumerate(df[f].dropna().unique())}
+            col = df[f]
+            if self._is_continuous(col):
+                qs = np.linspace(0, 1, self.numeric_bins + 1)[1:-1]
+                self.edges[f] = np.unique(np.nanquantile(col.to_numpy(dtype=float), qs))
+                self.maps[f] = {b: b + 1 for b in range(len(self.edges[f]) + 1)}
+            else:
+                # 0 号留给 OOV，所以从 1 开始编
+                self.maps[f] = {v: i + 1 for i, v in enumerate(col.dropna().unique())}
         return self
 
     def sizes(self) -> dict[str, int]:
         return {f: len(m) + 1 for f, m in self.maps.items()}
 
     def encode(self, df: pd.DataFrame) -> np.ndarray:
-        # executor 会把离散特征转成 pandas category。直接在 category 上 map 后
-        # fillna(OOV) 会报“Cannot setitem on a Categorical with a new category (0)”；
-        # 先转 object，映射结果就是普通数值 Series，缺失值/未见 ID 才能安全落 OOV。
-        cols = [df[f].astype("object").map(self.maps[f]).fillna(OOV)
-                .astype("int64").to_numpy() for f in self.maps]
+        cols = []
+        for f in self.maps:
+            if f in self.edges:
+                v = df[f].to_numpy(dtype=float)
+                # 超出训练范围的值落到两端的档，只有 NaN 落 OOV
+                code = np.searchsorted(self.edges[f], v, side="right") + 1
+                code[np.isnan(v)] = OOV
+                cols.append(code.astype("int64"))
+            else:
+                # executor 会把离散特征转成 pandas category。直接在 category 上 map 后
+                # fillna(OOV) 会报“Cannot setitem on a Categorical with a new category (0)”；
+                # 先转 object，映射结果就是普通数值 Series，缺失值/未见 ID 才能安全落 OOV。
+                cols.append(df[f].astype("object").map(self.maps[f]).fillna(OOV)
+                            .astype("int64").to_numpy())
         return np.stack(cols, axis=1) if cols else np.zeros((len(df), 0), dtype="int64")
 
 
