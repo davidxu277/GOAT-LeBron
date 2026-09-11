@@ -311,6 +311,21 @@ def validate_task(
     return config
 
 
+def _implementer_materials(profile: pathlib.Path) -> tuple[str, Any]:
+    """工兵看到的两份材料：零件接口说明 + 按方案环节取的范文。
+
+    以前范文写死成 examples/tunable_popularity_trainer.py —— 那是 KuaiRand 只能
+    调配置时的热度 trainer。换成能写零件的 goat_trainer 之后，同一个函数里的
+    「流水线说明」修好了，范文却没人回来改：工兵提示词里「范文：一个现成的零件」
+    那一节放的是一个只有 model.prior 旋钮、跟零件接口毫无关系的脚本。
+    现在跟 agent.cli 用同一个 example_for，只有一份。
+    """
+    from agent.roles import example_for
+
+    interface = (profile / "modules" / "base.py").read_text(encoding="utf-8")
+    return interface, example_for
+
+
 def _render_pipeline(
     config: dict[str, Any],
     executor: "KuaiRandGoatExecutor",
@@ -539,20 +554,7 @@ def run(
     # 军师于是整轮整轮地推理一个根本不存在的模型：该不该给
     # item_popularity 上 SWA、prior 能不能调到 200 —— 而那个键在 FM Trainer
     # 里压根没有，提上去必被拒。开药的人拿到的是别人的病历。
-    interface = (
-        profile
-        / "modules"
-        / "base.py"
-    ).read_text(
-        encoding="utf-8"
-    )
-    example = (
-        BRIDGE_ROOT
-        / "examples"
-        / "tunable_popularity_trainer.py"
-    ).read_text(
-        encoding="utf-8"
-    )
+    interface, example = _implementer_materials(profile)
 
     pipeline = _render_pipeline(
         config,

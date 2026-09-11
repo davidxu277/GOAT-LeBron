@@ -107,6 +107,26 @@ def existing_modules_block() -> str:
     return "\n".join(lines) or "  （目前一个都没有）"
 
 
+# 工兵的范文按方案所属环节取：改模型看 mlp.py、改训练过程看早停、加特征看频次分桶。
+# 只在这里定义一份 —— 以前 agent.cli 有一份按环节取的，goat_run（真跑）却写死了
+# 一个「只能调配置」时代的热度 trainer，两份各走各的，真跑用的是过期那份。
+_EXAMPLES = {
+    # ⚠️ 顺序有意义：example_for 按「卡片的环节名里含哪个关键字」取第一个命中的。
+    # 「模型」必须排在前面 —— 不少卡的环节是「模型 + 训练策略」这种复合写法。
+    "模型": REPO_ROOT / "modules" / "models" / "mlp.py",
+    "训练": REPO_ROOT / "modules" / "train" / "early_stopping.py",
+    "特征": REPO_ROOT / "modules" / "features" / "frequency_bucket.py",
+}
+
+
+def example_for(stage: str) -> str:
+    """按环节挑范文。找不到对应的就用训练类那份（注释最全）。"""
+    for key, path in _EXAMPLES.items():
+        if key in (stage or "") and path.exists():
+            return path.read_text(encoding="utf-8")
+    return _EXAMPLES["训练"].read_text(encoding="utf-8")
+
+
 def _check_config_patch(text: str) -> None:
     """配置补丁必须是能解析的 YAML，且只碰 ALLOWED_CONFIG_ROOTS 那几棵子树。
 

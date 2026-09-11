@@ -46,21 +46,8 @@ FIXTURES = ROOT / "agent" / "fixtures" / "health_reports.yaml"
 INTERFACE_SPEC = (ROOT / "modules" / "base.py").read_text(encoding="utf-8")
 PIPELINE_CONFIG = (ROOT / "config" / "pipeline.yaml").read_text(encoding="utf-8")
 
-_EXAMPLES = {
-    # ⚠️ 顺序有意义：example_for 按「卡片的环节名里含哪个关键字」取第一个命中的。
-    # 「模型」必须排在前面 —— 不少卡的环节是「模型 + 损失函数」这种复合写法。
-    "模型": ROOT / "modules" / "models" / "mlp.py",
-    "训练": ROOT / "modules" / "train" / "early_stopping.py",
-    "特征": ROOT / "modules" / "features" / "frequency_bucket.py",
-}
-
-
-def example_for(stage: str) -> str:
-    """按环节挑范文。找不到对应的就用训练类那份（注释最全）。"""
-    for key, path in _EXAMPLES.items():
-        if key in (stage or "") and path.exists():
-            return path.read_text(encoding="utf-8")
-    return _EXAMPLES["训练"].read_text(encoding="utf-8")
+# 按环节取范文的那张表只在 roles 里有一份，真跑（goat_run）和这里用的是同一个函数。
+from .roles import example_for  # noqa: E402,F401
 
 
 LOGS = ROOT / "logs"
