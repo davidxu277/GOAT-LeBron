@@ -25,7 +25,7 @@ from agent.llm import Ledger, SchemaViolation
 from agent import roles, schemas
 
 
-BASE_CHECK = ["未使用禁用字段 conversion", "统计量只用了训练集", "参数从配置读取"]
+BASE_CHECK = ["未使用禁用字段 long_view", "统计量只用了训练集", "参数从配置读取"]
 
 # KuaiRand-Pure 的成绩单长相 —— 用它让派生逻辑认出当前任务。
 KUAIRAND_REPORT = {"验证集": {"GAUC": 0.6363, "nDCG@5": 0.5236, "主分": 0.5800}}
@@ -76,14 +76,6 @@ def test_报错信息里列出的可选值必须是真实存在的():
     assert "primary" in msg
 
 
-def test_换成_AliCCP_成绩单时跟着换一套名字():
-    """派生的意义就在这 —— 换数据集不用回来改常量。"""
-    aliccp = {"验证集": {"点击分": 0.62, "购买分": 0.60}}
-    _validate("点击分", report=aliccp)
-    with pytest.raises(SchemaViolation, match="monitor"):
-        _validate("GAUC", report=aliccp)
-
-
 def test_指标名只有一张表():
     """roles.py 不许再私藏一份名单 —— 必须从 schemas 推。"""
     import inspect
@@ -95,5 +87,6 @@ def test_指标名只有一张表():
 def test_派生函数跟着成绩单走():
     assert set(schemas.epoch_metric_names(KUAIRAND_REPORT)) == {
         "GAUC", "nDCG@5", "primary", "loss"}
+    # 认不出成绩单（比如 AliCCP 那种旧格式）时退回当前任务那一套，不再另认一套名字
     assert set(schemas.epoch_metric_names({"验证集": {"点击分": 1, "购买分": 1}})) == {
-        "点击分", "购买分", "loss"}
+        "GAUC", "nDCG@5", "primary", "loss"}

@@ -59,7 +59,8 @@ class TargetEncoding:
 
 
     #: 没在配置里指定 target_col 时，按顺序在数据里找这几个
-    LABEL_CANDIDATES = ("label", "click")
+    #: （KuaiRand 流水线里标签列叫 label；以前还认 AliCCP 的 click，随旧任务拆了）
+    LABEL_CANDIDATES = ("label",)
 
     def fit(self, train_df: pd.DataFrame) -> None:
         """只在训练集上统计。绝不能读验证集（R2）。"""

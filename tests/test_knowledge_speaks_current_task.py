@@ -91,18 +91,14 @@ def _llm_visible_texts():
     yield CARD_FORMAT_DOC.name, CARD_FORMAT_DOC.read_text(encoding="utf-8")
 
 
-def _retired_metric_names():
-    """从 METRIC_PAIRS 派生：别的任务用、当前任务不用的指标名。"""
-    current = set(schemas.METRICS) | set(schemas.METRIC_PAIRS[0][0])
-    names = set()
-    for fields, out_names, _extra in schemas.METRIC_PAIRS[1:]:
-        names |= set(fields) | set(out_names)
-    return sorted(names - current)
+# AliCCP 的指标名。以前从 METRIC_PAIRS 里旧任务那一套派生；那一套随旧流水线
+# 拆了（留着它就是一条旧名字漏进 agent 的路），这里改成显式列出。
+RETIRED_METRICS = ("点击分", "购买分", "点击AUC", "购买AUC")
 
 
 def test_退役任务的指标名不再出现():
-    retired = _retired_metric_names()
-    assert retired, "METRIC_PAIRS 里应该还留着旧任务那一套（测试在用）"
+    retired = [m for m in RETIRED_METRICS if m not in schemas.METRICS]
+    assert retired == list(RETIRED_METRICS), "当前任务的指标名跟退役的撞了"
     hits = [
         (where, name)
         for where, text in _llm_visible_texts()

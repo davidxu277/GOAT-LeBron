@@ -20,23 +20,14 @@ from . import schemas
 PROMPTS = pathlib.Path(__file__).resolve().parent / "prompts"
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# CLAUDE.md R1：这些字段永远不许进入模型输入。
+# CLAUDE.md R1：这些字段永远不许进入模型输入 —— KuaiRand-Pure 的标签，
+# 以及同一条曝光"之后"才知道的行为结果。
 #
-# 两套任务的泄漏列都列在这里 —— 取并集是安全的：禁一个当前数据集里根本
-# 不存在的列，代价为零；漏禁一个存在的列，代价是整场实验作废。
-#
-# 2026-09-01 实测：迁到 KuaiRand 之后这里只补了 long_view，工兵的自检于是
+# 2026-09-01 实测：迁到 KuaiRand 之后这里一度只补了 long_view，工兵的自检于是
 # 一轮轮地在确认"没有用 sample_id / ctcvr"（AliCCP 的列，KuaiRand 里压根
 # 不存在），而真正危险的 play_time_ms（long_view 就是从它推出来的）
-# 一道闸门都没有。
+# 一道闸门都没有。AliCCP 那几列随旧流水线一起从这里拿掉了。
 FORBIDDEN_FIELDS = (
-    # AliCCP
-    "sample_id",
-    "common_id",
-    "click",
-    "conversion",
-    "ctcvr",
-    # KuaiRand-Pure：标签，以及同一条曝光"之后"才知道的行为结果
     "long_view",
     "play_time_ms",
     "is_click",
@@ -197,7 +188,7 @@ def strip_baseline(report: dict[str, Any]) -> dict[str, Any]:
 
 
 # 训练集与验证集的主指标名 —— 按顺序试，第一个两边都有的就用它。
-_MAIN_METRIC_KEYS = ("主分", "点击分")
+_MAIN_METRIC_KEYS = ("主分",)
 
 
 def _main_metric_pair(health_report: dict[str, Any]
@@ -221,7 +212,7 @@ def diagnose(
     health_report: dict[str, Any],
     history_brief: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    # KuaiRand 的成绩单用「主分」，AliCCP 用「点击分」。这道闸门是
+    # 训练集和验证集都比「主分」。这道闸门是
     # CLAUDE.md 写死的危险信号，不能因为换了数据集就静默失效 ——
     # 08-31 那场真跑就是这样：成绩单里连训练集都没有，闸门一次没响过。
     train_auc, val_auc = _main_metric_pair(health_report)
@@ -272,18 +263,18 @@ def diagnose(
                 and dangerous_gap > DANGEROUS_TRAIN_VAL_AUC_GAP):
             if data["no_finding"]:
                 raise SchemaViolation(
-                    f"训练与验证点击AUC差值 {dangerous_gap:.4f} 超过 "
+                    f"训练与验证主分差值 {dangerous_gap:.4f} 超过 "
                     f"{DANGEROUS_TRAIN_VAL_AUC_GAP:.2f}，触发危险信号，"
                     "不能返回 no_finding")
             danger = [f for f in data["findings"]
                       if f["symptom"] in ("在背题", "数据对不上")]
             if not danger:
                 raise SchemaViolation(
-                    f"训练与验证点击AUC差值 {dangerous_gap:.4f} 超过 "
+                    f"训练与验证主分差值 {dangerous_gap:.4f} 超过 "
                     f"{DANGEROUS_TRAIN_VAL_AUC_GAP:.2f}，必须报告「在背题」或「数据对不上」")
             if max(float(f["severity"]) for f in danger) < 0.7:
                 raise SchemaViolation(
-                    f"训练与验证点击AUC差值 {dangerous_gap:.4f} 超过 "
+                    f"训练与验证主分差值 {dangerous_gap:.4f} 超过 "
                     f"{DANGEROUS_TRAIN_VAL_AUC_GAP:.2f}，危险信号 severity 不得低于 0.7")
 
     user = (
@@ -569,13 +560,13 @@ def reflect(
 ) -> dict[str, Any]:
     """复盘一轮。
 
-    noise_floor：同配置换种子的实测抖动（agent/noise.py 测出来的）。
-    小于它的"提升"是噪声，不许当成假设成立。没测过就退回 R11 的 0.0005。
+    noise_floor：同配置换种子的实测抖动。小于它的"提升"是噪声，不许当成
+    假设成立。没测过就退回 R11 的 0.0005。
 
-    noise_bands_by_metric：每个指标各自的门槛。必须分指标 —— 点击分和购买分的
-    抖动差一个数量级（实测验证集里点击正样本 8,950 个、转化正样本只有 38 个）。
-    用一个标量管两个，真实的点击提升会被购买分的抖动淹掉判成「说不清」，
-    购买分自己抖一下又能越过门槛白拿 +0.15 信任分。
+    noise_bands_by_metric：每个指标各自的门槛。必须分指标 —— 不同指标的抖动
+    可能差一个数量级（AliCCP 时代实测过：点击正样本 8,950 个、转化正样本只有 38 个）。
+    用一个标量管所有指标，真实的提升会被抖得最厉害的那个淹掉判成「说不清」，
+    那个指标自己抖一下又能越过门槛白拿 +0.15 信任分。
     """
     floor = max(MIN_REAL_GAIN, float(noise_floor))
     metrics = schemas.metric_names(result)

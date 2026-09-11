@@ -23,7 +23,7 @@ from agent.loop import (SHELF_KEEP, CostAwareScheduler, InterventionLog, PriorLe
                         RunResult, Shelf, TimeLedger, _with_bands, effective_config,
                         run_round, run_session)
 from agent.offline import DriftingExecutor, ScriptedLLM
-from agent import loop, noise, roles, schemas
+from agent import loop, roles, schemas
 
 
 @pytest.fixture(scope="module")
@@ -126,7 +126,7 @@ def test_证据既没数字也没点名成绩单会被打回(vocab):
     data = {
         "findings": [{
             "symptom": "在背题", "severity": 0.5, "confidence": "高",
-            "evidence": "训练分明显高于验证分", "affects": ["点击AUC"],
+            "evidence": "训练分明显高于验证分", "affects": ["GAUC"],
         }],
         "no_finding": False, "reason_if_none": "",
     }
@@ -138,7 +138,7 @@ def test_证据里有数字就放行(vocab):
     data = {
         "findings": [{
             "symptom": "在背题", "severity": 0.5, "confidence": "高",
-            "evidence": "训练 0.7412 vs 验证 0.6187，差 0.1225", "affects": ["点击AUC"],
+            "evidence": "训练 0.7412 vs 验证 0.6187，差 0.1225", "affects": ["GAUC"],
         }],
         "no_finding": False, "reason_if_none": "",
     }
@@ -149,7 +149,7 @@ def test_没查出问题时findings必须为空(vocab):
     data = {
         "findings": [{
             "symptom": "在背题", "severity": 0.1, "confidence": "低",
-            "evidence": "差 0.01", "affects": ["点击AUC"],
+            "evidence": "差 0.01", "affects": ["GAUC"],
         }],
         "no_finding": True, "reason_if_none": "都正常",
     }
@@ -184,11 +184,11 @@ def test_把答案字段当特征会被拦下():
         "config_patch": "",
         "new_files": [{
             "path": "modules/features/x.py",
-            "content": "cols = ['user_id', 'conversion']",
+            "content": "cols = ['user_id', 'long_view']",
         }],
         "self_check": BASE_CHECK,
     }
-    with pytest.raises(SchemaViolation, match="禁用字段 conversion"):
+    with pytest.raises(SchemaViolation, match="禁用字段 long_view"):
         _impl_validate(data)
 
 
@@ -244,7 +244,7 @@ def _resolved(symptom="冷门视频排不上去", resolved="是", before=0.07, a
 def _reflection(verdict, resolved, gain, delta=0.1, promote=False, after=None, items=None):
     return {
         "verdict": verdict,
-        "actual": {"点击AUC": 0.0, "购买AUC": gain},
+        "actual": {"GAUC": 0.0, "nDCG@5": gain},
         "vs_expected": "",
         "symptom_resolved": items or [_resolved(resolved=resolved, after=after)],
         "card_update": {"card_id": "类目兜底", "prior_delta": delta, "note": ""},
@@ -278,7 +278,7 @@ def test_说不清时不许大改卡片可信度(vocab):
 def _proposal(card_id, gain, 难度, 倍数):
     return {
         "rank": 1, "card_id": card_id, "targets": ["冷门视频排不上去"],
-        "rationale": "", "expected": {"点击AUC": 0.0, "购买AUC": gain},
+        "rationale": "", "expected": {"GAUC": 0.0, "nDCG@5": gain},
         "cost": {"代码难度": 难度, "训练时间倍数": 倍数},
         "risk": "", "novel": not card_id, "how_to": "",
     }
@@ -293,7 +293,7 @@ def test_预期最高的方案不一定胜出(cards):
     大而贵 = _proposal("SWA权重平均", 0.008, "难", 2.0)        # 0.008*0.85/(3.0*2.0) = 0.00113
 
     sched = CostAwareScheduler()
-    assert 大而贵["expected"]["购买AUC"] > 小而准["expected"]["购买AUC"]   # 预期更高
+    assert 大而贵["expected"]["nDCG@5"] > 小而准["expected"]["nDCG@5"]   # 预期更高
     assert sched.score(大而贵, cards) < sched.score(小而准, cards)        # 性价比更低
 
     chosen, fidelity, backups = sched.pick([大而贵, 小而准], cards, "一般")
@@ -507,13 +507,13 @@ def test_早停盯的指标名写点号路径也拦得住():
 def test_早停盯真实产出的指标名放行():
     """放行哪些名字**跟着成绩单走** —— 换数据集不用回来改这份名单。
 
-    以前这里写死了「点击分/购买分/loss」，那是 AliCCP 的键名；迁到
+    以前这里写死了「GAUC/nDCG@5/loss」，那是 AliCCP 的键名；迁到
     KuaiRand 之后没人回来改，于是校验器一边打回工兵、一边在报错信息里
     推荐一个训练循环根本不产出的键。现在两套任务各测一遍。
     """
     任务 = [
         ({"验证集": {"GAUC": 0.63, "nDCG@5": 0.52}}, ("GAUC", "nDCG@5", "primary", "loss")),
-        ({"验证集": {"点击分": 0.62, "购买分": 0.60}}, ("点击分", "购买分", "loss")),
+        ({"验证集": {"GAUC": 0.62, "nDCG@5": 0.60}}, ("GAUC", "nDCG@5", "loss")),
     ]
     for report, names in 任务:
         for name in names:
@@ -749,28 +749,9 @@ def test_一整场_结果表算得出相对基线的差值(tmp_path):
 # ────────────────── 噪声带 ──────────────────
 
 
-def test_噪声带_从多次运行算出来():
-    reports = [
-        {"保真度": "小份", "验证集": {"点击分": 0.610, "购买分": 0.590},
-         "按商品出现次数分组": [{"区间": "<10次", "点击分": 0.59, "购买分": 0.55,
-                            "转化正样本数": 47}]},
-        {"保真度": "小份", "验证集": {"点击分": 0.614, "购买分": 0.596},
-         "按商品出现次数分组": [{"区间": "<10次", "点击分": 0.60, "购买分": 0.57,
-                            "转化正样本数": 45}]},
-        {"保真度": "小份", "验证集": {"点击分": 0.612, "购买分": 0.602},
-         "按商品出现次数分组": [{"区间": "<10次", "点击分": 0.58, "购买分": 0.53,
-                            "转化正样本数": 49}]},
-    ]
-    bands = noise.summarize(reports, seeds=[1, 2, 3])
-    assert bands["单指标噪声带"] > 0
-    assert bands["单指标噪声带"] == pytest.approx(bands["购买分"]["噪声带"])   # 购买分抖得更厉害
-    assert bands["分组"]["按商品出现次数分组"]["<10次"]["转化正样本数"] == 47
-    assert "噪声带" in bands["表格"]
-
-
 def test_噪声带_挂到成绩单上给医生看():
     bands = {"单指标噪声带": 0.006, "分组": {}}
-    报告 = {"验证集": {"点击分": 0.61}}
+    报告 = {"验证集": {"GAUC": 0.61}}
     带了 = _with_bands(报告, bands)
     assert 带了["噪声带"]["单指标"] == 0.006
     assert "验证集" in 带了 and "噪声带" not in 报告       # 不动原文
@@ -779,10 +760,10 @@ def test_噪声带_挂到成绩单上给医生看():
 def test_噪声带_医生看到的也是分指标的():
     """医生和复盘官必须看同一套数字 —— 只修复盘官那边，医生还在用合成的
     单一门槛，会重演"点击真提升被购买抖动淹没"那类误判，只是换个角色犯错。"""
-    bands = {"单指标噪声带": 0.09, "分指标噪声带": {"点击AUC": 0.001, "购买AUC": 0.09},
+    bands = {"单指标噪声带": 0.09, "分指标噪声带": {"GAUC": 0.001, "nDCG@5": 0.09},
             "分组": {}}
-    带了 = _with_bands({"验证集": {"点击分": 0.61}}, bands)
-    assert 带了["噪声带"]["分指标"] == {"点击AUC": 0.001, "购买AUC": 0.09}
+    带了 = _with_bands({"验证集": {"GAUC": 0.61}}, bands)
+    assert 带了["噪声带"]["分指标"] == {"GAUC": 0.001, "nDCG@5": 0.09}
 
 
 # ────────────────── 真执行器：落地补丁那一段 ──────────────────
@@ -1109,7 +1090,7 @@ def test_一整场_起步档位写错当场报错(tmp_path):
 def _prop(card_id, targets, rank=1):
     return {"rank": rank, "card_id": card_id, "targets": targets,
             "rationale": "冷门桶 0.552 比热门桶 0.638 低 0.086，" * 5,
-            "expected": {"点击AUC": 0.0, "购买AUC": 0.003},
+            "expected": {"GAUC": 0.0, "nDCG@5": 0.003},
             "cost": {"代码难度": "简单", "训练时间倍数": 1.0},
             "risk": "", "novel": not card_id, "how_to": ""}
 
@@ -1179,7 +1160,7 @@ def test_待议架_真的摆到军师面前了(tmp_path):
             # 每轮报同一个病 —— 病变了架子本来就该清空（见「病没了药也不留」）
             self._last_findings = [{
                 "symptom": "Top5排不上去", "severity": 0.8, "confidence": "高",
-                "evidence": "购买模型只用了 click=1 的样本，占比 3.4%", "affects": ["购买AUC"],
+                "evidence": "购买模型只用了 click=1 的样本，占比 3.4%", "affects": ["nDCG@5"],
             }]
             return {"findings": [dict(self._last_findings[0])],
                     "no_finding": False, "reason_if_none": ""}
@@ -1226,10 +1207,10 @@ def test_泛化落差算的是开发集减锁定集():
     from agent.loop import SessionSummary
 
     s = SessionSummary()
-    s.best_scores = {"点击AUC": 0.60, "购买AUC": 0.55}
-    s.holdout_scores = {"点击AUC": 0.56, "购买AUC": 0.55}
-    assert s.generalization_gap["点击AUC"] == pytest.approx(0.04)
-    assert s.generalization_gap["购买AUC"] == pytest.approx(0.0)
+    s.best_scores = {"GAUC": 0.60, "nDCG@5": 0.55}
+    s.holdout_scores = {"GAUC": 0.56, "nDCG@5": 0.55}
+    assert s.generalization_gap["GAUC"] == pytest.approx(0.04)
+    assert s.generalization_gap["nDCG@5"] == pytest.approx(0.0)
 
     # 没做裁决时不该编一个落差出来
     assert SessionSummary().generalization_gap == {}
@@ -1633,35 +1614,35 @@ def _配置(**train_over):
 #
 # 实测：验证集里点击正样本 8,950 个，转化正样本只有 38 个。
 # 购买 AUC 的抖动比点击大一个数量级 —— 一个转化样本换个排位，
-# 购买分就能动 1/38 ≈ 0.026，而点击分动一下要 8,950 个样本一起使劲。
+# nDCG@5就能动 1/38 ≈ 0.026，而GAUC动一下要 8,950 个样本一起使劲。
 #
 # 以前 summarize() 取 max(点击带, 购买带) 当唯一门槛，被购买带主导，
 # 于是两头都错：真实的点击提升（+0.008 这种，已实测到过）被当噪声抹掉，
-# 购买分的纯抖动（±0.05）反而越过门槛被记成"猜对了"，白送 +0.15 信任分。
+# nDCG@5的纯抖动（±0.05）反而越过门槛被记成"猜对了"，白送 +0.15 信任分。
 
 
 def test_越过噪声_点击涨了就该算数():
     """+0.008 的点击提升是真的（实测加 3 个交叉特征就有 +0.0075），
-    不该因为购买分抖得凶而被一起否掉。"""
+    不该因为nDCG@5抖得凶而被一起否掉。"""
     from agent.loop import beats_noise
 
-    assert beats_noise({"点击AUC": 0.008, "购买AUC": 0.0},
-                       {"点击AUC": 0.001, "购买AUC": 0.05}) is True
+    assert beats_noise({"GAUC": 0.008, "nDCG@5": 0.0},
+                       {"GAUC": 0.001, "nDCG@5": 0.05}) is True
 
 
-def test_越过噪声_购买分的抖动不该算数():
+def test_越过噪声_nDCG的抖动不该算数():
     """38 个正样本上下抖 0.05 是常态，不是本事。"""
     from agent.loop import beats_noise
 
-    assert beats_noise({"点击AUC": 0.0001, "购买AUC": 0.05},
-                       {"点击AUC": 0.001, "购买AUC": 0.09}) is False
+    assert beats_noise({"GAUC": 0.0001, "nDCG@5": 0.05},
+                       {"GAUC": 0.001, "nDCG@5": 0.09}) is False
 
 
 def test_越过噪声_没量过噪声就退回R11门槛():
     from agent.loop import beats_noise
 
-    assert beats_noise({"点击AUC": 0.01}, None) is True
-    assert beats_noise({"点击AUC": 0.0001}, None) is False
+    assert beats_noise({"GAUC": 0.01}, None) is True
+    assert beats_noise({"GAUC": 0.0001}, None) is False
 
 
 def test_事件流_可以改道到别处(tmp_path, monkeypatch):
@@ -1789,7 +1770,7 @@ def test_深度路径_category缺失值和未知值都落OOV():
 def _提案(card_id="类目兜底", how_to="在 features 下新开一块，206 做兜底键"):
     return {"rank": 1, "card_id": card_id, "targets": ["冷门视频排不上去"],
             "rationale": "冷门桶 0.552 比热门桶 0.638 低 0.086",
-            "expected": {"点击AUC": 0.0, "购买AUC": 0.003},
+            "expected": {"GAUC": 0.0, "nDCG@5": 0.003},
             "cost": {"代码难度": "简单", "训练时间倍数": 1.0},
             "risk": "", "novel": not card_id, "how_to": how_to}
 
@@ -1845,79 +1826,6 @@ def test_工兵_两份草图都拿得到(cards):
     assert "军师要求在当前流水线上这样落地" in 材料                  # 军师那份
     assert "K 取 20" in 材料
 
-# ── 分桶的带子：实测恒等于 0，医生却拿它当门槛 ──────────────────────
-
-
-def test_噪声带_分桶实测为0时退回理论带():
-    """保真度抽样只抽负样本，click=1 子集每个种子完全相同 —— 分桶购买分
-    实测抖动必然是 0.0000。那不是「这个桶很稳」，是「这个测法扰动不到它」。
-    照单全收的话门槛就是 0，任何分桶差距都算病。"""
-    实测为0 = {"购买分": {"均值": 0.55, "噪声带": 0.0},
-              "购买分_理论噪声带": 0.087, "转化正样本数": 41}
-    assert noise.bucket_band(实测为0) == 0.087
-
-    有实测 = {"购买分": {"均值": 0.55, "噪声带": 0.021},
-             "购买分_理论噪声带": 0.087, "转化正样本数": 41}
-    assert noise.bucket_band(有实测) == 0.021          # 实测优先于理论
-
-    缩过的 = {**实测为0, "购买分_有效噪声带": 0.012}
-    assert noise.bucket_band(缩过的) == 0.012          # 缩放后的有效带最优先
-
-
-def test_噪声带_医生拿到的分桶门槛不是0():
-    """医生判「冷门视频排不上去」「新用户不会做」用的就是这个数。
-    给他 0，等于告诉他任何差距都算病。"""
-    bands = {"单指标噪声带": 0.09, "分指标噪声带": {"点击AUC": 0.001, "购买AUC": 0.09},
-             "分组": {"按商品出现次数分组": {
-                 "<10次": {"购买分": {"均值": 0.55, "噪声带": 0.0},
-                          "购买分_理论噪声带": 0.087, "转化正样本数": 41}}}}
-    带了 = _with_bands({"验证集": {"点击分": 0.61}}, bands)
-    assert 带了["噪声带"]["分组"]["按商品出现次数分组"]["<10次"] == 0.087
-
-
-def test_噪声带_分桶带子也跟着缩放到新档位():
-    """全局带子缩窄了、桶带子还停在起步档位 = 医生手里两把刻度不一样的尺子。"""
-    bands = {
-        "保真度": "小份",
-        "样本量": {"总行数": 218_000, "点击数": 8_950, "转化数": 38},
-        "分指标噪声带": {"点击AUC": 0.001, "购买AUC": 0.09},
-        "点击分": {"均值": 0.61}, "购买分": {"均值": 0.56},
-        "分组": {"按商品出现次数分组": {
-            "<10次": {"购买分": {"均值": 0.55, "噪声带": 0.0},
-                     "购买分_理论噪声带": 0.087, "转化正样本数": 41}}},
-    }
-    新报告 = {"保真度": "全量",
-             "验证集": {"总行数": 2_180_000, "点击数": 89_500, "转化数": 467},
-             "按商品出现次数分组": [{"区间": "<10次", "转化正样本数": 502}]}
-    放大 = noise.rescale(bands, 新报告)
-
-    桶 = 放大["分组"]["按商品出现次数分组"]["<10次"]
-    assert 桶["转化正样本数"] == 502
-    # 41 → 502 个正样本，这个桶的带子必须明显收窄
-    assert 0 < noise.bucket_band(桶) < 0.087 / 2
-    # 合成的标量门槛也得跟着缩，否则「单指标」和「分指标」是两个档位的数
-    assert 放大["单指标噪声带"] == pytest.approx(max(放大["分指标噪声带"].values()))
-    assert 放大["单指标噪声带"] < bands["分指标噪声带"]["购买AUC"]
-
-
-def test_噪声带_缩不过去的桶不会悄悄变成0():
-    """新档位的成绩单里没有这个桶（比如分桶边界变了）—— 宁可留旧带子，
-    也不能退回 0，那等于把门槛拆了。"""
-    bands = {
-        "保真度": "小份",
-        "样本量": {"总行数": 218_000, "点击数": 8_950, "转化数": 38},
-        "分指标噪声带": {"点击AUC": 0.001, "购买AUC": 0.09},
-        "点击分": {"均值": 0.61}, "购买分": {"均值": 0.56},
-        "分组": {"按商品出现次数分组": {
-            "<10次": {"购买分": {"均值": 0.55, "噪声带": 0.0},
-                     "购买分_理论噪声带": 0.087, "转化正样本数": 41}}},
-    }
-    放大 = noise.rescale(bands, {"保真度": "全量",
-                               "验证集": {"总行数": 2_180_000, "点击数": 89_500,
-                                        "转化数": 467}})   # 没有分组那一节
-    assert noise.bucket_band(放大["分组"]["按商品出现次数分组"]["<10次"]) == 0.087
-
-
 # ── 尺子对不对得上这一场的档位，必须写进结果表 ────────────────────
 
 
@@ -1931,23 +1839,23 @@ def _跑一场(tmp_path, **kw):
         rounds=2, logs_dir=tmp_path, **kw)
 
 
-def test_噪声带_档位对不上会自动缩并写进结果表(tmp_path):
-    """拿小份量的带子去卡中份的结果，不会抛任何异常 —— 所以必须自己喊出来。"""
+def test_噪声带_档位对不上就不用并写进结果表(tmp_path):
+    """拿小份量的带子去卡中份的结果，不会抛任何异常 —— 所以必须自己喊出来。
+    以前按样本量缩放过去；那套缩放是照 AliCCP 双塔写的，随旧任务拆了。
+    缩不过去就不用，退回兜底门槛 —— 悄悄用一把错的尺子比没有尺子更糟。"""
     bands = {"保真度": "小份",
-             "样本量": {"总行数": 218_000, "点击数": 8_950, "转化数": 38},
-             "分指标噪声带": {"点击AUC": 0.001, "购买AUC": 0.09},
-             "单指标噪声带": 0.09,
-             "点击分": {"均值": 0.61}, "购买分": {"均值": 0.56}, "分组": {}}
+             "分指标噪声带": {"GAUC": 0.001, "nDCG@5": 0.004},
+             "单指标噪声带": 0.004}
     summary = _跑一场(tmp_path, start_fidelity="中份", noise_bands=bands)
     assert "小份" in summary.noise_note and "中份" in summary.noise_note
+    assert "兜底" in summary.noise_note
     assert "噪声带" in summary.as_table()
 
 
 def test_噪声带_档位对得上就照实说(tmp_path):
     bands = {"保真度": "小份",
-             "样本量": {"总行数": 218_000, "点击数": 8_950, "转化数": 38},
-             "分指标噪声带": {"点击AUC": 0.001, "购买AUC": 0.09},
-             "单指标噪声带": 0.09, "分组": {}}
+             "分指标噪声带": {"GAUC": 0.001, "nDCG@5": 0.004},
+             "单指标噪声带": 0.004}
     summary = _跑一场(tmp_path, start_fidelity="小份", noise_bands=bands)
     assert "与起步档位一致" in summary.noise_note
 
@@ -1956,18 +1864,18 @@ def test_噪声带_没测过要在结果表里点名(tmp_path):
     """报一个没有依据的门槛，比报「没有门槛」更危险。"""
     summary = _跑一场(tmp_path)
     assert "没测过噪声带" in summary.noise_note
-    assert "agent.cli noise" in summary.noise_note
+    assert "兜底" in summary.noise_note
 
 
-def test_噪声带_升档重测失败要留下已过期的记录(tmp_path):
-    """重测没跑起来 = 拿不到新档位的样本量 = 缩不过去。
-    之后几轮是用上一档的尺子量新档位的结果，门槛偏松，必须留痕。"""
-    # 门槛必须比假复盘官报的 actual（购买 +0.0031）小，否则它判不了「猜对了」，
+def test_噪声带_升档之后旧带子作废退回兜底(tmp_path):
+    """换档位之后，起步档位量的带子就不对了（正样本一多，抖动就小）。
+    以前按样本量缩放过去；那套缩放随 AliCCP 一起拆了。缩不过去就作废、
+    退回兜底门槛，并写进结果表 —— 不管升档那次重测跑没跑起来。"""
+    # 门槛必须比假复盘官报的 actual 小，否则它判不了「猜对了」，
     # promote 永远不会为真，这一轮压根走不到升档那一步
     bands = {"保真度": "小份",
-             "样本量": {"总行数": 218_000, "点击数": 8_950, "转化数": 38},
-             "分指标噪声带": {"点击AUC": 0.0005, "购买AUC": 0.002},
-             "单指标噪声带": 0.002, "分组": {}}
+             "分指标噪声带": {"GAUC": 0.0005, "nDCG@5": 0.002},
+             "单指标噪声带": 0.002}
     # 复盘官第 1 次就判 promote → 第 1 轮结束触发升档；让升档那次重测失败。
     # DriftingExecutor 的 run 计数：第 1 轮训练是第 1 次，升档重测是第 2 次。
     ex = DriftingExecutor(fail_rounds=(2,))
@@ -1977,7 +1885,7 @@ def test_噪声带_升档重测失败要留下已过期的记录(tmp_path):
         initial_report=ex.report("小份"),
         module_interface="", example_module="", current_config="",
         rounds=2, logs_dir=tmp_path, start_fidelity="小份", noise_bands=bands)
-    assert "仍停在" in summary.noise_note and "偏松" in summary.noise_note
+    assert "不再适用" in summary.noise_note and "兜底" in summary.noise_note
 
 
 # ── schema 必须落在结构化输出接口吃得下的那个子集里 ──────────────────
@@ -2033,13 +1941,13 @@ def _医生校验(vocab, data):
             captured["validate"] = kw["validate"]
             return data
 
-    roles.diagnose(_FakeLLM(), vocab, {"验证集": {"点击分": 0.56}})
+    roles.diagnose(_FakeLLM(), vocab, {"验证集": {"GAUC": 0.56}})
     captured["validate"](data)
 
 
 def _一条诊断(**改):
     f = {"symptom": "在背题", "severity": 0.8, "confidence": "高",
-         "evidence": "训练 0.8867 对验证 0.6135，差 0.2732", "affects": ["购买AUC"]}
+         "evidence": "训练 0.8867 对验证 0.6135，差 0.2732", "affects": ["nDCG@5"]}
     f.update(改)
     return f
 
@@ -2048,7 +1956,7 @@ def test_军师_预计提升超过上限会被打回(vocab, cards):
     """这道闸门以前写在 schema 的 minimum/maximum 里 —— 接口根本不支持数值约束，
     等于从来没生效过。报个 +0.3 会把调度器的性价比公式整个带偏。"""
     p = _提案()
-    p["expected"] = {"点击AUC": 0.3, "购买AUC": 0.0}
+    p["expected"] = {"GAUC": 0.3, "nDCG@5": 0.0}
     with pytest.raises(SchemaViolation, match="0.05"):
         _军师校验(vocab, cards, {"proposals": [p]})
 
@@ -2375,7 +2283,7 @@ def test_危险信号_训练验证差太大时医生不许说没病(vocab):
 
     # 训练 0.78 / 验证 0.56，差 0.22，远超 0.15
     roles.diagnose(_FakeLLM(), vocab,
-                   {"训练集": {"点击分": 0.78}, "验证集": {"点击分": 0.56}})
+                   {"训练集": {"主分": 0.78}, "验证集": {"主分": 0.56}})
     validate = captured["validate"]
 
     with pytest.raises(SchemaViolation, match="不能返回 no_finding"):
@@ -2384,7 +2292,7 @@ def test_危险信号_训练验证差太大时医生不许说没病(vocab):
     def _病(symptom, severity):
         return {"findings": [{"symptom": symptom, "severity": severity,
                               "confidence": "高", "evidence": "训练 0.78 验证 0.56，差 0.22",
-                              "affects": ["点击AUC"]}],
+                              "affects": ["GAUC"]}],
                 "no_finding": False, "reason_if_none": ""}
 
     with pytest.raises(SchemaViolation, match="必须报告"):
@@ -2408,7 +2316,7 @@ def test_危险信号_差距不大时不干涉(vocab):
             return {}
 
     roles.diagnose(_FakeLLM(), vocab,
-                   {"训练集": {"点击分": 0.57}, "验证集": {"点击分": 0.56}})
+                   {"训练集": {"主分": 0.57}, "验证集": {"主分": 0.56}})
     captured["validate"]({"findings": [], "no_finding": True, "reason_if_none": "都在噪声带内"})
 
 
@@ -2420,7 +2328,7 @@ def _目标编码零件(seed=0, smoothing=0):
     cfg = {"train": {"seed": seed},
            "features": {"目标编码": {
                "enabled": True, "impl": "modules/features/target_encoding.py",
-               "target_col": "click", "fields": ["101"],
+               "target_col": "label", "fields": ["video_id"],
                "smoothing": smoothing, "n_folds": 5}}}
     Op = _load_op_class_by(
         "modules/features/target_encoding.py", ("fit", "transform"), "FeatureOp")
@@ -2430,8 +2338,8 @@ def _目标编码零件(seed=0, smoothing=0):
 def _只出现一次的数据():
     pd = pytest.importorskip("pandas")
     # A 标签 1、B 标签 0，各只出现一次 —— 泄漏时编码值会**等于这一行自己的标签**
-    return pd.DataFrame({"101": ["A", "B"] + [f"x{i}" for i in range(18)],
-                         "click": [1, 0] + [i % 2 for i in range(18)]})
+    return pd.DataFrame({"video_id": ["A", "B"] + [f"x{i}" for i in range(18)],
+                         "label": [1, 0] + [i % 2 for i in range(18)]})
 
 
 def test_目标编码_训练集走折外不再把答案抄进特征():
@@ -2444,7 +2352,7 @@ def test_目标编码_训练集走折外不再把答案抄进特征():
     df = _只出现一次的数据()
     op = _目标编码零件()
     op.fit(df)
-    col = "target_enc_0_101"
+    col = "target_enc_0_video_id"
 
     泄漏 = op.transform(df.copy())[col].head(2).tolist()
     assert 泄漏 == [1.0, 0.0]                      # 编码值 == 自己的标签，这就是泄漏
@@ -2461,8 +2369,8 @@ def test_目标编码_执行器真的走了折外那条():
     df = _只出现一次的数据()
     op = _目标编码零件()
     出, _, 新列 = apply_feature_ops([("目标编码", op)], df.copy(), [])
-    assert 新列 == ["target_enc_0_101"]
-    assert 出["target_enc_0_101"].head(2).tolist() == [op.global_mean, op.global_mean]
+    assert 新列 == ["target_enc_0_video_id"]
+    assert 出["target_enc_0_video_id"].head(2).tolist() == [op.global_mean, op.global_mean]
 
 
 def test_目标编码_验证集仍用全训练集统计量():
@@ -2472,7 +2380,7 @@ def test_目标编码_验证集仍用全训练集统计量():
     op = _目标编码零件()
     op.fit(df)
     验证 = op.transform(df.copy())          # 模拟验证集走 transform
-    assert 验证["target_enc_0_101"].head(2).tolist() == [1.0, 0.0]
+    assert 验证["target_enc_0_video_id"].head(2).tolist() == [1.0, 0.0]
 
 
 def test_目标编码_折分种子从配置读():
@@ -2494,9 +2402,9 @@ def test_目标编码_目标列不再默认那个不存在的列():
     Op = _load_op_class_by(
         "modules/features/target_encoding.py", ("fit", "transform"), "FeatureOp")
     op = Op({"train": {"seed": 0},
-             "features": {"目标编码": {"fields": ["101"], "smoothing": 0, "n_folds": 5}}})
+             "features": {"目标编码": {"fields": ["video_id"], "smoothing": 0, "n_folds": 5}}})
     op.fit(_只出现一次的数据())
-    assert op.target_col == "click"        # 没配就从数据里认出来
+    assert op.target_col == "label"        # 没配就从数据里认出来
 
 
 def test_加特征零件都声明了needs():
@@ -2518,7 +2426,7 @@ def test_加特征零件都声明了needs():
 
 
 def test_成绩单_KuaiRand的分数读得出来():
-    """b35cbff 把「点击分/购买分」兼容字段删了（本来就没有购买任务）。
+    """b35cbff 把「GAUC/nDCG@5」兼容字段删了（本来就没有购买任务）。
 
     只认旧名字的话 read_scores 一路返回空 dict：收敛判定走「主分」不受
     影响，但 best_scores、锁定集分数、叙事里每轮的分数会全是空的 ——
@@ -2529,26 +2437,14 @@ def test_成绩单_KuaiRand的分数读得出来():
     assert loop.total_score(报告) == 0.5991
 
 
-def test_成绩单_AliCCP的叫法不许被顺手改掉():
-    """结果表、噪声带、复盘官的 actual 全都按「点击AUC/购买AUC」对齐。"""
-    报告 = {"验证集": {"点击分": 0.55, "购买分": 0.58}}
-    assert loop.read_scores(报告) == {"点击AUC": 0.55, "购买AUC": 0.58}
-
-
 def test_危险信号_KuaiRand上也要能触发():
     """训练/验证差 > 0.15 是 CLAUDE.md 写死的闸门。
 
-    它原来只读「点击分」，而 KuaiRand 成绩单里没有这个字段 ——
+    它原来只读「GAUC」，而 KuaiRand 成绩单里没有这个字段 ——
     08-31 那场真跑，闸门一次都没响过，等于不存在。
     """
     报告 = {"训练集": {"主分": 0.80}, "验证集": {"主分": 0.58}}
     assert roles._main_metric_pair(报告) == (0.80, 0.58)
-
-
-def test_危险信号_两边指标名对不上就不算():
-    """拿训练集的主分减验证集的点击分，差值毫无意义却会照样触发闸门。"""
-    报告 = {"训练集": {"主分": 0.80}, "验证集": {"点击分": 0.58}}
-    assert roles._main_metric_pair(报告) == (None, None)
 
 
 def test_危险信号_训练集缺席时不硬判():
@@ -2652,7 +2548,7 @@ def test_屏蔽基线_原始成绩单不动_人这边照样看得到():
 
 
 def test_指标名_复盘官被要求填的是成绩单里真有的字段(vocab):
-    """08-31 那场：成绩单里是 GAUC / nDCG@5，而 schema 还写着点击AUC/购买AUC。
+    """08-31 那场：成绩单里是 GAUC / nDCG@5，而 schema 还写着GAUC/nDCG@5。
 
     复盘官被要求填两个数据里根本不存在的指标名，填出来的数还会拿去跟噪声带
     比、拿去更新卡片信任分。这种错不报错，只会安静地污染账本。
@@ -2660,13 +2556,6 @@ def test_指标名_复盘官被要求填的是成绩单里真有的字段(vocab)
     assert schemas.metric_names(KUAIRAND成绩单) == ["GAUC", "nDCG@5"]
     schema = schemas.reflector_schema(vocab, schemas.metric_names(KUAIRAND成绩单))
     assert set(schema["properties"]["actual"]["properties"]) == {"GAUC", "nDCG@5"}
-
-
-def test_指标名_AliCCP成绩单还是老那套(vocab):
-    老报告 = {"验证集": {"点击分": 0.55, "购买分": 0.58}}
-    assert schemas.metric_names(老报告) == ["点击AUC", "购买AUC"]
-    schema = schemas.reflector_schema(vocab, schemas.metric_names(老报告))
-    assert set(schema["properties"]["actual"]["properties"]) == {"点击AUC", "购买AUC"}
 
 
 def test_指标名_医生和军师和复盘官用的是同一套(vocab):

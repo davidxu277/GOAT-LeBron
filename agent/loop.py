@@ -22,7 +22,7 @@ import yaml
 from .events import emit
 from .knowledge import Card, CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
-from . import noise, roles, schemas
+from . import roles, schemas
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -321,8 +321,8 @@ class Shelf:
         return cls(entries=json.loads(path.read_text(encoding="utf-8")))
 
 
-# 成绩单里两个 AUC 可能挂在哪 —— 真执行器写「验证集」，假成绩单写「总分」
-_SCORE_SECTIONS = ("验证集", "总分")
+# 成绩单里分数挂在哪一块（以前 AliCCP 的假成绩单还写过「总分」，随旧任务拆了）
+_SCORE_SECTIONS = ("验证集",)
 
 
 def beats_noise(gains: dict[str, float],
@@ -378,7 +378,7 @@ def total_score(report: dict[str, Any]) -> float:
     KuaiRand 成绩单明确提供 ``主分``，必须直接使用它，因为官方
     epsilon=0.002 是针对 primary，而不是 GAUC+nDCG@5。
 
-    旧 AliCCP 成绩单没有 ``主分`` 时，继续退回原来的双指标求和。
+    成绩单缺 ``主分`` 时（离线测试里的简化成绩单常这样写）退回两个分指标相加。
     """
     for section in _SCORE_SECTIONS:
         block = report.get(section)
@@ -876,22 +876,14 @@ def _with_bands(report: dict[str, Any], bands: dict[str, Any] | None) -> dict[st
     if not bands:
         return report
     return {**report, "噪声带": {
-        # 分指标：点击和购买的抖动差一个数量级（实测验证集里点击正样本
-        # 8,950 个、转化正样本只有 38 个），合成一个数会被购买带主导或压低，
-        # 两头都错。这是医生判断"这个分组差距算不算病"该看的数字。
+        # 分指标：不同指标的抖动可能差一个数量级，合成一个数会被抖得最厉害的
+        # 那个主导，两头都错。这是医生判断"这个差距算不算病"该看的数字。
+        # （以前还有逐桶的带子，那套是照 AliCCP 双塔写的，随旧任务一起拆了。）
         "分指标": bands.get("分指标噪声带"),
-        "单指标": bands.get("单指标噪声带"),   # 旧字段，判分组差距请用上面的「分指标」
-        # 逐桶取「这个桶该用的那把尺子」：缩放后的有效带 → 实测带 → 理论带。
-        # 直接读实测带是不行的 —— 保真度抽样只抽负样本，click=1 子集每个种子
-        # 完全相同，扰动不到购买塔，**每个桶实测出来都是 0.0000**。
-        # 门槛是 0 意味着任何分桶差距都算病，而「冷门商品学不动」「新用户不会做」
-        # 正是拿分桶差距判的。详见 agent/noise.py: bucket_band
-        "分组": {g: {k: noise.bucket_band(v) for k, v in rows.items()}
-                for g, rows in bands.get("分组", {}).items()},
+        "单指标": bands.get("单指标噪声带"),   # 旧字段，判差距请用上面的「分指标」
         "怎么用": ("这是同配置换随机种子跑出来的抖动幅度。"
                  "任何小于它的差距都是噪声，不许当成病；"
-                 "点击和购买要分别对自己的噪声带比，别用同一个数字判两个指标；"
-                 "分桶差距要跟对应那个桶的噪声带比，别用统一阈值。"),
+                 "每个指标要对自己的噪声带比，别用同一个数字判所有指标。"),
     }}
 
 
@@ -1081,19 +1073,23 @@ def run_session(
     # 白送信任分。
     #
     # 最坑的地方是它**不会报错**，只会让结论慢慢错，然后顺着信任分、黑名单、
-    # 升档决策一路传染。所以这里要么按样本量缩过去，要么把「没对上」写进
-    # 结果表，别让它默默溜过去。
+    # 升档决策一路传染。所以档位对不上就不用它，并把这件事写进结果表。
+    # （以前按样本量把带子解析地缩放过去；那套缩放是照 AliCCP 的点击/购买
+    # 双塔写的，随旧任务一起拆了。缩不过去就不用 —— 悄悄用一把错的尺子
+    # 比没有尺子更糟。）
+    兜底 = max(noise_floor, roles.MIN_REAL_GAIN)
     if noise_bands:
         量在, 起步 = noise_bands.get("保真度") or "?", FIDELITY_LADDER[rung]
         if 量在 != 起步:
-            noise_bands = noise.rescale(noise_bands, cur)
-            noise_floor = float(noise_bands.get("单指标噪声带") or noise_floor)
-            summary.noise_note = (f"带子量在「{量在}」档、这一场从「{起步}」起步："
-                                  f"{noise_bands.get('缩放说明', '未能缩放')}")
+            summary.noise_note = (
+                f"带子量在「{量在}」档、这一场从「{起步}」起步，档位对不上又没法缩放，"
+                f"这一场不用它，全程用 R11 的兜底门槛 {兜底:.4f}")
+            noise_bands = None
             print(f"  ↳ {summary.noise_note}")
         else:
             summary.noise_note = f"带子量在「{量在}」档，与起步档位一致"
 
+    if noise_bands:
         # 带子的指标名要跟这一场的成绩单对得上。对不上时 reflect 里
         # `noise_bands_by_metric.get(k, 0)` 会静默退回 R11 兜底门槛 ——
         # 结果不会错，但"我们量过带子了"这个印象是错的：分指标门槛
@@ -1104,16 +1100,14 @@ def run_session(
             summary.noise_note += (
                 f"；⚠️ 带子量的是 {sorted(带子指标)}，这一场的指标是 "
                 f"{sorted(本场指标)} —— 对不上，分指标门槛全部失效，"
-                f"实际用的是 R11 兜底 {max(noise_floor, roles.MIN_REAL_GAIN):.4f}。"
-                f"`agent.cli noise` 还没在这个任务上跑过")
+                f"实际用的是 R11 兜底 {兜底:.4f}。这份带子不是在这个任务上量的")
             noise_bands = {**noise_bands, "分指标噪声带": {}}
             print(f"  ⚠️ {summary.noise_note}")
-    else:
+    elif not summary.noise_note:
         summary.noise_note = (
-            f"没测过噪声带，全程用 R11 的兜底门槛 {max(noise_floor, roles.MIN_REAL_GAIN):.4f}"
+            f"没测过噪声带，全程用 R11 的兜底门槛 {兜底:.4f}"
             f"（一个拍出来的数，不是这份数据上量的）"
-            f" —— 正式跑之前应该先 `agent.cli noise --seeds 3 "
-            f"--fidelity {FIDELITY_LADDER[rung]}`，否则「算不算真提升」没有依据")
+            f" —— KuaiRand 版的量噪声工具还没写，「算不算真提升」暂时没有实测依据")
         print(f"⚠️ {summary.noise_note}\n")
 
     def escalate(round_id: int, reason: str) -> bool:
@@ -1136,34 +1130,25 @@ def run_session(
         except Exception as exc:                 # noqa: BLE001
             print(f"  ⚠️ 重测失败：{exc}，档位已升，下一轮直接用新档位")
             result = None
+        # 换档位之后，起步档位量的带子就不对了 —— 正样本一多，抖动就小，
+        # 沿用旧带子是一把过松的尺子：真实提升会被当噪声抹掉。以前按样本量
+        # 缩放过去；那套缩放随 AliCCP 一起拆了，缩不过去就作废，退回兜底门槛。
+        # 这件事不会抛异常，所以必须自己喊出来并写进结果表。
+        if noise_bands:
+            noise_bands = None
+            noise_floor = roles.MIN_REAL_GAIN
+            summary.noise_note = (f"升到{fidelity}后，起步档位量的噪声带不再适用，"
+                                  f"改用 R11 的兜底门槛 {roles.MIN_REAL_GAIN:.4f}")
+            print(f"  ↳ {summary.noise_note}")
         if result is not None and result.ok:
             cur = result.health_report
             summary.total_train_seconds += result.seconds
-            # 换档位之后噪声带必须跟着变 —— 正样本一多，抖动就小。
-            # 沿用起步档位的带子是一把过松的尺子：真实提升会被当噪声抹掉。
-            # 不重测（那要再烧 N 次训练），按样本量解析缩放。
-            if noise_bands:
-                noise_bands = noise.rescale(noise_bands, cur)
-                # 标量门槛也得跟着走：分指标缺某个指标时，复盘官退回的正是它
-                noise_floor = float(noise_bands.get("单指标噪声带") or noise_floor)
-                summary.noise_note = f"升到{fidelity}时{noise_bands.get('缩放说明', '按样本量缩放')}"
-                print(f"  ↳ 噪声带{noise_bands.get('缩放说明', '')}")
-        else:
-            if result is not None:
-                # 重测没跑起来：档位照升，但沿用旧成绩单，并记一笔恢复事件
-                print(f"  ⚠️ {fidelity}上的重测失败：{result.error}，沿用上一档的成绩单")
-                emit("recovery", text=f"升档重测失败：{result.error}")
-                summary.recoveries += 1
-                summary.total_train_seconds += result.seconds
-            if noise_bands:
-                # 拿不到新档位的样本量就缩不过去。之后几轮是在用上一档的尺子量
-                # 新档位的结果 —— 门槛偏松，真提升会被当噪声抹掉。
-                # 这件事不会抛异常，所以必须自己喊出来并写进交付材料。
-                summary.noise_note = (
-                    f"⚠️ 升到{fidelity}时重测没跑起来，噪声带仍停在"
-                    f"「{noise_bands.get('保真度') or '起步档位'}」档，"
-                    f"这之后的「算不算真提升」判定偏松")
-                emit("recovery", text=summary.noise_note)
+        elif result is not None:
+            # 重测没跑起来：档位照升，但沿用旧成绩单，并记一笔恢复事件
+            print(f"  ⚠️ {fidelity}上的重测失败：{result.error}，沿用上一档的成绩单")
+            emit("recovery", text=f"升档重测失败：{result.error}")
+            summary.recoveries += 1
+            summary.total_train_seconds += result.seconds
         best_score = total_score(cur)
         # 升档后跨档分数不可比：当前流水线就是新档位上的最佳，轮次记为刚跑完那轮
         best = {"round": round_id, "report": cur, "fidelity": fidelity}

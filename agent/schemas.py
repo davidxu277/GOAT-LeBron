@@ -45,15 +45,17 @@ RESOLVED = ["是", "部分", "否"]
 # 每一项是 (成绩单里的字段名, 对外报告用的名字, 训练循环额外产出的键)。
 # 第三项是给 TrainOp 的 monitor 用的：训练循环每轮除了两个分指标，还会吐
 # 自己的 loss，KuaiRand 这条路的 trainer 另外报一个 primary（主分）。
+#
+# 以前这里还留着 AliCCP 那一套（点击 / 购买）给测试用 —— 两套并存的结果是
+# 旧任务的名字一次次漏进 agent，随旧流水线一起拆了。
 METRIC_PAIRS = (
-    (("GAUC", "nDCG@5"), ("GAUC", "nDCG@5"), ("primary", "loss")),   # KuaiRand-Pure：当前任务
-    (("点击分", "购买分"), ("点击AUC", "购买AUC"), ("loss",)),           # AliCCP：旧任务，测试还在用
+    (("GAUC", "nDCG@5"), ("GAUC", "nDCG@5"), ("primary", "loss")),   # KuaiRand-Pure
 )
 
 # 认不出成绩单格式时的默认 —— 用当前任务那一套。
 METRICS = list(METRIC_PAIRS[0][1])
 
-_SCORE_SECTIONS = ("验证集", "总分")
+_SCORE_SECTIONS = ("验证集",)
 
 
 def _match_pair(report: dict[str, Any] | None):

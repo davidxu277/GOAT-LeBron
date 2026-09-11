@@ -26,7 +26,7 @@ from agent.llm import Ledger, SchemaViolation
 from agent import roles
 
 
-BASE_CHECK = ["未使用禁用字段 conversion", "统计量只用了训练集", "参数从配置读取"]
+BASE_CHECK = ["未使用禁用字段 long_view", "统计量只用了训练集", "参数从配置读取"]
 
 
 def _validate(data):
