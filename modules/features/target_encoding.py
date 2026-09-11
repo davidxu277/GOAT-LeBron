@@ -105,8 +105,9 @@ class TargetEncoding:
             raise RuntimeError("必须先 fit 再 transform")
 
         for i, field in enumerate(self.fields):
-            # 基础编码值（用全训练集统计量）
-            encoded = df[field].map(self.full_encoding[field]).fillna(self.global_mean)
+            # 基础编码值（用全训练集统计量）。表里的键是 str —— 查之前也转成 str，
+            # 否则整数 ID（KuaiRand）一个都查不到，整列退化成全局均值
+            encoded = df[field].astype(str).map(self.full_encoding[field]).fillna(self.global_mean)
             col_name = f"target_enc_{i}_{field}"
             df[col_name] = encoded
 
@@ -152,7 +153,7 @@ class TargetEncoding:
             fold_encoding = {
                 key: self._smooth_encode(count, sum_y) for key, (sum_y, count) in stats.items()
             }
-            encoded = df[field].map(fold_encoding).fillna(self.global_mean)
+            encoded = df[field].astype(str).map(fold_encoding).fillna(self.global_mean)
             col_name = f"target_enc_{i}_{field}"
             df[col_name] = encoded
 
