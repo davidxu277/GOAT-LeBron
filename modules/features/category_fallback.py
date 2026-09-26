@@ -49,7 +49,7 @@ class CategoryFallback:
 
     def needs(self) -> list[str]:
         """要读哪些列。不声明的话执行器只能读整张表。"""
-        return [self.field, self.category_field]
+        return [self.item_field, self.category_field]
 
     def fit(self, train_df: pd.DataFrame) -> None:
         """只在训练集上统计（R2）。"""
