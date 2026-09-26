@@ -1223,7 +1223,8 @@ def run_session(
         summary.noise_note = (
             f"没测过噪声带，全程用 R11 的兜底门槛 {兜底:.4f}"
             f"（一个拍出来的数，不是这份数据上量的）"
-            f" —— KuaiRand 版的量噪声工具还没写，「算不算真提升」暂时没有实测依据")
+            f" —— 先跑 `python -m kuairand_bridge noise` 量一次；实测小份上 GAUC 的抖动"
+            f"就有 ±0.005，这个兜底门槛会把纯噪声当成真提升")
         print(f"⚠️ {summary.noise_note}\n")
 
     def escalate(round_id: int, reason: str) -> bool:
