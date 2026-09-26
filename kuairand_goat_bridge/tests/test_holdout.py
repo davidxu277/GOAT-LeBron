@@ -125,3 +125,104 @@ def test_训练里早停看到的也只是开发集(tmp_path, monkeypatch):
         runner_mod.run_trainer(tmp_path, trainer, tmp_path / part, fidelity="全量",
                                valid_part=part, holdout_frac=0.2)
         assert int(记.read_text()) == _行数("开发"), part
+
+
+# ── 执行器：跑的时候只看开发集，最后大考 ──
+
+import json  # noqa: E402
+import tempfile  # noqa: E402
+
+from kuairand_bridge.goat_executor import KuaiRandGoatExecutor  # noqa: E402
+
+
+def 记参数的runner(data_dir, trainer_path, output_dir, seed, make_test, **kw):
+    """模块顶层（子进程要能 pickle）。记下收到什么，按模式回分数。"""
+    out = pathlib.Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    history = (kw.get("agent_patch") or {}).get("history") or []
+    (out / "收到.json").write_text(json.dumps({
+        "valid_part": kw.get("valid_part", "没传"), "holdout_frac": kw.get("holdout_frac"),
+        "make_test": make_test, "history_len": len(history)}, ensure_ascii=False),
+        encoding="utf-8")
+
+    def m(g, n):
+        return {"metrics": {"GAUC": g, "nDCG@5": n, "primary": (g + n) / 2,
+                            "rows": 10, "users": 2}}
+    g = 0.66 + 0.002 * len(history)           # 补丁越多分越高，好看出截到了哪一轮
+    r = {"validation": m(g, 0.53)}
+    if kw.get("valid_part") == "裁决":
+        r["holdout"] = m(g - 0.001, 0.52)
+    if make_test:
+        r["test"] = {"status": "checked"}
+    return r
+
+
+def _执行器(tmp, **kw):
+    return KuaiRandGoatExecutor(
+        data_dir=tmp, trainer_path=str(ROOT / "examples" / "goat_trainer.py"),
+        output_dir=str(pathlib.Path(tmp) / "rounds"), runner=记参数的runner, **kw)
+
+
+def _收到(tmp, 子目录):
+    return [json.loads(p.read_text(encoding="utf-8"))
+            for p in sorted(pathlib.Path(tmp, "rounds", 子目录).rglob("收到.json"))]
+
+
+_空 = {"new_files": [], "config_patch": ""}
+_改 = {"new_files": [], "config_patch": "model:\n  deep:\n    learning_rate: 0.01\n"}
+
+
+def test_开了锁定集_平时每一轮都只看开发集():
+    with tempfile.TemporaryDirectory() as tmp:
+        ex = _执行器(tmp, holdout_frac=0.2)
+        r = ex.run(_空, "小份")
+        assert r.ok, r.error
+        ex.smoke(_改)
+        收到 = _收到(tmp, "")
+        assert {x["valid_part"] for x in 收到} == {"开发"}
+        assert {x["holdout_frac"] for x in 收到} == {0.2}
+        assert "锁定集" not in json.dumps(r.health_report, ensure_ascii=False)
+
+
+def test_没开锁定集就什么都不传():
+    with tempfile.TemporaryDirectory() as tmp:
+        ex = _执行器(tmp)
+        ex.run(_空, "小份")
+        assert {x["valid_part"] for x in _收到(tmp, "")} == {"没传"}
+
+
+def test_大考_每个轮次各训一次_补丁历史截到那一轮():
+    with tempfile.TemporaryDirectory() as tmp:
+        ex = _执行器(tmp, holdout_frac=0.2)
+        ex.run(_空, "小份")
+        ex.run(_改, "小份")
+        ex.run(_改, "小份")
+        用了 = ex.training_attempts
+        v = ex.holdout_verdict([0, 2], "小份")
+        assert v.ok, v.error
+        assert ex.training_attempts == 用了 + 2            # 大考也是真训练，占名额
+        各轮 = v.health_report["各轮"]
+        assert [x["执行器轮次"] for x in 各轮] == [0, 2]
+        assert 各轮[1]["开发集"]["GAUC"] > 各轮[0]["开发集"]["GAUC"]   # 截对了轮次
+        assert "锁定集" in 各轮[0] and "主分" in 各轮[0]["锁定集"]
+        大考 = _收到(tmp, "holdout")
+        assert [x["history_len"] for x in 大考] == [1, 3]
+        assert {x["valid_part"] for x in 大考} == {"裁决"}
+
+
+def test_没开锁定集就不能大考():
+    with tempfile.TemporaryDirectory() as tmp:
+        ex = _执行器(tmp)
+        ex.run(_空, "小份")
+        v = ex.holdout_verdict([0], "小份")
+        assert not v.ok and "锁定集" in v.error
+
+
+def test_最终提交永远用全量验证集():
+    """跟官方基线比的就是这个数 —— 切掉两成用户就不可比了。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        ex = _执行器(tmp, holdout_frac=0.2)
+        ex.run(_空, "小份")
+        ex.make_final_submission()
+        最终 = _收到(tmp, "final")
+        assert 最终 and 最终[0]["valid_part"] == "没传" and 最终[0]["make_test"]

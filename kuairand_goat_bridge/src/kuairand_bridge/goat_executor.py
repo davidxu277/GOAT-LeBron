@@ -70,6 +70,9 @@ class KuaiRandGoatExecutor:
         runner: Callable[..., dict[str, Any]] = run_trainer,
         # 只管抽哪部分训练集，不给就跟 seed 同一个（见 runner.run_trainer）
         sample_seed: int | None = None,
+        # 验证集按用户切出多少当锁定集。0 = 不切（老行为）。
+        # 开着时每一轮只在开发集上打分，锁定集留到整场结束 holdout_verdict 才考。
+        holdout_frac: float = 0.0,
     ) -> None:
         self.data_dir = str(
             pathlib.Path(data_dir)
@@ -89,6 +92,11 @@ class KuaiRandGoatExecutor:
 
         self.seed = int(seed)
         self.sample_seed = None if sample_seed is None else int(sample_seed)
+        if not 0.0 <= float(holdout_frac) < 1.0:
+            raise ValueError(f"holdout_frac 必须在 [0, 1) 之间，收到 {holdout_frac!r}")
+        self.holdout_frac = float(holdout_frac)
+        # 平时（run / smoke）用哪块验证集。None = 不传给 runner（老行为，假 runner 也不认）
+        self._平时 = "开发" if self.holdout_frac else None
         self.max_seconds = int(max_seconds)
         self.max_iterations = int(
             max_iterations
@@ -213,6 +221,7 @@ class KuaiRandGoatExecutor:
         make_test: bool,
         agent_patch: dict[str, Any],
         fidelity: str,
+        valid_part: str | None = None,
     ) -> dict[str, Any]:
         return run_with_timeout(
             self._runner,
@@ -232,6 +241,8 @@ class KuaiRandGoatExecutor:
                 # 只在给了的时候才传：测试里的假 runner、别人写的 runner 都不认这个参数
                 **({} if self.sample_seed is None
                    else {"sample_seed": self.sample_seed}),
+                **({} if valid_part is None
+                   else {"valid_part": valid_part, "holdout_frac": self.holdout_frac}),
             },
             timeout_seconds=(
                 self.remaining_seconds
@@ -559,6 +570,7 @@ class KuaiRandGoatExecutor:
                 make_test=False,
                 agent_patch=effective_patch,
                 fidelity=fidelity,
+                valid_part=self._平时,
             )
 
             metrics = result[
@@ -686,6 +698,7 @@ class KuaiRandGoatExecutor:
                     "history": history,
                 },
                 fidelity=self.SMOKE_FIDELITY,
+                valid_part=self._平时,
             )
             return BridgeRunResult(
                 ok=True,
@@ -817,6 +830,55 @@ class KuaiRandGoatExecutor:
             )
 
         self._selected_round = round_id
+
+    # ── 锁定集大考 ────────────────────────────────────────────────
+    #
+    # Agent 跑 N 轮都在看开发集挑最好的一轮，「最好」里混着恰好迎合它的部分。
+    # 整场结束后，拿几个轮次（通常是第 0 轮和最佳轮）各训一次，开发集、锁定集
+    # 分开打分：开发集涨了多少 vs 锁定集涨了多少，差出来的就是挑出来的运气。
+    # 两个版本在同一档数据上各训一次，涨幅才可比（跑的过程中升过档的话，
+    # 最佳轮和第 0 轮当时的分数不在一个档位上）。
+    #
+    # 只在整场结束后调，结果不回流任何决策 —— 调的人（goat_run）负责这一点。
+
+    def holdout_verdict(
+        self,
+        rounds: list[int],
+        fidelity: str,
+    ) -> BridgeRunResult:
+        started = time.monotonic()
+        if not self.holdout_frac:
+            return BridgeRunResult(ok=False, fidelity=fidelity,
+                                   error="没开锁定集（holdout_frac=0），没有可考的数据")
+        各轮: list[dict[str, Any]] = []
+        try:
+            for k in rounds:
+                k = int(k)
+                if not 0 <= k < len(self._patch_history):
+                    raise ValueError(f"不存在第 {k} 轮（执行器一共 {len(self._patch_history)} 轮）")
+                self._reserve_training_attempt()        # 大考也是真训练，占名额
+                run_dir = self.output_dir / "holdout" / f"round_{k:03d}"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                result = self._call_runner(
+                    run_dir, make_test=False, fidelity=fidelity, valid_part="裁决",
+                    agent_patch={"new_files": [], "config_patch": "",
+                                 "history": self._copy_history(self._patch_history[: k + 1])})
+                各轮.append({"执行器轮次": k,
+                            "开发集": self._三个分(result["validation"]["metrics"]),
+                            "锁定集": self._三个分(result["holdout"]["metrics"])})
+        except Exception as exc:                          # noqa: BLE001
+            return BridgeRunResult(ok=False, fidelity=fidelity,
+                                   seconds=time.monotonic() - started,
+                                   error=f"{type(exc).__name__}: {exc}",
+                                   health_report={"各轮": 各轮})
+        return BridgeRunResult(
+            ok=True, fidelity=fidelity, seconds=time.monotonic() - started,
+            health_report={"保真度": fidelity, "锁定集比例": self.holdout_frac, "各轮": 各轮})
+
+    @staticmethod
+    def _三个分(metrics: dict[str, Any]) -> dict[str, float]:
+        return {"GAUC": float(metrics["GAUC"]), "nDCG@5": float(metrics["nDCG@5"]),
+                "主分": float(metrics["primary"])}
 
     def make_final_submission(
         self,
