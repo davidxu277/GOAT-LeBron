@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import pathlib
+import zlib
 from typing import Iterator, Sequence
 
 import numpy as np
@@ -95,6 +96,34 @@ class DatasetBundle:
         return DatasetBundle(
             train=SplitView("train", sampled_rows, True),
             valid=self.valid,
+            test=self.test,
+            data_dir=self.data_dir,
+        )
+
+    def with_valid_part(self, part: str, holdout_frac: float) -> "DatasetBundle":
+        """验证集按用户切成开发集 / 锁定集，取其中一块（训练集不动）。
+
+        - 全部：原样返回
+        - 开发：Agent 跑的时候只看这一块，所有决策都基于它
+        - 锁定：整场结束才考一次，从不参与任何决策
+
+        按用户切：评测是用户内排序，同一个用户拆到两边，两份考卷就不独立了。
+        用 crc32 分桶而不是 Python 的 hash()：后者对字符串每个进程加盐，
+        换个进程切出来的就是另一批用户。
+        """
+        if part == "全部":
+            return self
+        if part not in ("开发", "锁定"):
+            raise ValueError(f"part 只能是 全部 / 开发 / 锁定，收到 {part!r}")
+        if not 0.0 < float(holdout_frac) < 1.0:
+            raise ValueError(f"锁定集比例必须在 (0, 1) 之间，收到 {holdout_frac!r}")
+        门槛 = int(round(float(holdout_frac) * 10000))
+        要锁定 = part == "锁定"
+        rows = [r for r in self.valid.rows
+                if (zlib.crc32(str(r[1]).encode("utf-8")) % 10000 < 门槛) == 要锁定]
+        return DatasetBundle(
+            train=self.train,
+            valid=SplitView("valid", rows, self.valid.expose_labels),
             test=self.test,
             data_dir=self.data_dir,
         )
