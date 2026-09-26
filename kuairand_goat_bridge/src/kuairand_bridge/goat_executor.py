@@ -68,6 +68,8 @@ class KuaiRandGoatExecutor:
         trainer_config: dict[str, Any] | None = None,
         official_baseline: dict[str, Any] | None = None,
         runner: Callable[..., dict[str, Any]] = run_trainer,
+        # 只管抽哪部分训练集，不给就跟 seed 同一个（见 runner.run_trainer）
+        sample_seed: int | None = None,
     ) -> None:
         self.data_dir = str(
             pathlib.Path(data_dir)
@@ -86,6 +88,7 @@ class KuaiRandGoatExecutor:
         )
 
         self.seed = int(seed)
+        self.sample_seed = None if sample_seed is None else int(sample_seed)
         self.max_seconds = int(max_seconds)
         self.max_iterations = int(
             max_iterations
@@ -226,6 +229,9 @@ class KuaiRandGoatExecutor:
                     self.trainer_config
                 ),
                 "fidelity": str(fidelity),
+                # 只在给了的时候才传：测试里的假 runner、别人写的 runner 都不认这个参数
+                **({} if self.sample_seed is None
+                   else {"sample_seed": self.sample_seed}),
             },
             timeout_seconds=(
                 self.remaining_seconds

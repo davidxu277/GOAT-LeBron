@@ -339,6 +339,10 @@ def run_trainer(
     agent_patch: dict[str, Any] | None = None,
     trainer_config: dict[str, Any] | None = None,
     fidelity: str = "全量",
+    # 只管「抽哪部分训练集」。不给 = 跟 seed 同一个（老行为）。
+    # 量噪声带时把它钉死、只换 seed：数据子集不变，抖动只来自训练随机性 ——
+    # 一场里轮与轮之间正是这种情况（见 kuairand_bridge/noise.py）。
+    sample_seed: int | None = None,
 ) -> dict[str, Any]:
     """训练并评估一个 Trainer。"""
     work_dir = pathlib.Path(
@@ -357,7 +361,8 @@ def run_trainer(
     )
     # 最终提交必须用全量训练集；开发轮次才按 GOAT 的 fidelity 梯子缩放。
     effective_fidelity = "全量" if make_test else str(fidelity)
-    dataset = full_dataset.with_train_fidelity(effective_fidelity, int(seed))
+    dataset = full_dataset.with_train_fidelity(
+        effective_fidelity, int(seed if sample_seed is None else sample_seed))
 
     trainer = _load_trainer(
         trainer_path
