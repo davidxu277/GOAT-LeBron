@@ -465,8 +465,18 @@ class RoundLog:
     started_at: str
     run_id: str = ""       # 哪一场跑的。日志是追加的，轮次每场都从 1 重数，没这个分不清
     diagnosis: dict[str, Any] | None = None
+    # 筛卡摆给军师的那几张：{card_id, 名字, 治哪些病, 信任分}。
+    # 不记的话，「军师为什么提这个」在日志里是无源之水 —— 它当时只看得见这几张。
+    candidates: list[dict[str, Any]] = field(default_factory=list)
     proposals: dict[str, Any] | None = None
     chosen: dict[str, Any] | None = None
+    backups: list[str] = field(default_factory=list)   # 备胎的 card_id，主方案实现不了才轮到它们
+    # 工兵的每一次尝试：{候选, 第几次, 新文件, config_patch, 试跑, 报错, 失败代码}。
+    # 以前只留最后能跑的那一版，「第一次写错、拿到 traceback 后改对」这件事跑完就没了 ——
+    # 而那恰恰是试跑功能唯一的证据，也是执行成功率这个指标的原料。
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+    # 每一步花了多少：{角色, 秒, token}。哪个角色在烧钱、哪个在拖时间，靠它看。
+    steps: list[dict[str, Any]] = field(default_factory=list)
     fidelity: str = ""
     patch_summary: dict[str, Any] | None = None
     patch_files: dict[str, str] = field(default_factory=dict)   # 路径 → 完整代码，交付物要的 code diff
