@@ -286,7 +286,8 @@ def _工兵全文(log: Any) -> list[str] | None:
         return None
     out: list[str] = []
     for a in log.attempts:
-        out.append(f"### 第 {a.get('第几次')} 次 · {a.get('候选') or '自创'} · 试跑{a.get('试跑')}")
+        状态 = {"过了": "试跑过了", "挂了": "试跑挂了"}.get(a.get("试跑"), "没走试跑")
+        out.append(f"### 第 {a.get('第几次')} 次 · {a.get('候选') or '自创'} · {状态}")
         out.append("")
         out.append(f"- 新文件：{'、'.join(a.get('新文件') or []) or '（没有，只改配置）'}")
         if a.get("config_patch"):

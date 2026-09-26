@@ -1130,6 +1130,9 @@ def run_session(
     baseline: dict[str, float] | None = None,
     logs_dir: pathlib.Path | None = None,
     on_round=None,
+    # 每一步边跑边打成人话，每轮再落一份 markdown 全文（logs_dir/rounds/场次/）。
+    # 关掉 = 老行为：终端只剩 on_round 那一行摘要。
+    trace: bool = True,
 ) -> SessionSummary:
     """自主迭代 —— 一轮接一轮，中途不需要人碰键盘。
 
@@ -1142,6 +1145,10 @@ def run_session(
 
     最后挑出"验证集最佳"的那一版作为最终提交（赛题：收敛时的最佳 checkpoint）。
     """
+    # 参数名 trace 占掉了模块名，这里换个名字拿回模块（写文件那步要能被测试替掉，
+    # 所以是 _t.write_round_md，不是 from … import 进来的那个绑死的名字）
+    from . import trace as _t
+
     logs_dir = logs_dir or (ROOT / "logs")
     time_ledger = TimeLedger.load(logs_dir / "time_ledger.json")
     prior_ledger = PriorLedger.load(logs_dir / "prior_ledger.json")
@@ -1284,6 +1291,9 @@ def run_session(
         prior_ledger.apply_to(cards)     # 实验积累的靠谱度盖到卡片上
         emit("round_start", round=rid, fidelity=FIDELITY_LADDER[rung])
 
+        tracer = _t.Tracer(enabled=trace)
+        tracer.round_header(rid, FIDELITY_LADDER[rung])
+
         log = run_round(
             round_id=rid, run_id=run_id,
             llm=llm, vocab=vocab, cards=cards,
@@ -1310,6 +1320,7 @@ def run_session(
             # 分指标门槛：点击和购买的抖动差一个数量级，用一个标量管两个，
             # 稳的那个指标的真实提升会被抖得凶的那个淹掉，抖得凶的自己抖一下又白拿 +0.15
             noise_bands_by_metric=(noise_bands or {}).get("分指标噪声带"),
+            tracer=tracer,
         )
 
         # 这一轮有人插手了吗 —— 跑之前就有的那些属于准备工作，不算。
@@ -1330,6 +1341,8 @@ def run_session(
             ("快照", lambda: snapshot_round(
                 logs_dir, log, effective_config(executor, current_config), module_owner)),
             ("逐轮日志", lambda: log.dump(logs_dir / "rounds.jsonl")),
+            # 人能读的那一份。放在这个循环里就自带保险丝：写不进去只少一份记录
+            ("角色日志", lambda: trace and _t.write_round_md(logs_dir, log)),
             ("耗时账本", lambda: time_ledger.dump(logs_dir / "time_ledger.json")),
             ("靠谱度账本", lambda: prior_ledger.dump(logs_dir / "prior_ledger.json")),
             ("待议架", lambda: shelf.dump(logs_dir / "shelf.json")),
