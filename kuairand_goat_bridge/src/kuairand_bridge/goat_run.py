@@ -400,6 +400,25 @@ def _best_executor_round(
     return int(budget["执行器轮次"])
 
 
+def _noise_bands_for(logs: pathlib.Path, seed: int) -> dict[str, Any] | None:
+    """这一场用哪份噪声带。没量过 = None，run_session 会退回兜底门槛并写进结果表。
+
+    档位对不上由 run_session 自己核对（那种一定作废）。这里只管抽样种子：
+    带子量的是训练随机性，换一份同规模的数据子集幅度差不多，照用 —— 但要说出来。
+    量法见 kuairand_bridge/noise.py，命令是 `python -m kuairand_bridge noise`。
+    """
+    from .noise import load_bands
+
+    bands = load_bands(logs)
+    if bands is None:
+        return None
+    量时 = bands.get("数据抽样种子")
+    if 量时 is not None and int(量时) != int(seed):
+        print(f"  ↳ 噪声带量在抽样种子 {量时} 的数据子集上，这一场是 {seed}。"
+              "带子量的是训练随机性，同规模的子集幅度差不多，照用")
+    return bands
+
+
 def run(
     config_path: str | pathlib.Path,
     dry_run: bool = False,
@@ -595,6 +614,7 @@ def run(
             "nDCG@5": official["nDCG@5"],
         },
         logs_dir=logs,
+        noise_bands=_noise_bands_for(logs, config["seed"]),
     )
 
     best_report_path = (
