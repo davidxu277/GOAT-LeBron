@@ -343,6 +343,12 @@ def run_trainer(
     # 量噪声带时把它钉死、只换 seed：数据子集不变，抖动只来自训练随机性 ——
     # 一场里轮与轮之间正是这种情况（见 kuairand_bridge/noise.py）。
     sample_seed: int | None = None,
+    # 验证集用哪一块（见 DatasetBundle.with_valid_part）：
+    #   全部 —— 老行为
+    #   开发 —— Agent 跑的时候：训练里的早停、评分、医生的分组证据全部只看开发集
+    #   裁决 —— 整场结束的大考：照样只拿开发集训练，最后开发集、锁定集分开打分
+    valid_part: str = "全部",
+    holdout_frac: float = 0.0,
 ) -> dict[str, Any]:
     """训练并评估一个 Trainer。"""
     work_dir = pathlib.Path(
@@ -363,6 +369,17 @@ def run_trainer(
     effective_fidelity = "全量" if make_test else str(fidelity)
     dataset = full_dataset.with_train_fidelity(
         effective_fidelity, int(seed if sample_seed is None else sample_seed))
+
+    if valid_part not in ("全部", "开发", "裁决"):
+        raise ValueError(f"valid_part 只能是 全部 / 开发 / 裁决，收到 {valid_part!r}")
+    if make_test and valid_part != "全部":
+        raise ValueError("最终提交要在全量验证集上打分（跟官方基线比的就是它），不能切")
+    锁定集: DatasetBundle | None = None
+    if valid_part != "全部":
+        if valid_part == "裁决":
+            锁定集 = dataset.with_valid_part("锁定", holdout_frac)
+        # 从这里往下 dataset.valid 就是开发集：早停、评分、分组证据都碰不到锁定集
+        dataset = dataset.with_valid_part("开发", holdout_frac)
 
     trainer = _load_trainer(
         trainer_path
@@ -414,6 +431,12 @@ def run_trainer(
                 len(full_dataset.train),
             ),
         }
+
+        if 锁定集 is not None:
+            hold_scores = _predict(trainer, model, 锁定集.valid, split_name="holdout")
+            hold_path = _save_scores(work_dir / "holdout_scores.npy", hold_scores)
+            result["holdout"] = evaluate_predictions(
+                锁定集, hold_path, split="valid", output_dir=work_dir / "holdout")
 
         # 医生判 6 个病靠的是分组之后的数字，不是验证集总分。
         # 这一块失败不能拖垮整轮 —— 分数已经拿到了，证据缺就缺，明说。

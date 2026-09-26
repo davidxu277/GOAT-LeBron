@@ -65,3 +65,63 @@ def test_比例不合法就拒绝():
             _bundle().with_valid_part("开发", frac)
     with pytest.raises(ValueError):
         _bundle().with_valid_part("随便", 0.2)
+
+
+# ── runner：跑的时候只在开发集上打分，大考时两边分开打分 ──
+
+from kuairand_bridge import runner as runner_mod  # noqa: E402
+
+_最小TRAINER = '''
+import numpy as np
+
+def fit(train, valid, seed=0, config=None):
+    return {}
+
+def predict(model, split):
+    # 跟标签沾点边的分数，免得官方评测函数算出一堆 0.5
+    return np.asarray([0.3 + 0.4 * ((int(r[2]) * 7 + int(r[1])) % 5) / 5 for r in split.rows])
+'''
+
+
+def _跑(tmp_path, monkeypatch, **kw):
+    monkeypatch.setattr(runner_mod, "load_dataset", lambda *a, **k: _bundle())
+    trainer = tmp_path / "trainer.py"
+    trainer.write_text(_最小TRAINER, encoding="utf-8")
+    return runner_mod.run_trainer(tmp_path, trainer, tmp_path / "out", fidelity="全量", **kw)
+
+
+def _行数(part):
+    return len(_bundle().with_valid_part(part, 0.2).valid) if part != "全部" else len(_bundle().valid)
+
+
+def test_默认在全量验证集上打分(tmp_path, monkeypatch):
+    r = _跑(tmp_path, monkeypatch)
+    assert r["validation"]["metrics"]["rows"] == _行数("全部")
+    assert "holdout" not in r
+
+
+def test_开发模式只在开发集上打分(tmp_path, monkeypatch):
+    r = _跑(tmp_path, monkeypatch, valid_part="开发", holdout_frac=0.2)
+    assert r["validation"]["metrics"]["rows"] == _行数("开发")
+    assert "holdout" not in r                     # 锁定集的分数不许出现在平时的成绩里
+
+
+def test_大考时开发集和锁定集分开打分(tmp_path, monkeypatch):
+    r = _跑(tmp_path, monkeypatch, valid_part="裁决", holdout_frac=0.2)
+    assert r["validation"]["metrics"]["rows"] == _行数("开发")
+    assert r["holdout"]["metrics"]["rows"] == _行数("锁定")
+
+
+def test_训练里早停看到的也只是开发集(tmp_path, monkeypatch):
+    """goat_trainer 拿 valid 做早停和最佳权重回滚 —— 它看到锁定集，锁定集就不干净了。"""
+    monkeypatch.setattr(runner_mod, "load_dataset", lambda *a, **k: _bundle())
+    记 = tmp_path / "fit_saw.txt"
+    trainer = tmp_path / "trainer.py"
+    trainer.write_text(_最小TRAINER.replace(
+        "    return {}\n",
+        f"    open({str(记)!r}, 'w').write(str(len(valid.rows)))\n    return {{}}\n", 1),
+        encoding="utf-8")
+    for part in ("开发", "裁决"):
+        runner_mod.run_trainer(tmp_path, trainer, tmp_path / part, fidelity="全量",
+                               valid_part=part, holdout_frac=0.2)
+        assert int(记.read_text()) == _行数("开发"), part
