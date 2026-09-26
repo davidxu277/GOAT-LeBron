@@ -108,6 +108,10 @@ symptoms:
             GAUC参与用户占比 < 0.6。
     needs: 成绩单「用户构成」—— GAUC参与用户数 / 总用户数 / 零正例用户占比
     core: false
+    treatable: false
+    untreatable_because: 这是评测口径和数据构成，不是模型的毛病 —— 全正或全负的用户
+            GAUC 不统计、nDCG 记 0，换什么模型都改不了。报它是为了解释
+            「为什么 GAUC 和 nDCG 朝相反方向动」，别为它开药。
 
   - id: 历史行为没用上
     detect: 用户历史行为特征完全未使用，或只做了计数汇总

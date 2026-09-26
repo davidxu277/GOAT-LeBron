@@ -70,6 +70,17 @@ NO_CREDS = (
 )
 
 
+def uncovered_symptoms(vocab: SymptomVocab, cards: CardLibrary) -> list[str]:
+    """能治、却一张对症的卡都没有的病。
+
+    标了 treatable: false 的不算 —— 它们本来就不该有卡。以前那条天天报的
+    「退化用户占比高」就是这种，看久了人就不看了，真缺卡的病会混在里面被忽略。
+    """
+    return [sid for sid in vocab.ids
+            if vocab[sid].treatable
+            and not any(sid in c.treats for c in cards.cards)]
+
+
 def cmd_check(args) -> int:
     """只校验知识库是否自洽。不调用模型，零成本。"""
     vocab = SymptomVocab.load()
@@ -85,10 +96,7 @@ def cmd_check(args) -> int:
     fixtures = _load_fixtures()
     print(f"\n假成绩单：{len(fixtures)} 份 —— {', '.join(fixtures)}")
 
-    uncovered = [
-        sid for sid in vocab.ids
-        if not any(sid in c.treats for c in cards.cards)
-    ]
+    uncovered = uncovered_symptoms(vocab, cards)
     if uncovered:
         print(f"\n⚠️  还没有卡片对症的病（{len(uncovered)} 个）：")
         print("   " + "、".join(uncovered))

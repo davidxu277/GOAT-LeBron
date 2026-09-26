@@ -26,6 +26,10 @@ class Symptom:
     detect: str
     needs: str
     core: bool
+    # 有的「病」是评测口径或数据构成，换什么模型都改不了 —— 它是给医生的背景，
+    # 不是等着被治。标了 false 的，自检不再为「没有卡片对症」报警。
+    treatable: bool = True
+    untreatable_because: str = ""
 
 
 class SymptomVocab:
@@ -47,6 +51,8 @@ class SymptomVocab:
                 detect=s.get("detect", "").strip(),
                 needs=s.get("needs", "").strip(),
                 core=bool(s.get("core", False)),
+                treatable=bool(s.get("treatable", True)),
+                untreatable_because=(s.get("untreatable_because") or "").strip(),
             )
             for s in raw["symptoms"]
         ])
