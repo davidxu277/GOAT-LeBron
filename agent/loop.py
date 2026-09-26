@@ -9,6 +9,7 @@ Scheduler 和 Executor 是成员4 的地盘。这里给出可运行的参考实�
 
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
 import shutil
@@ -22,7 +23,7 @@ import yaml
 from .events import emit
 from .knowledge import Card, CardLibrary, SymptomVocab
 from .llm import LLM, SchemaViolation
-from . import roles, schemas
+from . import roles, schemas, trace
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -510,6 +511,22 @@ def _guard(log: RoundLog, what: str, fn, *args, **kwargs):
         return None
 
 
+@contextlib.contextmanager
+def _计步(log: RoundLog, llm: LLM, 角色: str):
+    """记下这一步花了多少时间、多少 token。
+
+    哪个角色在烧钱、哪个在拖时间，只有逐步记账才看得出来。
+    用 finally 而不是正常出口：角色炸了那一步也得留下账，
+    否则「工兵重试了三次烧掉 1.2 万 token」这种事在日志里查无此人。
+    """
+    t0, tok0 = time.time(), llm.ledger.total_tokens
+    try:
+        yield
+    finally:
+        log.steps.append({"角色": 角色, "秒": round(time.time() - t0, 2),
+                          "token": llm.ledger.total_tokens - tok0})
+
+
 def _crashed_reflection(chosen: dict[str, Any] | None, error: str,
                         metrics: list[str] | None = None) -> dict[str, Any]:
     """执行失败时的复盘结论 —— 纯代码合成，不花一分钱去问大模型。
@@ -584,12 +601,15 @@ def run_round(
     # 分指标噪声带 {指标名: 门槛}。给了就按指标各判各的；
     # 不给就退回上面那个标量（旧行为）。
     noise_bands_by_metric: dict[str, float] | None = None,
+    # 边跑边把每一步打成人话。不传 = 只记进 RoundLog，不打印（现有测试走这条）
+    tracer: "trace.Tracer | None" = None,
 ) -> RoundLog:
     """跑完整的一轮：诊断 → 筛卡 → 提案 → 调度 → 实现 → 执行 → 复盘。
 
     任何一个角色炸掉，本轮作废并返回，外层循环继续下一轮 —— 绝不把异常抛出去。
     """
 
+    tracer = tracer or trace.Tracer(enabled=False)   # 底下直接调，不用到处判空
     t0 = time.time()
     log = RoundLog(round_id=round_id, run_id=run_id,
                    started_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
@@ -602,12 +622,17 @@ def run_round(
             shelf.shelve(round_id, log.proposals["proposals"], log.chosen)
         log.tokens = llm.ledger.total_tokens - tokens_before
         log.seconds = time.time() - t0
+        tracer.step("本轮", {"秒": log.seconds, "token": log.tokens,
+                            "恢复": len(log.recoveries)})
         return log
 
     # ① 医生
-    log.diagnosis = _guard(log, "医生", roles.diagnose, llm, vocab, health_report, history_brief)
+    with _计步(log, llm, "医生"):
+        log.diagnosis = _guard(log, "医生", roles.diagnose,
+                               llm, vocab, health_report, history_brief)
     if log.diagnosis is None:
         return finish()
+    tracer.step("医生", log.diagnosis)
     findings = log.diagnosis["findings"]
     if log.diagnosis["no_finding"]:
         log.recoveries.append("医生未发现明显问题，本轮跳过")
@@ -618,19 +643,25 @@ def run_round(
     # 医生给的严重度直接进筛卡权重：治一个重病的卡，排在治两个轻病的卡前面
     severity = {f["symptom"]: f.get("severity", 1.0) for f in findings}
     candidates = cards.match(symptom_ids, exclude_ids=exclude_ids, limit=5, severity=severity)
+    # 军师当时只看得见这几张。不记下来，「它为什么提这个」在日志里无从解释
+    log.candidates = [{"card_id": c.id, "名字": c.name, "治哪些病": list(c.treats),
+                       "信任分": round(c.prior, 2)} for c in candidates]
+    tracer.step("筛卡", log.candidates)
 
     # ② 军师。把架子上还对症的存货一并摆给它，省得重新推导一遍
     shelved = shelf.relevant(symptom_ids, exclude_ids) if shelf is not None else None
-    log.proposals = _guard(
-        log, "军师", roles.propose,
-        llm, vocab, findings, candidates,
-        tried_before=tried_before, shelved=shelved,
-        budget_left=budget_left, pipeline_state=current_config,
-        history_brief=history_brief,
-        metrics=schemas.metric_names(health_report),
-    )
+    with _计步(log, llm, "军师"):
+        log.proposals = _guard(
+            log, "军师", roles.propose,
+            llm, vocab, findings, candidates,
+            tried_before=tried_before, shelved=shelved,
+            budget_left=budget_left, pipeline_state=current_config,
+            history_brief=history_brief,
+            metrics=schemas.metric_names(health_report),
+        )
     if log.proposals is None:
         return finish()
+    tracer.step("军师", log.proposals)
 
     # ── 调度：纯代码，不花钱 ──
     picked = _guard(log, "调度器", scheduler.pick, log.proposals["proposals"], cards, budget_left)
@@ -638,6 +669,9 @@ def run_round(
         return finish()
     chosen, fidelity, backups = picked
     log.chosen, log.fidelity = chosen, fidelity_override or fidelity
+    log.backups = [b.get("card_id") or "自创" for b in backups]
+    tracer.step("调度", {"选了": chosen.get("card_id"), "数据": log.fidelity,
+                        "备胎": log.backups})
 
     # ③ 工兵（失败可重试，再失败换备胎）
     #
@@ -658,12 +692,13 @@ def run_round(
                    if callable(example_module) else example_module)
         for 第几次 in range(1, 2 + (SMOKE_RETRIES if callable(smoke) else 0)):
             try:
-                patch = roles.implement(
-                    llm, candidate, card, module_interface, example,
-                    current_config, last_error=last_error,
-                    # 让工兵的 monitor 校验跟着本轮成绩单走，而不是写死一套名字
-                    health_report=health_report,
-                )
+                with _计步(log, llm, "工兵"):
+                    patch = roles.implement(
+                        llm, candidate, card, module_interface, example,
+                        current_config, last_error=last_error,
+                        # 让工兵的 monitor 校验跟着本轮成绩单走，而不是写死一套名字
+                        health_report=health_report,
+                    )
             except SchemaViolation as exc:
                 patch, last_error = None, str(exc)
                 log.recoveries.append(f"工兵实现失败（{name}）：{exc}")
@@ -672,14 +707,33 @@ def run_round(
                 patch, last_error = None, str(exc)
                 log.recoveries.append(f"工兵调用出错（{name}）：{exc}")
                 break
+            # 每一次尝试都留痕。以前只留最后跑通那版，「第一次写错、拿到报错后改对」
+            # 这件事跑完就没了 —— 那正是试跑功能唯一的证据，也是执行成功率的原料
+            尝试: dict[str, Any] = {
+                "候选": name, "第几次": 第几次,
+                "新文件": [f["path"] for f in patch["new_files"]],
+                "config_patch": patch.get("config_patch", ""),
+                "试跑": "没试跑", "报错": "", "失败代码": {},
+            }
+            log.attempts.append(尝试)
+            tracer.step("工兵", 尝试)
             if not callable(smoke):
                 break
-            试跑 = _guard(log, "试跑", smoke, patch)
+            with _计步(log, llm, "试跑"):
+                试跑 = _guard(log, "试跑", smoke, patch)
             if 试跑 is None or 试跑.ok:       # 试跑本身坏了不拦着 —— 正式训练会给出真结论
+                尝试["试跑"] = "过了" if 试跑 is not None else "没试跑"
+                if 试跑 is not None:
+                    尝试["秒"] = round(试跑.seconds, 1)
+                tracer.step("试跑", 尝试)
                 break
             试跑拦下 = True
             首行 = (试跑.error.splitlines() or [""])[0]
             log.recoveries.append(f"试跑没过（{name}，第 {第几次} 次）：{首行}")
+            # 没跑通那版的代码留在这一条里 —— 下一次工兵改的是什么，得有对照
+            尝试.update({"试跑": "挂了", "报错": 试跑.error,
+                        "失败代码": {f["path"]: f["content"] for f in patch["new_files"]}})
+            tracer.step("试跑", 尝试)
             patch = None
             if 试跑.unsupported:              # 流水线兑现不了，工兵改代码改不出来 → 换备胎
                 last_error = 试跑.error
@@ -704,13 +758,16 @@ def run_round(
     log.patch_files = {f["path"]: f["content"] for f in patch["new_files"]}
 
     # ── 执行：成员4 的地盘。协议说返回 ok=False，但真实现难保不抛 ──
-    result = _guard(log, "执行器", executor.run, patch, log.fidelity)
+    with _计步(log, llm, "训练"):
+        result = _guard(log, "执行器", executor.run, patch, log.fidelity)
     if result is None:
         result = RunResult(ok=False, error="执行器抛异常，详见恢复记录", fidelity=log.fidelity)
     log.run_ok = result.ok
     log.train_seconds = result.seconds
     # 指标先落盘，再去复盘 —— 复盘官挂了也不能把这一轮的成绩单弄丢
     log.metrics = result.health_report or None
+    tracer.step("训练", {"ok": result.ok, "分数": read_scores(log.metrics or {}),
+                        "秒": result.seconds, "报错": result.error})
 
     # 耗时记账：实测值覆盖拍出来的倍数，下一轮调度就用真数
     if time_ledger is not None and result.ok and log.chosen.get("card_id"):
@@ -731,12 +788,15 @@ def run_round(
         return finish()
 
     # ④ 复盘官
-    log.reflection = _guard(
-        log, "复盘官", roles.reflect,
-        llm, vocab, log.chosen, result.health_report, parent_result, card,
-        noise_floor=noise_floor,
-        noise_bands_by_metric=noise_bands_by_metric,
-    )
+    with _计步(log, llm, "复盘官"):
+        log.reflection = _guard(
+            log, "复盘官", roles.reflect,
+            llm, vocab, log.chosen, result.health_report, parent_result, card,
+            noise_floor=noise_floor,
+            noise_bands_by_metric=noise_bands_by_metric,
+        )
+    if log.reflection is not None:
+        tracer.step("复盘官", log.reflection)
     if log.reflection is not None and prior_ledger is not None and card is not None:
         prior_ledger.apply(
             card.id, log.reflection["verdict"], card.prior,
