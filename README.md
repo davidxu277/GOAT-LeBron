@@ -48,7 +48,7 @@ not a prompt — checks whether the specific number it pointed at actually moved
       ↓
   Round 0 · run as-is, obtain the first scorecard
       ↓
-  ┌─→ One round · diagnose → prescribe → implement → train → reflect
+  ┌─→ One round · diagnose → prescribe → implement → trial run → train → reflect
   │       ↓
   │   new scorecard
   │       ↓
@@ -61,7 +61,12 @@ not a prompt — checks whether the specific number it pointed at actually moved
           │        · token budget exhausted
           │        · nothing diagnosable even at full data
           ↓
-  Select the round with the best validation score → that recipe is what we submit
+  Select the round with the best development-set score
+      ↓
+  Holdout exam · retrain round 0 and the best round once each; how much did
+  each gain on users no decision ever looked at?
+      ↓
+  Retrain the best round on full data → that is what we submit
 ```
 
 Rounds are chained. Failed cards are blacklisted; already-applied cards are never
@@ -74,8 +79,10 @@ proposed again; unchosen proposals are shelved and re-offered while still releva
                 symptoms      set intersect     3 remedies     pick 1
                 + severity    (no LLM)          + reasoning    (no LLM)
                                                                    ↓
-  next round ← ④ Reflector ←   train    ←   ③ Implementer ←────────┘
-                did it hold?   scorecard      writes code
+  next round ← ④ Reflector ←   train    ←  trial run  ←  ③ Implementer
+                did it hold?   scorecard     2% data,        writes code
+                                             1 epoch            ↑
+                                             crash ─traceback───┘
 ```
 
 | | Role | What it does |
@@ -85,11 +92,19 @@ proposed again; unchosen proposals are shelved and re-offered while still releva
 | ② | **Strategist** | Picks 3 remedies; each states which symptom, expected gain, cost, failure signals |
 | | *scheduler* | *pure code — picks 1 by cost/benefit and chooses the data fidelity* |
 | ③ | **Implementer** | Turns it into code — a config change, or a new module under `modules/` |
+| | *trial run* | *pure code — 2% of the data, 1 epoch, no training attempt used; a crash sends the full traceback back to the implementer, at most 2 more tries per proposal* |
 | | *training* | *real training, real scoring, new scorecard* |
 | ④ | **Reflector** | Judges whether the hypothesis held; updates the card's trust score |
 
-**The three italic steps call no model.** The LLM is woken at four decision points
+**The four italic steps call no model.** The LLM is woken at four decision points
 only. That is what keeps the token budget small — and token usage is scored.
+
+**You can watch it think.** Every step prints one plain line to the terminal as it
+finishes: what the doctor found, what the strategist proposed, which attempt the
+implementer is on, whether the trial run passed, the scores, the reflector's verdict.
+Each round is also written out in full as markdown — every version of the
+implementer's code (the broken ones included), full tracebacks, and time and tokens
+per role. See section 8, step 3.
 
 ---
 
@@ -151,10 +166,31 @@ not be reported as a symptom, and may not be claimed as a gain. A band measured 
 data fidelity is never silently reused at another; if it does not fit, the session
 drops it and says so in the results table.
 
-**Status on this dataset:** the threshold machinery is in place, but the measurement
-tool itself was written for the previous dataset's two-tower funnel and was removed with
-it. On KuaiRand every threshold currently falls back to a fixed floor of 0.0005, and the
-session announces this at startup (limitation 2).
+**Measured on this dataset** (2026-09-26). Same config, same data subset, only the
+training seed changes, five runs; band = 2×√2×standard deviation, i.e. two runs of the
+identical config land within the band about 95% of the time:
+
+| Fidelity | GAUC | nDCG@5 | primary |
+|---|---|---|---|
+| small (15% of train) | 0.0054 | 0.0024 | 0.0037 |
+| medium (40% of train) | 0.0042 | 0.0026 | 0.0031 |
+
+(With the holdout on, every round is scored on 80% of users, which wobbles a little
+more: 0.0065 / 0.0028 / 0.0045 on the small development set.)
+
+The data subset is pinned while measuring and only the training seed varies — within a
+session the data never changes between rounds, so that is the only wobble a round-to-
+round comparison sees. Resampling the data too would count sampling noise and inflate
+the threshold.
+
+The numbers overturned three assumptions:
+
+- The guessed fallback floor of 0.0005 was **5–10× too tight**. A +0.001 GAUC "win"
+  earned a "hypothesis held" verdict and a trust bump — at the scale of a reseed.
+- The official convergence threshold ε = 0.002 is **smaller than the primary's own
+  wobble**; a single-seed comparison cannot resolve a gain that small.
+- Going from 15% to 40% of the data narrowed the band by only 20%: the wobble comes
+  mostly from initialisation, not from too little data. More seeds, not more data.
 
 The band is also **per-metric**. Two metrics whose wobble differs by an order of
 magnitude cannot share one threshold: a real gain in the stable one gets drowned by
@@ -180,6 +216,27 @@ conclusion in perfect silence.
 The baseline is still recorded end to end, in `final_summary.json`, for humans. A test
 asserts that none of those figures can appear in anything the agent reads.
 
+### 3.5 An exam it has never seen
+
+The agent looks at the same validation set for N rounds and keeps the best one. At the
+wobble measured above, picking the highest of 20 rounds finds several thousandths of
+"improvement" from luck alone.
+
+So the real run locks away 20% of validation users (`holdout_users: 0.2`). During the
+session, diagnosis, per-round scoring and early stopping inside training all see only
+the other 80% — the development set. After the session, round 0 and the best round are
+each retrained once at the same fidelity and three numbers are reported: **the gain on
+the development set, the gain on the holdout, and the difference — luck picked up by
+selection.**
+
+It compares **gains**, not scores. On real data, round 0 already differs by 0.018
+between the two sides — the holdout users are simply harder to rank. Reporting "best
+round's development score minus holdout score" would misread that 0.018 of population
+difference as overfitting to the development set.
+
+The submission is still scored on the **full** validation set, directly comparable to
+the official baseline.
+
 ---
 
 ## 4. Staying alive
@@ -190,6 +247,7 @@ Robustness is scored, so it is engineered rather than hoped for.
 |---|---|
 | A role misbehaves (bad format, network drop) | Each of the five stages has its own fuse — **the round is wasted, never the session** |
 | The implementer's code fails validation | Retry with the error fed back; then fall through to backup proposals |
+| The implementer's code crashes when run | A 1-epoch trial run on 2% of the data exposes it in seconds, **using no training attempt**; the full traceback goes back to the implementer, at most 2 more tries per proposal, then backups |
 | Training crashes or times out | The reflection is synthesised **in code** — no LLM call wasted on a run with no result |
 | The same idea keeps coming back | Tried cards blacklisted; applied cards never re-proposed |
 | Several rounds with nothing diagnosable | Escalate one data fidelity; if already at full data, declare convergence |
@@ -241,6 +299,7 @@ CLAUDE.md / AGENTS.md       12 hard rules — leakage, train-only statistics, ho
 agent/                      the agent core
   roles.py                    four roles + the validators (the anti-self-deception wall)
   loop.py                     one round, one session, three ledgers, the shelf
+  trace.py                    each step as one plain line; each round as full markdown
   knowledge.py                loads the vocabulary and cards; matches by symptom
   schemas.py                  structured-output schemas; symptom names enum-locked
   offline.py                  fake model + fake executor — rehearse a session for $0
@@ -253,8 +312,9 @@ harness/                    training path: op loading, deep loop, auto-binning o
 modules/                    replaceable parts — the ONLY place the agent may write
 kuairand_goat_bridge/       KuaiRand adapter
   official_starter_kit/       vendored, unmodified: data.py, evaluate.py, submit.py
-  src/kuairand_bridge/        dataset views, runner, evaluator, diagnostics,
-                              subprocess sandbox, session entry point
+  src/kuairand_bridge/        dataset views (incl. development/holdout split), runner,
+                              evaluator, diagnostics, subprocess sandbox, trial run,
+                              noise-band measurement (noise.py), session entry point
   examples/goat_trainer.py    research trainer — the agent CAN write modules
   examples/official_fm_trainer.py  baseline trainer — config-only, by design
   configs/kuairand_task.yaml  ← the real run; its trainer_config (features / model /
@@ -342,23 +402,21 @@ This config sets `require_baseline_reproduction: true`, so round 0 must land wit
 harness reproduces the official number, so any later gain is attributable to the agent
 rather than to a harness discrepancy.
 
-### Step 2 — noise band: **not available on this dataset yet**
+### Step 2 — measure the noise band (~1 min at small fidelity)
 
-The multi-seed measurement tool was written for the previous dataset's two-tower funnel
-and was removed with it. A KuaiRand version — bands for within-user GAUC and nDCG@5 —
-has not been written yet.
-
-Nothing needs doing here — but be aware of what it means: every "is this a real
-improvement?" threshold falls back to a fixed floor of **0.0005**, which is a guess,
-not a measurement of this data. The session announces this at startup rather than
-pretending otherwise:
-
-```
-⚠️ Noise band never measured — using the R11 fallback floor 0.0005
-   (a guessed number, not one measured on this data)
+```bash
+.venv/bin/python -m kuairand_bridge noise \
+    --config kuairand_goat_bridge/configs/kuairand_task.yaml --fidelity 小份 --seeds 5
 ```
 
-This is limitation 2, and it is the first thing we would fix with more time.
+Same config, same data subset, five training seeds. The result goes to
+`output_dir/logs/noise_bands.json` and step 3 picks it up automatically. `--fidelity`
+must match the fidelity the real run starts at — a band is only valid at the fidelity
+it was measured on; if they differ, the session does not use it and says so in the
+results table.
+
+Skipping this still works, but every "is this a real improvement?" threshold falls back
+to the guessed 0.0005 (5–10× tighter than measured), and the session warns at startup.
 
 ### Step 3 — the autonomous run (nobody touches the keyboard)
 
@@ -371,6 +429,31 @@ This is limitation 2, and it is the first thing we would fix with more time.
 > trainer only accepts six hyperparameters and rejects new files by design — pointing
 > the real run at it silently reduces the agent to a knob-turner. `tests/test_configs.py`
 > guards this.
+
+The terminal while it runs (a real round on real data; no LLM key was configured yet,
+so the four roles were scripted — only the trial runs, training and scores are real.
+The script makes the implementer read a column that does not exist on its first try):
+
+```
+第 1 轮 · 小份数据
+  医生    发现 1 个病：冷门视频排不上去（严重 0.7，把握高）
+          证据：按视频曝光次数分组：最低桶 GAUC 0.612，最高桶 0.681，差 0.069
+  筛卡    对症的卡 3 张：类目兜底(0.60) popularity_prior(0.60) 目标编码(0.60)
+  军师    提了 3 个方案，第一个「类目兜底」，预计 GAUC +0.0010 · nDCG@5 +0.0040
+  调度    选「类目兜底」，小份数据，备胎：popularity_prior、目标编码
+  工兵    第 1 次（类目兜底）：新写 modules/features/_offline_probe_hot.py，配置改 5 行
+  试跑    挂了 —— ChildRunnerError: 训练子进程失败：KeyError: '不存在的列'
+  工兵    第 2 次（类目兜底）：新写 modules/features/_offline_probe_hot.py，配置改 5 行
+  试跑    过了（5.4 秒）
+  训练    GAUC 0.6379 · nDCG@5 0.5238（11.9 秒）
+  复盘官  猜对了：GAUC +0.0008 · nDCG@5 +0.0031；冷门视频排不上去 部分
+          下一步：去看新用户那一组
+  本轮    20.4 秒 · 1.8 万 token · 出错并恢复 1 次
+```
+
+(Doctor → card match → strategist → scheduler → implementer, attempt 1 → trial run
+crashes with the traceback → implementer, attempt 2 → trial run passes → training →
+reflector → round total.)
 
 If you intervene at any point, record it — the autonomy score depends on this number
 being a real observation rather than a hard-coded zero:
@@ -389,6 +472,9 @@ Nothing to run: the session writes everything under the config's `output_dir`
 | `logs/rounds.jsonl` | **#3** per-iteration log: hypothesis, full code diff, metrics, errors and recoveries |
 | `logs/narrative.md` | **#3** human-readable: the whole session as one storyline |
 | `logs/session_summary.json` | **#4** results table: best scores, delta over baseline, tokens, wall-clock, GPU-hours, interventions |
+| `logs/rounds/<run>/round_NNN.md` | each round in full: every role's output, every version of the implementer's code (broken ones included), full trial-run tracebacks, time and tokens per step |
+| `logs/holdout_report.json` | the holdout exam: gains of round 0 → best round on the development set and on the holdout, and the difference |
+| `logs/noise_bands.json` | the noise band from step 2 (only if measured) |
 | `logs/snapshots/` | each round's config and module code — any round can be reconstructed |
 | `final/` | the validation-best round replayed on full data, with the checked test-set submission |
 | `final_summary.json` | best scores, the baseline-reproduction check, the submission, and the whole session summary |
@@ -424,13 +510,14 @@ weigh confidence, rank severity, and notice what the rules do not cover. Diagnos
 should be deterministic; the innovation is in the strategist's reasoning, not in the
 doctor's subtraction.
 
-**2. Noise bands have never been measured on this dataset.** The measurement tool was
-written for the previous dataset's two-tower funnel and was removed with it; its
-analytic fallback assumed a plain AUC, which does not transfer to within-user GAUC, and
-nDCG@5 has no closed-form standard error at all. Until a KuaiRand version exists, every
-threshold falls back to a fixed floor of 0.0005, which is a guess. The system says so
-out loud at startup rather than pretending otherwise. *Improvement:* measure the bands
-empirically with multiple seeds for within-user ranking metrics.
+**2. A single comparison can only resolve so much.** The band comes from five seeds,
+so the standard deviation itself carries roughly ±35% error — trust the order of
+magnitude, not the third decimal. More important is what it says: the primary's wobble
+(about 0.003–0.004) exceeds the official convergence threshold of 0.002, and the holdout,
+with only 20% of users, wobbles more. "This round beat the last one" can only resolve
+changes larger than the band.
+*Improvement:* run key changes and the final comparison over multiple seeds and report
+mean and interval.
 
 **3. The reflector's before/after numbers are still self-reported.** Code checks that
 they are *mutually consistent* with the reflector's own verdict — claiming a symptom
@@ -458,6 +545,11 @@ we have read few.
 **7. Bonus benchmarks not attempted.** Only the required KuaiRand-Pure. Attempting
 KuaiRand-1k and 27k in the available time would most likely have compromised both.
 
+**8. The post-competition changes have not yet been run end to end with a real LLM.**
+The trial run, per-round trace, noise band and holdout were all verified on real data,
+but with the four roles scripted. How the prompts behave under the new mechanisms is
+the next thing to find out (see `docs/待做清单.md`).
+
 ---
 
 ## 10. Team member contributions
@@ -477,6 +569,7 @@ KuaiRand-1k and 27k in the available time would most likely have compromised bot
 | File | What it covers |
 |---|---|
 | [CLAUDE.md](CLAUDE.md) | The 12 hard rules, danger signals, pre-commit checklist |
+| [docs/待做清单.md](docs/待做清单.md) | What is left to do; every finished item says how it was verified |
 | [docs/开发日志.md](docs/开发日志.md) | Development log — one line per change, newest first |
 | [docs/四个角色接口.md](docs/四个角色接口.md) | The input/output contract of the four roles |
 | [knowledge/symptoms.yaml](knowledge/symptoms.yaml) | The 12 symptoms and their detection rules |
@@ -502,6 +595,23 @@ at a time — every change below comes with a test that fails without it.
   be implemented. Continuous features are binned on train quantiles instead of being
   treated as IDs — in a synthetic check, 37% of validation rows used to fall out of
   vocabulary.
+- **You can watch it run.** One plain line per step in the terminal, one full markdown
+  file per round. The real-run path used to print nothing for a whole session, and the
+  implementer's "broke it, then fixed it" was lost as soon as the round ended.
+- **Broken code gets a trial run first.** 2% of the data, 1 epoch; a crash sends the
+  traceback back to the implementer (up to 2 more tries) without using a training
+  attempt. In one real 7-round run, 4 rounds crashed on start, each burning an attempt
+  and docking the card's trust score.
+- **Noise band measured, holdout carved out** (sections 3.3 and 3.5). The measurement
+  overturned the fallback threshold and showed where single-seed comparisons stop being
+  able to tell.
+- **Feature modules can no longer see validation answers.** Validation data used to
+  reach feature modules with the label column attached; one read of it and the score
+  was fiction until the hidden test set. The label is now removed before `transform`
+  and reattached after; a module that changes the row count is rejected.
+- **No more daily false alarm from the self-check.** "High share of degenerate users"
+  is a property of the metric, not something a model can fix; the vocabulary now says
+  so, and the self-check only warns about treatable symptoms with no card.
 - **Bugs that corrupted results without a single error.** Target encoding output a
   constant on integer IDs; real runs handed the implementer a stale config-only trainer
   as its example; and a leftover score-renaming adapter made the results table report
