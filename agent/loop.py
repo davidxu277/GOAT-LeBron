@@ -1028,6 +1028,9 @@ class SessionSummary:
     # 锁定集上的分数（R3：整场只评一次）。空 = 没配锁定集，或裁决失败。
     holdout_scores: dict[str, float] = field(default_factory=dict)
     holdout_note: str = ""      # 锁定集大考的说明（跳过时写明为什么）
+    # 挑出来的运气 = 开发集涨幅 − 锁定集涨幅（都从第 0 轮算起）。有它就不报下面那个
+    # generalization_gap：按用户切的两拨人第 0 轮就差着一截，直接相减混着人群差异。
+    holdout_luck: dict[str, float] = field(default_factory=dict)
     # 这一场用的噪声带是怎么来的：量在哪个档位、有没有缩放过、有没有过期。
     # 必须进结果表 —— 「这次算不算真提升」全靠这把尺子，尺子刻度不对不会报错，
     # 只会让结论慢慢错，读交付材料的人有权知道它当时对不对得上。
@@ -1075,8 +1078,12 @@ class SessionSummary:
         if self.holdout_scores:
             lines.append("锁定集裁决      （整场只读一次，从未参与任何决策）")
             for metric, value in self.holdout_scores.items():
-                gap = self.generalization_gap.get(metric)
-                tail = f"   泛化落差 {gap:+.4f}" if gap is not None else ""
+                if self.holdout_luck:
+                    luck = self.holdout_luck.get(metric)
+                    tail = f"   挑出来的运气 {luck:+.4f}" if luck is not None else ""
+                else:
+                    gap = self.generalization_gap.get(metric)
+                    tail = f"   泛化落差 {gap:+.4f}" if gap is not None else ""
                 lines.append(f"  {metric:<12} {value:.4f}{tail}")
         else:
             lines.append("锁定集裁决      未做（没配锁定集）—— 开发集分数可能偏乐观")

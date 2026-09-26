@@ -17,6 +17,11 @@ patience: 3
 max_wall_seconds: 21600
 token_budget: 2000000
 generate_test_after_convergence: true
+# 验证集按用户切两成当锁定集：Agent 所有决策只看另外八成（开发集），
+# 整场结束拿第 0 轮和最佳轮各训一次，比两边各涨了多少 —— 差出来的是反复看
+# 开发集挑出来的运气。最终提交仍在全量验证集上打分，跟官方基线直接可比。
+# 开着它时不能同时开 require_baseline_reproduction（见 goat_run.load_task）。
+holdout_users: 0.2
 
 trainer_config:
   # goat_trainer 的键名。想换回 official_fm_trainer 的话，

@@ -193,6 +193,18 @@ def load_task(
     config["require_baseline_reproduction"] = bool(
         config.get("require_baseline_reproduction", False)
     )
+    # 验证集按用户切多少当锁定集（见 kuairand_bridge/dataset.py with_valid_part）。
+    # 0 = 不切。开着时 Agent 所有决策只看开发集，整场结束才考一次锁定集。
+    config["holdout_users"] = float(config.get("holdout_users", 0.0) or 0.0)
+    if not 0.0 <= config["holdout_users"] <= 0.5:
+        raise ValueError(
+            f"holdout_users 要在 [0, 0.5] 之间，收到 {config['holdout_users']}"
+            "（切太多开发集就太小，每一轮的分数抖得没法用）")
+    if config["holdout_users"] and config["require_baseline_reproduction"]:
+        raise ValueError(
+            "锁定集和 require_baseline_reproduction 不能同时开：复现官方基线比的是"
+            "全量验证集上的主分，开了锁定集之后每一轮只在开发集上打分，两个数不可比。"
+            "要复现基线用 configs/fm_baseline.yaml，Agent 正式跑再开锁定集")
 
     if not (
         1
@@ -400,6 +412,36 @@ def _best_executor_round(
     return int(budget["执行器轮次"])
 
 
+def _holdout_summary(verdict: dict[str, Any]) -> dict[str, Any]:
+    """大考结果 → 开发集涨了多少、锁定集涨了多少、差出来多少。
+
+    「挑出来的运气」= 开发集涨幅 − 锁定集涨幅。开发集被反复看了几十轮，
+    最佳轮是在它上面挑出来的，所以开发集上的涨幅里混着恰好迎合它的部分；
+    锁定集从没被任何决策看过，它上面的涨幅才是能带走的那部分。
+    """
+    各轮 = verdict["各轮"]
+    起点, 终点 = 各轮[0], 各轮[-1]
+    指标 = list(起点["开发集"])
+
+    def 涨(集: str) -> dict[str, float]:
+        return {m: round(终点[集][m] - 起点[集][m], 6) for m in 指标}
+
+    开发涨, 锁定涨 = 涨("开发集"), 涨("锁定集")
+    return {
+        "保真度": verdict.get("保真度"),
+        "锁定集比例": verdict.get("锁定集比例"),
+        "比的是": f"执行器第 {起点['执行器轮次']} 轮 → 第 {终点['执行器轮次']} 轮",
+        "开发集涨了": 开发涨,
+        "锁定集涨了": 锁定涨,
+        "挑出来的运气": {m: round(开发涨[m] - 锁定涨[m], 6) for m in 指标},
+        "最佳轮锁定集分数": dict(终点["锁定集"]),
+        "各轮": 各轮,
+        "怎么读": ("开发集被反复看了几十轮，最佳轮是在它上面挑出来的；锁定集从没参与任何决策。"
+                "锁定集涨了多少才是能带走的提升，「挑出来的运气」越大，说明涨的分里迎合开发集的成分越多。"
+                "两边都只训了一次，单次抖动见 noise_bands.json —— 小于噪声带的差距别当真。"),
+    }
+
+
 def _noise_bands_for(logs: pathlib.Path, seed: int) -> dict[str, Any] | None:
     """这一场用哪份噪声带。没量过 = None，run_session 会退回兜底门槛并写进结果表。
 
@@ -506,6 +548,7 @@ def run(
         max_iterations=(
             config["max_iterations"]
         ),
+        holdout_frac=config["holdout_users"],
         trainer_config=config.get(
             "trainer_config",
             {},
@@ -579,11 +622,15 @@ def run(
         else 0
     )
 
+    # 锁定集大考要训两次（第 0 轮 + 最佳轮），名额先留出来
+    reserve_holdout = 2 if config["holdout_users"] else 0
+
     research_rounds = max(
         0,
         config["max_iterations"]
         - 1
-        - reserve_final,
+        - reserve_final
+        - reserve_holdout,
     )
 
     summary = run_session(
@@ -627,12 +674,35 @@ def run(
         )
     )
 
-    executor.select_round(
-        _best_executor_round(
-            best_report,
-            best_report_path,
-        )
+    best_executor_round = _best_executor_round(
+        best_report,
+        best_report_path,
     )
+    executor.select_round(best_executor_round)
+
+    # ── 锁定集大考：整场只在这里考一次，结果不回流任何决策 ──
+    holdout = None
+    if config["holdout_users"]:
+        verdict = executor.holdout_verdict(
+            sorted({0, best_executor_round}),
+            summary.best_fidelity or initial_fidelity,
+        )
+        if verdict.ok:
+            holdout = _holdout_summary(verdict.health_report)
+            summary.holdout_scores = {
+                k: v for k, v in holdout["最佳轮锁定集分数"].items() if k != "主分"}
+            运气 = holdout["挑出来的运气"]
+            summary.holdout_luck = {k: v for k, v in 运气.items() if k != "主分"}
+            summary.holdout_note = (
+                f"锁定集 {config['holdout_users']:.0%} 用户，{holdout['比的是']}："
+                + "；".join(f"{m} 开发集 {holdout['开发集涨了'][m]:+.4f} / "
+                           f"锁定集 {holdout['锁定集涨了'][m]:+.4f} / 运气 {运气[m]:+.4f}"
+                           for m in 运气))
+            (logs / "holdout_report.json").write_text(
+                json.dumps(holdout, ensure_ascii=False, indent=1), encoding="utf-8")
+        else:
+            summary.holdout_note = f"锁定集大考没考成：{verdict.error}"
+        summary.dump(logs / "session_summary.json")
 
     final = None
 
@@ -701,6 +771,7 @@ def run(
         "goat_session_summary": (
             summary_data
         ),
+        "holdout": holdout,
     }
 
     summary_path = (

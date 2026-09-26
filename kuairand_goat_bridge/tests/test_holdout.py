@@ -226,3 +226,59 @@ def test_最终提交永远用全量验证集():
         ex.make_final_submission()
         最终 = _收到(tmp, "final")
         assert 最终 and 最终[0]["valid_part"] == "没传" and 最终[0]["make_test"]
+
+
+# ── goat_run：任务配置开关 + 大考结果怎么读 ──
+
+import yaml  # noqa: E402
+
+from kuairand_bridge import goat_run  # noqa: E402
+
+
+def _任务(tmp_path, **改):
+    sys.path.insert(0, str(ROOT / "tests"))
+    from test_goat_run import _valid_task_config
+    cfg = {**_valid_task_config(str(tmp_path)), **改}
+    p = tmp_path / "task.yaml"
+    p.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return p
+
+
+def test_任务配置默认不开锁定集(tmp_path):
+    assert goat_run.load_task(_任务(tmp_path))["holdout_users"] == 0.0
+
+
+def test_锁定集和官方基线复现不能同时开(tmp_path):
+    """复现官方基线要全量验证集上的分数，切掉两成用户就比不了 —— 说清楚，别偷偷凑合。"""
+    with pytest.raises(ValueError, match="锁定集"):
+        goat_run.load_task(_任务(tmp_path, holdout_users=0.2,
+                                 require_baseline_reproduction=True))
+
+
+def test_锁定集比例不合法就拒绝(tmp_path):
+    with pytest.raises(ValueError, match="holdout_users"):
+        goat_run.load_task(_任务(tmp_path, holdout_users=0.9))
+
+
+def _分(g, n):
+    return {"GAUC": g, "nDCG@5": n, "主分": (g + n) / 2}
+
+
+def test_大考结果_算出两边各涨多少和差值():
+    verdict = {"保真度": "中份", "锁定集比例": 0.2, "各轮": [
+        {"执行器轮次": 0, "开发集": _分(0.650, 0.530), "锁定集": _分(0.640, 0.520)},
+        {"执行器轮次": 7, "开发集": _分(0.660, 0.536), "锁定集": _分(0.644, 0.521)},
+    ]}
+    s = goat_run._holdout_summary(verdict)
+    assert s["开发集涨了"]["GAUC"] == pytest.approx(0.010)
+    assert s["锁定集涨了"]["GAUC"] == pytest.approx(0.004)
+    assert s["挑出来的运气"]["GAUC"] == pytest.approx(0.006)
+    assert s["最佳轮锁定集分数"] == _分(0.644, 0.521)
+    assert "怎么读" in s
+
+
+def test_最佳轮就是第0轮时_两边都没涨():
+    verdict = {"保真度": "小份", "锁定集比例": 0.2, "各轮": [
+        {"执行器轮次": 0, "开发集": _分(0.65, 0.53), "锁定集": _分(0.64, 0.52)}]}
+    s = goat_run._holdout_summary(verdict)
+    assert s["开发集涨了"]["GAUC"] == 0 and s["锁定集涨了"]["GAUC"] == 0
