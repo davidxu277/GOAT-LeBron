@@ -123,3 +123,22 @@ def test_命令行有noise子命令():
     with pytest.raises(SystemExit) as 停:
         cli.main(["noise", "--help"])
     assert 停.value.code == 0          # 不认识的子命令也会 SystemExit，只是返回码是 2
+
+
+def 记验证集用哪块(data_dir, trainer_path, output_dir, seed, make_test, **kw):
+    out = pathlib.Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "valid_part.txt").write_text(str(kw.get("valid_part")), encoding="utf-8")
+    return 按种子出分(data_dir, trainer_path, output_dir, seed, make_test, **kw)
+
+
+def test_开了锁定集时噪声也在开发集上量():
+    """一场里每一轮在开发集上打分，带子就得在开发集上量 —— 人少了抖动会大，尺子要对得上。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        b = noise.measure_noise(
+            data_dir=tmp, trainer_path=TRAINER, output_dir=pathlib.Path(tmp) / "noise",
+            fidelity="小份", train_seeds=[1, 2, 3], sample_seed=0,
+            trainer_config={}, runner=记验证集用哪块, holdout_frac=0.2)
+        assert {p.read_text(encoding="utf-8")
+                for p in pathlib.Path(tmp, "noise").rglob("valid_part.txt")} == {"开发"}
+        assert b["锁定集比例"] == 0.2

@@ -58,7 +58,8 @@ def main(argv=None):
             output_dir=output / "noise" / a.fidelity, fidelity=a.fidelity,
             train_seeds=list(range(1, a.seeds + 1)),
             # 数据子集跟 goat-run 那一场一模一样，只有训练种子在变
-            sample_seed=task["seed"], trainer_config=task.get("trainer_config") or {})
+            sample_seed=task["seed"], trainer_config=task.get("trainer_config") or {},
+            holdout_frac=task["holdout_users"])
         path = save_bands(output / "logs", bands)
         print(json.dumps({k: bands[k] for k in ("保真度", "分指标噪声带", "单指标噪声带", "统计")},
                          ensure_ascii=False, indent=2))

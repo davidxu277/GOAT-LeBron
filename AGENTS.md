@@ -94,7 +94,7 @@ is_forward   is_hate        is_profile_enter   profile_stay_time   comment_stay_
 一律记为"说不清"，不予采纳、不予升级到更大数据。
 （这是**没量过噪声带时**的兜底，是拍出来的。2026-09-26 实测：同配置同数据、只换训练种子，
 小份上 GAUC / nDCG@5 / 主分 的噪声带是 0.0054 / 0.0024 / 0.0037，中份 0.0042 / 0.0026 / 0.0031 ——
-比 0.0005 宽 5~10 倍。真跑前先 `python -m kuairand_bridge noise` 量一次，`goat-run` 会自动用量出来的带子。）
+比 0.0005 宽 5~10 倍（开了锁定集后每轮在八成用户上打分，小份开发集是 0.0065 / 0.0028 / 0.0045）。真跑前先 `python -m kuairand_bridge noise` 量一次，`goat-run` 会自动用量出来的带子。）
 
 ### R12 · 关键改动要跑 3 个种子
 

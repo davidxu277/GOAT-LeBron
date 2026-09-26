@@ -81,6 +81,8 @@ def measure_noise(
     sample_seed: int,
     trainer_config: dict[str, Any],
     runner: Callable[..., dict[str, Any]] = run_trainer,
+    # 跟那一场的任务配置一致：开了锁定集，每一轮在开发集上打分，带子也得在开发集上量
+    holdout_frac: float = 0.0,
 ) -> dict[str, Any]:
     """每个训练种子各跑一次**原样配置**（不带任何改动），算带子。
 
@@ -96,7 +98,7 @@ def measure_noise(
         ex = KuaiRandGoatExecutor(
             data_dir=data_dir, trainer_path=trainer_path,
             output_dir=str(output_dir / f"seed_{seed}"),
-            seed=seed, sample_seed=sample_seed,
+            seed=seed, sample_seed=sample_seed, holdout_frac=holdout_frac,
             trainer_config=dict(trainer_config), runner=runner)
         r = ex.run({"new_files": [], "config_patch": ""}, fidelity)
         if not r.ok:
@@ -108,6 +110,7 @@ def measure_noise(
     return {
         "保真度": fidelity,
         "数据抽样种子": int(sample_seed),
+        "锁定集比例": float(holdout_frac),
         **bands,
         "逐次分数": 逐次,
         "怎么算的": ("同一份配置、同一份数据子集，只换训练种子各跑一次；"
