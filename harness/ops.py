@@ -75,6 +75,35 @@ def load_feature_ops(config: dict[str, Any]) -> list[tuple[str, Any]]:
     return ops
 
 
+# 零件处理训练集以外的数据时要摘掉的列。KuaiRand 流水线里标签列叫 label。
+LABEL_COLUMNS = ("label",)
+
+
+def transform_blind(name: str, op: Any, df: pd.DataFrame,
+                    hide: tuple[str, ...] = LABEL_COLUMNS) -> pd.DataFrame:
+    """摘掉标签再交给零件 transform，做完原样挂回去。
+
+    以前验证集带着 label 原样交给零件，预测时也一样。工兵写的零件只要读一下
+    df["label"]（哪怕是无心的，比如按 label 分组算个均值），验证集分数就是假的 ——
+    日志上看不出来，到隐藏测试集（label 全是 None）才现原形。
+    挂回去是因为早停和打分还要用验证集的标签 —— 那是训练循环的事，不是零件的事。
+    """
+    藏 = [c for c in hide if c in df.columns]
+    out = op.transform(df.drop(columns=藏) if 藏 else df)
+    if not isinstance(out, pd.DataFrame):
+        raise TypeError(f"零件「{name}」的 transform 没有返回 DataFrame")
+    if not 藏:
+        return out
+    if len(out) != len(df):
+        raise ValueError(
+            f"零件「{name}」的 transform 改了行数（{len(df)} → {len(out)}）。"
+            "加特征只许加列、不许增删行，否则标签挂回去就对不上号了")
+    out = out.copy()
+    for c in 藏:
+        out[c] = df[c].to_numpy()
+    return out
+
+
 def apply_feature_ops(ops: list[tuple[str, Any]], train: pd.DataFrame,
                       others: list[pd.DataFrame]
                       ) -> tuple[pd.DataFrame, list[pd.DataFrame], list[str]]:
@@ -96,7 +125,8 @@ def apply_feature_ops(ops: list[tuple[str, Any]], train: pd.DataFrame,
         # 零件提供了 transform_train 就说明它知道这件事，让它自己处理。
         训练变换 = getattr(op, "transform_train", None)
         train = 训练变换(train) if callable(训练变换) else op.transform(train)
-        others = [op.transform(df) for df in others]
+        # 其他数据（验证集等）交给零件之前先摘掉标签 —— 只有训练集配看标签
+        others = [transform_blind(name, op, df) for df in others]
         if not isinstance(train, pd.DataFrame):
             raise TypeError(f"零件「{name}」的 transform 没有返回 DataFrame")
     return train, others, [c for c in train.columns if c not in before]

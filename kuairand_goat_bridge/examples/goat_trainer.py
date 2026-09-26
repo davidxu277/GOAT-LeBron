@@ -54,6 +54,7 @@ import evaluate as official_evaluate                           # noqa: E402
 from harness.deep import train_deep, predict_deep              # noqa: E402
 from harness.ops import (                                      # noqa: E402
     apply_feature_ops,
+    transform_blind,
     load_feature_ops,
 )
 
@@ -224,8 +225,8 @@ def fit(train, valid, seed: int = 0, config: dict[str, Any] | None = None):
 def predict(model_bundle, split) -> np.ndarray:
     """对任意 split 出预测 —— 走跟训练**同一条**加工路径。"""
     df, _ = rows_to_frame(split.rows, model_bundle["duration_edges"])
-    for _, op in model_bundle["ops"]:
-        df = op.transform(df)
+    for name, op in model_bundle["ops"]:
+        df = transform_blind(name, op, df)       # 预测时零件也看不见标签
     ctr, _ = predict_deep(model_bundle["op"], model_bundle["model"],
                           model_bundle["vocab"], df)
     scores = np.asarray(ctr, dtype=float).reshape(-1)
